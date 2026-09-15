@@ -57,7 +57,7 @@
   </gazebo>
   <gazebo reference="cad_left_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
   <gazebo reference="cad_right_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
-  <xacro:if value="${jump_model}">
+  <xacro:if value="${jump_model or measure_contacts}">
     <gazebo>
       <plugin filename="$(find tap_sim)/../../lib/libtap_contact_snapshot.so" name="tap_sim::ContactSnapshot"/>
     </gazebo>

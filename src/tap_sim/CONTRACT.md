@@ -59,6 +59,14 @@ as a Bool, reject stale/invalid feedback, and use the native joint convention.
 - `jump_model:=true` selects `jump.sdf`, wheel contact sensors, and the
   `tap_sim/BoundedGazeboSystem` effort-producing hardware plugin. Defaults above
   remain unchanged. Masses remain approximate and unchanged.
+- `measure_contacts:=true` is a separate, independent opt-in (not implied by
+  and not implying `jump_model`) that enables the same wheel contact sensors
+  on whatever world is selected via `terrain:=`, without swapping in
+  `BoundedGazeboSystem` or lower actuator limits. Only `ledge_test.sdf`
+  (`terrain:=ledge`) loads the required `gz-sim-contact-system` world plugin
+  so far; `empty.sdf`/`rough_training.sdf` do not yet. Purely observational -
+  no control logic in `BalanceControllerNode` reads this differently from the
+  `jump_model` case (see next point's caveat, which applies here too).
 - `/left_wheel_contacts` and `/right_wheel_contacts` bridge Gazebo Contacts to
   `ros_gz_interfaces/msg/Contacts`. Consumers must check fresh timestamps and
   wheel/ground collision pairs, not merely a nonempty array. The opt-in
@@ -66,6 +74,18 @@ as a Bool, reject stale/invalid feedback, and use the native joint convention.
   physics and stamps every snapshot, including empty samples. Missing components
   produce no message, not false airborne evidence. Stock nonempty-only sensors
   publish separately on `/left_wheel_contacts_raw` and `/right_wheel_contacts_raw`.
+  **As of 2026-09-15, `sim.launch.py` bridges `_raw` directly to these two
+  names for both `jump_model:=true` and `measure_contacts:=true`**
+  (`libtap_contact_snapshot.so` was observed to intermittently fail to load
+  in this environment - a `libsystemd` version mismatch unrelated to its own
+  code - so the bridge now bypasses it rather than depending on it). This
+  means the "empty sample confirms airborne" guarantee above does **not**
+  currently hold in practice: consumers only ever see nonempty (real-contact)
+  messages, and must treat a stale/absent stream as "unknown," not as
+  confirmed airborne. `BalanceControllerNode`'s own freshness/timeout check
+  already treats stale as untrusted rather than as airborne proof, so this is
+  consistent with existing consumer behavior, but any new consumer must not
+  assume the stronger guarantee this paragraph originally documented.
 - `/actuator_enable` is a continuously published `std_msgs/msg/Bool` reflecting
   controller `motors.enable_motors`, not wheel velocity. Initially torque is off.
   A false sample arms the gate; subsequent true samples permit active commands.

@@ -15,6 +15,7 @@ def generate_launch_description():
     description = FindPackageShare('tap_robot_description')
     gui = LaunchConfiguration('gui')
     jump_model = LaunchConfiguration('jump_model')
+    measure_contacts = LaunchConfiguration('measure_contacts')
     terrain = LaunchConfiguration('terrain')
     # jump_model takes priority: rough_training.sdf/ledge_test.sdf have no jump
     # contact sensors/plugin.
@@ -34,6 +35,7 @@ def generate_launch_description():
     state = Node(package='robot_state_publisher', executable='robot_state_publisher',
                  parameters=[{'use_sim_time': True, 'robot_description': ParameterValue(
                      Command(['xacro ', xacro, ' jump_model:=', jump_model,
+                              ' measure_contacts:=', measure_contacts,
                               ' jump_leg_speed:=', LaunchConfiguration('jump_leg_speed'),
                               ' jump_leg_velocity_damping:=', LaunchConfiguration('jump_leg_velocity_damping')]), value_type=str)}], output='screen')
     spawn = Node(package='ros_gz_sim', executable='create', output='screen',
@@ -61,6 +63,14 @@ def generate_launch_description():
         DeclareLaunchArgument('gui', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('auto_enable', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('jump_model', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('measure_contacts', default_value='false', choices=['true', 'false'],
+                              description='Opt-in wheel contact sensors (observational telemetry '
+                                          'only, see BalanceControllerNode status contact_l=/contact_r= '
+                                          '- does not feed floor_contact or any control logic), '
+                                          'decoupled from jump_model so it does not also swap in '
+                                          'BoundedGazeboSystem/lower actuator limits. Requires world '
+                                          'support for the gz-sim-contact-system plugin; only '
+                                          'ledge_test.sdf (terrain:=ledge) has it so far.'),
         DeclareLaunchArgument('terrain', default_value='none', choices=['none', 'rough', 'ledge'],
                               description='rough selects worlds/rough_training.sdf (heightfield + '
                                           'step arenas ported from rl-basic); ledge selects '
@@ -102,9 +112,22 @@ def generate_launch_description():
                         '/world/empty/dynamic_pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V'],
              remappings=[('/model/tap_robot/pose', '/tap_robot/pose')],
              output='screen'),
-        Node(package='ros_gz_bridge', executable='parameter_bridge', condition=IfCondition(jump_model),
-             arguments=['/left_wheel_contacts@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts',
-                        '/right_wheel_contacts@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts'],
+        # Bridges the sensor's own _raw gz topic (populated directly by
+        # gz-sim-contact-system) rather than the tap_sim::ContactSnapshot
+        # re-publish (libtap_contact_snapshot.so has been observed to
+        # intermittently fail to load in this environment - "undefined
+        # symbol: removexattrat" from a libsystemd version mismatch,
+        # unrelated to this plugin's own code). Remapped to the plain
+        # left_wheel_contacts/right_wheel_contacts names so
+        # BalanceControllerNode's existing subscription (jump.left_contacts_topic
+        # default) needs no change.
+        Node(package='ros_gz_bridge', executable='parameter_bridge',
+             condition=IfCondition(PythonExpression([
+                 "'", jump_model, "' == 'true' or '", measure_contacts, "' == 'true'"])),
+             arguments=['/left_wheel_contacts_raw@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts',
+                        '/right_wheel_contacts_raw@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts'],
+             remappings=[('/left_wheel_contacts_raw', '/left_wheel_contacts'),
+                         ('/right_wheel_contacts_raw', '/right_wheel_contacts')],
              output='screen'),
         spawn,
     ])

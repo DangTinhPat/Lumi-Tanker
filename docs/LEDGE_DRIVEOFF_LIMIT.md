@@ -360,3 +360,50 @@ address.
   `terrain:=rough` at speed remains a real goal - do not conflate it with
   the ledge-drop question above.
 - Nothing hardware-related was touched or claimed.
+
+## Real ground-truth contact telemetry, opt-in and observational only (2026-09-15)
+
+Prior sections above rely entirely on the pose+IMU `floor_contact` heuristic
+(`BalanceControllerNode.cpp`) for anything that reads "grounded" in this
+document, because Gazebo's real per-wheel contact sensing was only ever wired
+up for the separate `jump_model` path (`run_jump.sh`), not the plain
+`run_sim.sh`/ledge-test path everything above was measured on.
+
+Wired real contact telemetry into the ledge-test path too, additively:
+
+- New launch arg `measure_contacts:=true` (independent of `jump_model`, so it
+  does not also swap in `BoundedGazeboSystem`/lower actuator limits like
+  `jump_model` does) enables the wheel contact sensors on
+  `src/tap_sim/worlds/ledge_test.sdf` (now loads `gz-sim-contact-system`)
+  without changing anything else.
+- Bridges the sensor's own `_raw` gz topic directly (`sim.launch.py`) rather
+  than through `tap_sim::ContactSnapshot`
+  (`src/tap_sim/src/contact_snapshot.cpp`), which was observed to
+  intermittently fail to load in this environment ("undefined symbol:
+  removexattrat" - a `libsystemd` version mismatch in the conda/micromamba
+  env, unrelated to that plugin's own code). The existing
+  `BalanceControllerNode` subscription (`jump.left_contacts_topic` /
+  `jump.right_contacts_topic`, already always-on regardless of `jump.enabled`)
+  needed no code change - it already consumed exactly this topic name and
+  message type.
+- Verified end-to-end with a real drive-off-the-ledge trial
+  (`ROS_DOMAIN_ID`/`GZ_PARTITION`-isolated, `owned_process` pattern): 9876
+  `/jump_status` samples collected, 8390 showed real
+  `left_contact=1`/`right_contact=1` from actual Gazebo collision data (not
+  simulated/mocked), 5303 within the freshness window - confirming the whole
+  pipeline (world plugin -> sensor -> bridge -> subscription -> status
+  string) delivers genuine ground-truth per-wheel contact.
+
+**This is deliberately observational only - it does not feed
+`state_.floor_contact` or any control decision.** Three earlier attempts in
+this document to make `floor_contact` react to a better/faster sensor
+(hip-torque threshold, IMU-accelerometer threshold, and the pose heuristic's
+own tuning) all measurably hurt or tied at best; wiring real contact into the
+*decision* path would very likely repeat that same failed experiment with a
+different sensor. This capability instead exists so future investigation can
+compare the pose heuristic's accuracy against real ground truth, or feed a
+kinematics-estimated `Fz`/friction-cone term (a fundamentally different kind
+of use than "trigger a reaction sooner") - not to change any current
+production behavior. Confirmed zero effect on the default path: `sim_smoke.py`
+and a fresh `clean_ledge_smoke.py --skip-enabled` batch both behave
+identically with `measure_contacts` left at its default `false`.
