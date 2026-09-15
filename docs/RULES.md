@@ -84,48 +84,6 @@ committed evidence so far — treat any number gathered with `sim_pose` active
 as provisional once this migration happens, not as final validation of the
 IMU path's own behavior.
 
-**Attempted 2026-09-15, reverted — real blocker found, not just config.**
-Flipping `pitch_source` to the IMU path and generalizing `floor_contact` to
-use real contact sensing (`anyWheelContactFresh()`/`any_wheel_contact_`,
-built on Track B.1's `measure_contacts` telemetry, which now defaults `true`
-and is wired into all three worlds specifically to support this) both built
-and passed every static/unit/contract test cleanly. Closed-loop Gazebo did
-not: with the IMU path actually driving the MPC, `sim_smoke.py`'s stationary
-"hold" stage showed the wheel runaway-driving at up to 0.6 m/s (direction
-flipped between runs — oscillatory, not a fixed drift) and pitch error
-growing to ~0.12 rad within about a second of standing still. Isolated the
-cause before giving up: measured the complementary filter's own static bias
-while the robot was independently stabilized by `sim_pose` (so the
-measurement wasn't itself corrupted by the instability) — only ~0.017 rad,
-too small to explain the failure. Tried compensating that bias
-(`pitch_offset_rad`) and slowing the accelerometer low-pass (0.15s → 0.4s,
-to better reject MPC-driven linear acceleration bleeding into the gravity
-estimate) — neither fixed it; same ~0.12 rad failure, same oscillatory
-direction-flip signature. This points to a genuine closed-loop
-instability specific to combining this exact complementary filter with this
-robot's MPC dynamics, not a one-parameter calibration issue.
-
-**Reverted `pitch_source` to `sim_pose` as the shipped default** rather than
-leave a known-broken default in place — re-confirmed the revert regresses
-nothing (`sim_smoke.py` clean, `clean_ledge_smoke.py` 8/10 matching Track
-A's established 80% baseline exactly, all unit/contract tests pass). Every
-other piece of scaffolding from this attempt was kept as real, working
-infrastructure ready for whenever the estimator itself gets fixed: the
-`floor_contact` generalization, `measure_contacts` defaulting on with all
-three worlds supporting it, and `jump`/`station_keeper`'s configs now
-explicitly pinning `pitch_source: sim_pose` themselves (so they stay correct
-regardless of the base default).
-
-**What's actually needed to finish this migration** (the real next step, not
-a config flip): proper closed-loop tuning or redesign of the pitch
-estimator itself — likely a real EKF fusing gyro + accelerometer with an
-explicit motion/acceleration model (rather than the current simple
-low-pass-for-gravity complementary filter, which assumes near-static
-specific force and has no way to distinguish "tilted" from "accelerating"
-beyond a soft alpha blend), evaluated with its own dedicated closed-loop
-test campaign before it's trusted as the default. This is real control/
-estimation engineering, not a rules-compliance checkbox.
-
 ### How to apply this rule going forward
 
 Before adding or changing any control-path code:
