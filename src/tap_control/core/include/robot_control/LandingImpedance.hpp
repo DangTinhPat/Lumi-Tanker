@@ -24,14 +24,23 @@ namespace robot_control {
 // doing nothing on the 20 cm ledge drive-off test: touching the hip in ANY
 // way - force, position, or even just its stiffness/damping scale - during
 // an already-violent touchdown event consistently hurt, regardless of the
-// mechanism. Only excluding the hip entirely (this revision) has measured
-// better than stock. So although a passive/dissipative gain schedule is
-// generally safer than an active force by construction (it can only ever
-// dissipate energy that's already there, never inject a new target), this
-// robot's specific ledge-drop failure mode (a chaotic wheel-edge-catch
-// flip, not a graceful vertical absorption problem) still does not
-// tolerate ANY hip involvement in practice - see EmbeddedController.cpp's
-// writeBalancedCommand for where this scale is applied to the knee only.
+// mechanism. Only excluding the hip entirely (this revision) beat the old
+// stock baseline (70%) at the time. So although a passive/dissipative gain
+// schedule is generally safer than an active force by construction (it can
+// only ever dissipate energy that's already there, never inject a new
+// target), this robot's specific ledge-drop failure mode (a chaotic
+// wheel-edge-catch flip, not a graceful vertical absorption problem) still
+// does not tolerate ANY hip involvement in practice - see
+// EmbeddedController.cpp's writeBalancedCommand for where this scale is
+// applied to the knee only.
+//
+// RE-MEASURED 2026-09-15 against the current, widened baseline
+// (`mpc.fall_pitch_rad=1.1`/`mpc.max_ground_accel=10.0`, promoted into
+// balance_controller.yaml's own defaults - see docs/LEDGE_DRIVEOFF_LIMIT.md):
+// 88% baseline vs. 85% (n=41) with this mechanism layered on top -
+// statistically tied, not a reproduced win. NOT enabled in production
+// defaults. Do not cite the "beat stock" framing above as still current;
+// it described the old, narrower 70%-baseline condition, not this one.
 // This also broadly matches the real touchdown mechanism on Ascento (a
 // virtual spring-damper simulated in the hip motors of ITS single-DOF,
 // mechanically-decoupled leg) and the general legged-robot impedance-

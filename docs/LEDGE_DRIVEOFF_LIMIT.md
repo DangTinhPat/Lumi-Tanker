@@ -252,6 +252,44 @@ are now `1.1` and `10.0` (see comments there). `landing_authority_test.yaml`
 is kept only for provenance/reproducing the original isolated A/B test; it is
 now a redundant no-op against current defaults, not a required override.
 
+## LandingImpedance (knee-only) re-measured fresh on the promoted baseline (2026-09-15)
+
+The current `LandingImpedance` revision (knee-only gain-scheduled critical
+damping, `src/tap_control/config/landing_impedance_test.yaml`) carried a code
+comment claiming "75% combined" and "measured better than stock," but by its
+own admission had "NOT yet been measured fresh in closed-loop Gazebo" against
+the current config - it predates the `fall_pitch_rad`/`max_ground_accel`
+promotion above. Re-measured with `tools/clean_ledge_smoke.py` on the now-
+promoted baseline (two batches after a tool bug - see below - forced a
+restart, so `enabled` is 41 trials total, not a clean 25):
+
+| Condition | Recovered | n |
+| --- | --- | --- |
+| Baseline (promoted `fall_pitch_rad=1.1`/`max_ground_accel=10.0`, no other override) | **22/25 (88%)** | 25 |
+| + `landing_impedance_test.yaml` layered on top | 14/16, then a fresh 21/25 = **35/41 (85%)** | 41 |
+
+**Statistically tied with the new baseline, not a reproduced improvement.**
+This does not promote `landing_impedance.*` into `balance_controller.yaml`'s
+defaults - consistent with this document's standing rule that only a clearly
+reproduced win (not a tie, per "Why sample size matters" below) gets
+promoted. The `LandingImpedance.hpp` header comment's "measured better than
+stock" claim should be read as referring to the old, narrower 70%-baseline
+condition it was actually tested against, not the current default.
+
+**Tooling bug found and worked around, not yet fixed in the tool itself**:
+`tools/clean_ledge_smoke.py` assigns `ROS_DOMAIN_ID` starting at 191 and
+incrementing by 1 per trial with no wraparound (`domain = 191`, `domain += 1`
+per trial, around line 224). A single invocation running both `baseline` and
+`enabled` conditions at `--trials 25` needs 50 domain IDs (191-240), which
+exceeds Fast-RTPS's effective domain ID ceiling (~232) and crashes with
+"Calculated port number is too high" partway through the second condition.
+Worked around here by running each condition as a separate invocation
+(`--skip-baseline` / `--skip-enabled`), which resets the domain counter to
+191 each time and stays under the ceiling for batches up to about 40 trials.
+For any future batch larger than that, or when a single invocation needs to
+cover both conditions with wraparound, the tool itself should mod the domain
+counter into a safe range instead of incrementing unbounded.
+
 ## Honest overall status
 
 Every *reaction-accelerating* mechanism tried this session - passive damping

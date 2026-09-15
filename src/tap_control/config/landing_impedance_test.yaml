@@ -18,11 +18,13 @@
 # back during Rebound. Passive/dissipative by construction, so it cannot
 # inject a new disturbance the way the earlier active designs did. This is
 # the closest match yet to Ascento's own real mechanism (a virtual
-# spring-damper simulated in the hip motors) and has NOT yet been measured
-# fresh in closed-loop Gazebo. Re-run tools/clean_ledge_smoke.py (n>=10 each
-# condition, ideally two independent batches - stock itself has ranged
-# 40-70% recovered across batches in this session) before trusting any
-# number here.
+# spring-damper simulated in the hip motors).
+#
+# RE-MEASURED 2026-09-15 (tools/clean_ledge_smoke.py) against the current
+# promoted baseline (mpc.fall_pitch_rad=1.1/max_ground_accel=10.0): 88%
+# baseline vs. 85% (n=41) with this layered on top - statistically tied, not
+# a reproduced win. See docs/LEDGE_DRIVEOFF_LIMIT.md. Not promoted into
+# production defaults; kept here as a tested, documented negative result.
 balance_controller_node:
   ros__parameters:
     landing_impedance.impact_kp_scale: 0.15
