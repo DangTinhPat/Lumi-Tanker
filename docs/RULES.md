@@ -1,6 +1,14 @@
-# No-ground-truth policy (mandatory)
+# Project rules (mandatory)
 
-## The rule
+Standing rules for this codebase, binding on every session and every piece
+of work — not suggestions to weigh against convenience. Each rule has its own
+section below; add new mandatory rules as their own numbered section rather
+than folding them into this preamble. If a rule and a one-off task
+instruction conflict, ask the user rather than silently picking one.
+
+---
+
+## Rule 1: No ground truth in the control path
 
 **No control decision may depend on simulator-internal state that has no
 real-hardware equivalent.** This applies to every new feature, every bug fix,
@@ -13,7 +21,7 @@ this codebase today is `sim_pose` (the controller's default `pitch_source`:
 exact body orientation read straight from the physics engine's model pose,
 not estimated from any sensor).
 
-## Why this rule exists
+### Why this rule exists
 
 The user's stated goal (2026-09-15) is to keep this codebase as close as
 possible to what a real robot deployment will look like, specifically so
@@ -23,7 +31,7 @@ to be re-derived, re-tuned, and re-validated later against noisy, biased,
 latent real sensors instead — silently accumulating debt that only surfaces
 at the worst possible time (on real hardware, not in sim).
 
-## What's allowed vs. not allowed
+### What's allowed vs. not allowed
 
 **Allowed** — anything with a real physical sensor behind it, even if the
 current implementation happens to run in simulation:
@@ -55,7 +63,7 @@ physics engine:
   designer would also know it at design time — the line is "measured live
   from the sim" vs. "known in advance from the CAD/BOM").
 
-## Current known violation — not fixed yet, tracked deliberately
+### Current known violation — not fixed yet, tracked deliberately
 
 `BalanceControllerNode`'s `pitch_source` parameter defaults to `"sim_pose"`
 today, and `station_keeper.enabled` / `jump.enabled` both hard-require
@@ -76,7 +84,7 @@ committed evidence so far — treat any number gathered with `sim_pose` active
 as provisional once this migration happens, not as final validation of the
 IMU path's own behavior.
 
-## How to apply this rule going forward
+### How to apply this rule going forward
 
 Before adding or changing any control-path code:
 
@@ -95,3 +103,13 @@ Before adding or changing any control-path code:
 4. This rule does not block *using* simulation to develop and test — it
    blocks the *controller itself* from depending on simulator omniscience.
    The simulator is allowed to know everything; the controller is not.
+
+---
+
+<!--
+Add future mandatory rules below as their own "## Rule N: <short name>"
+section, following Rule 1's structure (the rule itself, why it exists, what
+counts as compliant vs. not, any known existing violations and how they're
+being tracked, and how to apply it going forward). Keep CLAUDE.md's pointer
+to this file up to date if the summary line there needs to change.
+-->
