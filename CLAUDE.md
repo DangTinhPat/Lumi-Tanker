@@ -16,6 +16,15 @@ hardware actuation, motor flashing, or deployment. Simulation success (build,
 RViz, closed-loop Gazebo) is never evidence of physical/hardware capability;
 keep these evidence levels distinct in any report.
 
+**Mandatory: no-ground-truth policy.** No control decision may depend on
+simulator-internal state with no real-hardware equivalent (the clearest
+current example: `sim_pose`, the default `pitch_source`, read straight from
+Gazebo's model pose rather than estimated from a real sensor). Read
+`docs/NO_GROUND_TRUTH_POLICY.md` before adding or changing any control-path
+code — it defines what counts as a violation, the one currently-known
+violation (`pitch_source=sim_pose`, deliberately not yet fixed, tracked as
+its own future track), and how to check new work against this rule.
+
 ## Build, run, test
 
 ```bash
