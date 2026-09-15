@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Activate while paused, with bounded physical stepping and an explicit enable gate."""
+import argparse
+import math
+import subprocess
+import time
+
+import rclpy
+from builtin_interfaces.msg import Duration
+from controller_manager_msgs.srv import ConfigureController, ListControllers, LoadController, SwitchController
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import Imu, JointState
+from std_msgs.msg import Bool
+from tf2_msgs.msg import TFMessage
+
+CONTROLLERS = ('joint_state_broadcaster', 'wheel_effort_controller', 'leg_effort_controller')
+JOINTS = {f'cad_{side}_{joint}' for side in ('left', 'right') for joint in ('hip', 'knee', 'wheel')}
+
+
+def world_control(request):
+    result = subprocess.run(
+        ['gz', 'service', '-s', '/world/empty/control', '--reqtype', 'gz.msgs.WorldControl',
+         '--reptype', 'gz.msgs.Boolean', '--timeout', '3000', '--req', request],
+        capture_output=True, text=True, timeout=5)
+    if result.returncode or 'data: true' not in result.stdout:
+        raise RuntimeError(f'World control failed: {result.stdout} {result.stderr}')
+
+
+class Bringup(Node):
+    def __init__(self):
+        super().__init__('activate_controllers')
+        self.clock = None
+        self.imu_ready = False
+        self.joints_ready = False
+        self.pose_ready = False
+        self.steps = 0
+        self.ready = False
+        self.enable_requested = False
+        self.create_subscription(Clock, '/clock', self.on_clock, qos_profile_sensor_data)
+        self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
+        self.create_subscription(JointState, '/joint_states', self.on_joints, qos_profile_sensor_data)
+        self.create_subscription(TFMessage, '/tap_robot/pose', self.on_pose, qos_profile_sensor_data)
+        self.enable = self.create_publisher(Bool, '/enable', 10)
+        self.create_subscription(Bool, '/enable', self.on_enable, 10)
+        self._controller_clients = {name: self.create_client(kind, '/controller_manager/' + name)
+                        for name, kind in [('list_controllers', ListControllers),
+                                           ('load_controller', LoadController),
+                                           ('configure_controller', ConfigureController),
+                                           ('switch_controller', SwitchController)]}
+
+    def on_clock(self, msg):
+        self.clock = msg.clock.sec * 1000000000 + msg.clock.nanosec
+
+    def on_enable(self, msg):
+        # Ignore early requests: the operator must enable after readiness.
+        self.enable_requested = self.ready and msg.data
+
+    def on_imu(self, msg):
+        q = msg.orientation
+        self.imu_ready = all(math.isfinite(v) for v in (q.x, q.y, q.z, q.w)) and abs(
+            q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1) < 0.01
+
+    def on_joints(self, msg):
+        self.joints_ready = JOINTS.issubset(msg.name) and len(msg.position) == len(msg.name) and all(
+            math.isfinite(v) for v in msg.position)
+
+    def on_pose(self, msg):
+        self.pose_ready = False
+        if len(msg.transforms) != 1:
+            return
+        transform = msg.transforms[0]
+        name = transform.child_frame_id
+        if name and name.split('::')[-1].split('/')[-1] != 'tap_robot':
+            return
+        p, q = transform.transform.translation, transform.transform.rotation
+        self.pose_ready = all(math.isfinite(v) for v in (p.x, p.y, p.z, q.x, q.y, q.z, q.w)) and abs(
+            q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1) < 0.01
+
+    def wait(self, predicate, timeout=10):
+        deadline = time.monotonic() + timeout
+        while rclpy.ok() and time.monotonic() < deadline:
+            if predicate():
+                return
+            rclpy.spin_once(self, timeout_sec=0.02)
+        raise RuntimeError('Timed out waiting for ROS readiness')
+
+    def call(self, name, req):
+        future = self._controller_clients[name].call_async(req)
+        self.wait(future.done)
+        result = future.result()
+        if hasattr(result, 'ok') and not result.ok:
+            raise RuntimeError(name + ' rejected request')
+        return result
+
+    def step(self):
+        # Cap all startup motion at 50 ms; no pose resets or gravity changes.
+        if self.steps >= 50:
+            raise RuntimeError('Startup exceeded 50 ms physics budget')
+        before = self.clock
+        world_control('pause: true multi_step: 1')
+        self.steps += 1
+        self.wait(lambda: self.clock is not None and self.clock != before, timeout=5)
+        # Allow DDS feedback to arrive before deciding whether another step is needed.
+        deadline = time.monotonic() + 0.05
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+    def run(self, auto_enable):
+        world_control('pause: true')
+        for client in self._controller_clients.values():
+            if not client.wait_for_service(timeout_sec=60):
+                raise RuntimeError(f'Missing service: {client.srv_name}')
+        # One subscription is our own manual-start gate; require the controller too.
+        self.wait(lambda: self.enable.get_subscription_count() > 1, timeout=30)
+        self.enable.publish(Bool(data=False))
+        states = {c.name: c.state for c in self.call('list_controllers', ListControllers.Request()).controller}
+        for name in CONTROLLERS:
+            if name not in states:
+                self.call('load_controller', LoadController.Request(name=name))
+            if states.get(name) in (None, 'unconfigured'):
+                self.call('configure_controller', ConfigureController.Request(name=name))
+        request = SwitchController.Request(
+            activate_controllers=[name for name in CONTROLLERS if states.get(name) != 'active'],
+            strictness=SwitchController.Request.STRICT, activate_asap=True, timeout=Duration(sec=5))
+        future = self._controller_clients['switch_controller'].call_async(request)
+        # Discover bridge subscriptions before producing the first paused sensor samples.
+        self.wait(lambda: self.count_publishers('/clock') > 0 and self.count_publishers('/imu') > 0)
+        while not future.done():
+            self.step()
+        if not future.result().ok:
+            raise RuntimeError('Controller switch failed')
+        while not (self.imu_ready and self.joints_ready) or not self.pose_ready:
+            self.step()
+        states = {c.name: c.state for c in self.call('list_controllers', ListControllers.Request()).controller}
+        if not all(states.get(name) == 'active' for name in CONTROLLERS):
+            raise RuntimeError(f'Inactive controllers: {states}')
+        self.ready = True
+        if auto_enable:
+            self.enable.publish(Bool(data=True))
+        else:
+            self.enable.publish(Bool(data=False))
+            self.get_logger().info('Controllers ready; paused. Waiting for /enable=true to run.')
+        while rclpy.ok():
+            while rclpy.ok() and not self.enable_requested:
+                rclpy.spin_once(self, timeout_sec=0.1)
+            # Let the controller receive the same enable request before unpausing.
+            deadline = time.monotonic() + 0.3
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.02)
+            if not rclpy.ok():
+                return
+            if not self.enable_requested:
+                continue
+            world_control('pause: false')
+            self.get_logger().info(f'Enabled and running after {self.steps} ms startup physics')
+            return
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--auto-enable', choices=['true', 'false'], default='false')
+    args, _ = parser.parse_known_args()
+    rclpy.init()
+    node = Bringup()
+    result = 0
+    try:
+        node.run(args.auto_enable == 'true')
+    except Exception as exc:
+        node.get_logger().error(str(exc))
+        node.enable.publish(Bool(data=False))
+        try:
+            world_control('pause: true')
+        except Exception:
+            pass
+        result = 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    return result
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

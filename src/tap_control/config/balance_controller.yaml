@@ -1,0 +1,88 @@
+balance_controller_node:
+  ros__parameters:
+    auto_enable: false
+    allow_motion_commands: true
+    control_period_s: 0.001
+    cmd_vel_timeout_s: 0.5
+    wheel_radius_m: 0.03
+    left_wheeled: true
+    pitch_source: sim_pose
+    sim_pose_topic: /tap_robot/pose
+    sim_pose_child_frame: tap_robot
+    sim_pose_index: 0
+    sim_contact_min_base_z_m: 0.10
+    sim_contact_max_pitch_rad: 0.8
+    sensor_timeout_s: 0.15
+    sensor_stale_grace_cycles: 8
+    pitch_offset_rad: 0.0
+    leg_kp: 40.0
+    leg_kd: 0.0
+    leg_max_torque_nm: 3.0
+    wheel_max_torque_nm: 0.5
+    wheel_velocity_kp: 0.02
+    pose_slew_rate_rad_s: 0.4
+    pose_hip_min_rad: -0.6
+    pose_hip_max_rad: 0.6
+    pose_knee_min_rad: -0.8
+    pose_knee_max_rad: 0.2
+    pose_change_duration_s: 1.5
+    # Simulation world-pose feedback; opt in only for validated stationary shows.
+    station_keeper:
+      enabled: false
+      position_gain_hz: 0.8
+      yaw_gain_hz: 2.0
+      max_forward_m_s: 0.08
+      max_yaw_rad_s: 0.25
+    whole_body:
+      enabled: true
+      pitch_gain: 1.0
+      max_pitch_ref_rad: 0.35
+      ref_lowpass_period_s: 0.15
+      trim_gain_hz: 0.0
+    stand_up:
+      # REVERTED (this session): a modest permanent knee bend (-0.2 rad,
+      # hip 0.222499 for ~0 equilibrium pitch) was tried here to lower CoM
+      # per the user's request. It passed the normal balance/drive/squat/
+      # roll regression (sim_smoke.py) cleanly, but a fresh 20 cm ledge
+      # drive-off measurement with it collapsed BOTH the stock baseline
+      # (10%, vs 45-70% across every other batch this session) AND the
+      # landing-mechanism condition to near zero - i.e. it broke ledge
+      # recovery specifically, likely by shifting the resting base height
+      # closer to sim_contact_min_base_z_m's floor_contact threshold or by
+      # eating into the knee's remaining downward travel before touchdown.
+      # Reverted to CAD-zero (knee=0) pending a real investigation of that
+      # interaction - do not re-enable a nonzero default knee bend without
+      # re-measuring the ledge test specifically, not just sim_smoke.py.
+      stand_pose_rad: [0.115483096, 0.0, 0.0, 0.115483096, 0.0, 0.0]
+      tuck_pose_rad: [0.542801486, -0.8, 0.0, 0.542801486, -0.8, 0.0]
+      fall_direction_aware: false
+      tuck_duration_s: 1.0
+      rise_duration_s: 1.6
+      fall_pitch_rad: 2.0
+      settle_pitch_rad: 0.2
+      max_settle_duration_s: 3.0
+    # Simulation estimates, not fitted to the selected GIM/CJC motor dynamics.
+    mpc:
+      wheel_radius_m: 0.03
+      half_wheel_base_m: 0.1545
+      fall_pitch_rad: 0.8
+      leg_length: 0.234
+      pendulum_length_per_com_height: 1.077
+      min_pendulum_length: 0.15
+      max_pendulum_length: 0.27
+      gravity_m_s2: 9.81
+      max_ground_accel: 6.0
+      max_ground_velocity: 0.6
+      # A 0.4 s horizon avoids the poorly conditioned 1 s QP on this short robot.
+      # Fixed iterations are an approximation, not a solver-convergence guarantee.
+      nb_timesteps: 20
+      sampling_period: 0.02
+      stage_input_cost_weight: 0.001
+      stage_state_cost_weight: 0.001
+      terminal_cost_weight: 1.0
+      position_cost_scale: 1.5
+      velocity_cost_scale: 1.0
+      max_target_distance_m: 0.25
+      position_anchor_hold: false
+      station_hold_gain_hz: 0.0
+      solver_iterations: 120

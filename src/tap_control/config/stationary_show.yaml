@@ -1,0 +1,10 @@
+# Simulation-only world-position feedback. sim.launch.py layers this profile
+# over balance_controller.yaml; it is not a standalone controller config.
+balance_controller_node:
+  ros__parameters:
+    station_keeper:
+      enabled: true
+      position_gain_hz: 0.8
+      yaw_gain_hz: 2.0
+      max_forward_m_s: 0.08
+      max_yaw_rad_s: 0.25

@@ -1,0 +1,41 @@
+# Isolated development candidate; never a hardware or validated demo profile.
+balance_controller_node:
+  ros__parameters:
+    jump.enabled: true
+    jump.wheel_frame_compensation: true
+    jump.profile: manual_curve_experimental
+    jump.crouch_knee_rad: -1.6
+    jump.extension_knee_rad: -0.95
+    jump.landing_knee_rad: -0.4
+    jump.crouch_duration_s: 2.5
+    jump.thrust_duration_s: 0.08
+    jump.max_thrust_s: 0.5
+    jump.thrust_force_n: 300.0
+    jump.body_pitch_kp: 12.0
+    jump.body_pitch_kd: 3.0
+    jump.hip_attitude_torque_limit_nm: 3.0
+    jump.flight_hip_rate_kp: 0.0
+    jump.flight_hip_rate_kd: 0.0
+    jump.thrust_track_measured_knee: true
+    jump.thrust_knee_force_control: true
+    jump.landing_world_frame: true
+    jump.thrust_hip_offset_rad: 0.15
+    jump.thrust_wheel_control: true
+    jump.thrust_wheel_speed_m_s: -0.11
+    jump.landing_compression: false
+    jump.smooth_phase_transitions: true
+    jump.thrust_world_frame: true
+    jump.leg_torque_limit_nm: 5.0
+    jump.wheel_torque_limit_nm: 0.13
+    jump.contact_timeout_s: 0.05
+    jump.left_contacts_topic: left_wheel_contacts
+    jump.right_contacts_topic: right_wheel_contacts
+    jump.ground_collision: ground_plane
+    station_keeper.enabled: true
+    mpc.min_pendulum_length: 0.125
+    mpc.max_ground_accel: 2.0
+    mpc.max_ground_velocity: 0.35
+    pose_hip_min_rad: -0.6
+    pose_hip_max_rad: 1.05
+    pose_knee_min_rad: -1.6
+    pose_knee_max_rad: 0.2

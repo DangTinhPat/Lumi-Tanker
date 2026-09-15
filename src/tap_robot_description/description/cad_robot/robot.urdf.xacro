@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<robot name="cad_wheel_leg" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- CAD pose is joint zero. Inertials are estimates; see PHYSICS.md. -->
+  <xacro:arg name="simulation" default="false"/>
+  <xacro:arg name="jump_model" default="false"/>
+  <xacro:arg name="jump_leg_speed" default="12.566370614359172"/>
+  <xacro:arg name="jump_leg_velocity_damping" default="0.0"/>
+  <xacro:property name="jump_leg_speed" value="${float('$(arg jump_leg_speed)')}"/>
+  <xacro:property name="jump_model" value="${'$(arg jump_model)' == 'true' and '$(arg simulation)' == 'true'}"/>
+  <xacro:property name="simulation" value="${'$(arg simulation)' == 'true'}"/>
+  <xacro:property name="mesh_root" value="package://tap_robot_description/description/cad_robot/meshes"/>
+  <xacro:property name="masses" value="${xacro.load_yaml('masses.yaml')}"/>
+  <xacro:property name="mesh_inertials" value="${xacro.load_yaml('mesh_inertials.yaml')}"/>
+  <material name="cad_body"><color rgba="0.65 0.71 0.77 1"/></material>
+  <material name="cad_thigh"><color rgba="0.12 0.55 0.62 1"/></material>
+  <material name="cad_shin"><color rgba="0.82 0.48 0.20 1"/></material>
+  <material name="cad_tire"><color rgba="0.16 0.18 0.20 1"/></material>
+
+  <xacro:macro name="mesh_link" params="name mesh material mass_key mesh_pitch:=0">
+    <xacro:property name="mass" value="${masses[mass_key]}"/>
+    <xacro:property name="properties" value="${mesh_inertials[mesh]}"/>
+    <xacro:property name="com" value="${properties['center_of_mass']}"/>
+    <xacro:property name="tensor" value="${properties['inertia_per_kg']}"/>
+    <link name="${name}">
+      <visual>
+        <origin rpy="0 ${mesh_pitch} 0"/>
+        <geometry><mesh filename="${mesh_root}/${mesh}.stl"/></geometry>
+        <material name="${material}"/>
+      </visual>
+      <xacro:if value="${simulation}">
+        <!-- Primitive envelopes avoid unstable concave triangle contact. -->
+        <collision name="${name}_collision">
+          <xacro:if value="${mass_key == 'wheel'}">
+            <origin rpy="${pi / 2} 0 0"/>
+            <geometry><cylinder radius="0.03" length="0.025"/></geometry>
+          </xacro:if>
+          <xacro:if value="${mass_key == 'body'}">
+            <origin xyz="${cos(mesh_pitch) * 0.01321673 - sin(mesh_pitch) * 0.011} -0.0025 ${-sin(mesh_pitch) * 0.01321673 - cos(mesh_pitch) * 0.011}" rpy="0 ${mesh_pitch} 0"/>
+            <geometry><box size="0.09757 0.205 0.222"/></geometry>
+          </xacro:if>
+          <xacro:if value="${mass_key == 'thigh'}">
+            <origin xyz="-0.007054675 0 -0.05238371" rpy="0 0.133864 0"/>
+            <geometry><box size="0.035 0.044 0.106"/></geometry>
+          </xacro:if>
+          <xacro:if value="${mass_key == 'shin'}">
+            <origin xyz="0.02331538 0 -0.05" rpy="0 -0.436333 0"/>
+            <geometry><box size="0.03 0.03 0.11034"/></geometry>
+          </xacro:if>
+        </collision>
+      </xacro:if>
+      <inertial>
+        <!-- Rotate COM and tensor frame with the mesh, leaving joint frames unchanged. -->
+        <origin xyz="${cos(mesh_pitch) * com[0] + sin(mesh_pitch) * com[2]} ${com[1]} ${-sin(mesh_pitch) * com[0] + cos(mesh_pitch) * com[2]}" rpy="0 ${mesh_pitch} 0"/>
+        <mass value="${mass}"/>
+        <inertia ixx="${mass * tensor['ixx']}" ixy="${mass * tensor['ixy']}"
+                 ixz="${mass * tensor['ixz']}" iyy="${mass * tensor['iyy']}"
+                 iyz="${mass * tensor['iyz']}" izz="${mass * tensor['izz']}"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <xacro:unless value="${simulation}">
+  <link name="cad_ground"/>
+  <joint name="cad_display_mount" type="fixed">
+    <parent link="cad_ground"/><child link="cad_body"/>
+    <origin xyz="0 0 0.23476742"/>
+  </joint>
+  </xacro:unless>
+  <xacro:mesh_link name="cad_body" mesh="body" material="cad_body" mass_key="body" mesh_pitch="${-pi / 2}"/>
+
+  <xacro:macro name="leg" params="side sign">
+    <xacro:mesh_link name="cad_${side}_thigh" mesh="${side}_thigh" material="cad_thigh" mass_key="thigh"/>
+    <joint name="cad_${side}_hip" type="revolute">
+      <parent link="cad_body"/><child link="cad_${side}_thigh"/>
+      <origin xyz="0 ${sign * 0.125} 0"/>
+      <axis xyz="0 1 0"/>
+      <!-- Jump velocity is a numerical solver guard, NOT the motor cutoff. -->
+      <limit lower="-1.57" upper="1.57" effort="${5 if jump_model else (12 if simulation else 1)}" velocity="${1000 if jump_model else (15 if simulation else 1)}"/>
+      <xacro:if value="${simulation}"><dynamics damping="${0.02 if jump_model else 1.0}" friction="0.0"/></xacro:if>
+    </joint>
+
+    <xacro:mesh_link name="cad_${side}_shin" mesh="${side}_shin" material="cad_shin" mass_key="shin"/>
+    <joint name="cad_${side}_knee" type="revolute">
+      <parent link="cad_${side}_thigh"/><child link="cad_${side}_shin"/>
+      <origin xyz="-0.01410935 ${sign * 0.002} -0.10476742"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-2.1" upper="2.1" effort="${5 if jump_model else (12 if simulation else 1)}" velocity="${1000 if jump_model else (15 if simulation else 1)}"/>
+      <xacro:if value="${simulation}"><dynamics damping="${0.02 if jump_model else 1.0}" friction="0.0"/></xacro:if>
+    </joint>
+
+    <xacro:mesh_link name="cad_${side}_wheel_link" mesh="${side}_wheel" material="cad_tire" mass_key="wheel"/>
+    <joint name="cad_${side}_wheel" type="continuous">
+      <parent link="cad_${side}_shin"/><child link="cad_${side}_wheel_link"/>
+      <origin xyz="0.04663076 ${sign * 0.0275} -0.1"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="${0.13 if jump_model else 1}" velocity="${1000 if jump_model else (80 if simulation else 1)}"/>
+      <xacro:if value="${simulation}"><dynamics damping="0.001" friction="0.0"/></xacro:if>
+    </joint>
+  </xacro:macro>
+
+  <xacro:leg side="left" sign="${1}"/>
+  <xacro:leg side="right" sign="${-1}"/>
+</robot>

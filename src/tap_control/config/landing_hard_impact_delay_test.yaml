@@ -1,0 +1,10 @@
+# Fused accel+pitch-rate hard-impact classifier that DELAYS floor_contact
+# (opposite of the three earlier-reaction attempts, see
+# docs/LEDGE_DRIVEOFF_LIMIT.md), isolated from every other landing mechanism
+# so an A/B result attributes any change to this one idea alone.
+balance_controller_node:
+  ros__parameters:
+    hard_impact_delay_enabled: true
+    hard_impact_accel_mps2: 50.0
+    hard_impact_pitch_rate_rad_s: 6.0
+    hard_impact_settle_s: 0.15

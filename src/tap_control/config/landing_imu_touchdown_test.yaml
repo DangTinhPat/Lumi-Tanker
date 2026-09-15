@@ -1,0 +1,8 @@
+# Raw-IMU-accelerometer free-fall/impact contact confirmation, isolated from
+# every other landing mechanism tried this session (see
+# docs/LEDGE_DRIVEOFF_LIMIT.md) so an A/B result attributes any change to
+# this one signal improvement alone.
+balance_controller_node:
+  ros__parameters:
+    imu_touchdown_enabled: true
+    imu_touchdown_accel_mps2: 20.0

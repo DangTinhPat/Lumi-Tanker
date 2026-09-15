@@ -1,0 +1,12 @@
+# Always-on (not landing-window-gated) increase to wheel control authority
+# and fall-declaration tolerance, isolated from every other landing
+# mechanism tried this session. Rationale: the chaotic snag failures give
+# the controller only ~(0.8-baseline_pitch)/pitch_rate ~= 75 ms before
+# fall_pitch_rad is crossed and Fallen cuts all torque; every previous
+# attempt tried to react FASTER within that fixed window (all hurt) or
+# DELAY reacting (tied baseline) - this instead widens the window itself
+# and the wheels' authority to use it, unconditionally.
+balance_controller_node:
+  ros__parameters:
+    mpc.fall_pitch_rad: 1.1
+    mpc.max_ground_accel: 10.0

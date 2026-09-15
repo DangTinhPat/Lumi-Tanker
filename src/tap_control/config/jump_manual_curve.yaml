@@ -1,0 +1,33 @@
+# Load after balance_controller.yaml. Experimental manual-graph envelope:
+# 5 Nm through 190 rpm, taper to zero at 270 rpm (motoring direction).
+# Graph voltage/test conditions are not confirmed. No 11 Nm stall operation.
+# Match simulator jump_leg_speed:=28.274333882308138 and jump_model:=true.
+balance_controller_node:
+  ros__parameters:
+    jump.enabled: true
+    jump.wheel_frame_compensation: true
+    jump.profile: manual_curve_experimental
+    jump.crouch_knee_rad: -1.2
+    jump.extension_knee_rad: 0.0
+    jump.landing_knee_rad: -0.6
+    jump.crouch_duration_s: 2.0
+    jump.thrust_duration_s: 0.18
+    jump.max_thrust_s: 0.5
+    jump.thrust_force_n: 90.0
+    jump.body_pitch_kp: 4.0
+    jump.body_pitch_kd: 0.4
+    jump.hip_attitude_torque_limit_nm: 1.0
+    jump.leg_torque_limit_nm: 5.0
+    jump.wheel_torque_limit_nm: 0.13
+    jump.contact_timeout_s: 0.05
+    jump.left_contacts_topic: left_wheel_contacts
+    jump.right_contacts_topic: right_wheel_contacts
+    jump.ground_collision: ground_plane
+    station_keeper.enabled: true
+    mpc.min_pendulum_length: 0.125
+    mpc.max_ground_accel: 2.0
+    mpc.max_ground_velocity: 0.35
+    pose_hip_min_rad: -0.6
+    pose_hip_max_rad: 1.05
+    pose_knee_min_rad: -1.6
+    pose_knee_max_rad: 0.2

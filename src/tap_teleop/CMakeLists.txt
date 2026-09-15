@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(tap_teleop)
+find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+ament_python_install_package(${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  enable_testing()
+  add_test(NAME show_sequence
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_show_sequence.py -v)
+  add_test(NAME deep_squat
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_deep_squat.py -v)
+endif()
+ament_package()

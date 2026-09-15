@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<robot name="tap_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="simulation" default="true"/>
+  <xacro:include filename="robot.urdf.xacro"/>
+  <ros2_control name="GazeboSimSystem" type="system">
+    <hardware>
+      <xacro:if value="${jump_model}">
+        <plugin>tap_sim/BoundedGazeboSystem</plugin>
+        <param name="leg_speed_limit">${jump_leg_speed}</param>
+        <param name="leg_velocity_damping">$(arg jump_leg_velocity_damping)</param>
+      </xacro:if>
+      <xacro:unless value="${jump_model}"><plugin>gz_ros2_control/GazeboSimSystem</plugin></xacro:unless>
+    </hardware>
+    <!-- Neutral stand from CAD whole-body COM, not a redefinition of joint zero. -->
+    <xacro:macro name="actuator" params="name interface initial:=0">
+      <joint name="${name}">
+        <command_interface name="${interface}"/>
+        <state_interface name="position"><param name="initial_value">${initial}</param></state_interface>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+    </xacro:macro>
+    <xacro:actuator name="cad_left_hip" interface="effort" initial="0.11548309575"/>
+    <xacro:actuator name="cad_left_knee" interface="effort"/>
+    <xacro:actuator name="cad_right_hip" interface="effort" initial="0.11548309575"/>
+    <xacro:actuator name="cad_right_knee" interface="effort"/>
+    <xacro:actuator name="cad_left_wheel" interface="velocity"/>
+    <xacro:actuator name="cad_right_wheel" interface="velocity"/>
+  </ros2_control>
+  <gazebo>
+    <!-- Only this model is published: a bridge losing entity names cannot
+         accidentally substitute the floor or an articulated child link. -->
+    <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+      <publish_model_pose>true</publish_model_pose>
+      <publish_nested_model_pose>false</publish_nested_model_pose>
+      <publish_link_pose>false</publish_link_pose>
+      <publish_visual_pose>false</publish_visual_pose>
+      <publish_collision_pose>false</publish_collision_pose>
+      <publish_sensor_pose>false</publish_sensor_pose>
+      <use_pose_vector_msg>true</use_pose_vector_msg>
+      <update_frequency>250</update_frequency>
+      <static_publisher>false</static_publisher>
+    </plugin>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find tap_sim)/config/ros2_control.yaml</parameters>
+    </plugin>
+  </gazebo>
+  <gazebo reference="cad_body">
+    <sensor name="imu_sensor" type="imu">
+      <pose>0 0 0 0 0 0</pose>
+      <always_on>true</always_on>
+      <update_rate>500</update_rate>
+      <topic>/imu</topic>
+      <gz_frame_id>cad_body</gz_frame_id>
+      <imu/>
+    </sensor>
+  </gazebo>
+  <gazebo reference="cad_left_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+  <gazebo reference="cad_right_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+  <xacro:if value="${jump_model}">
+    <gazebo>
+      <plugin filename="$(find tap_sim)/../../lib/libtap_contact_snapshot.so" name="tap_sim::ContactSnapshot"/>
+    </gazebo>
+    <xacro:macro name="wheel_contact" params="side">
+      <gazebo reference="cad_${side}_wheel_link">
+        <sensor name="${side}_wheel_contact_sensor" type="contact">
+          <always_on>true</always_on><update_rate>1000</update_rate>
+          <topic>/${side}_wheel_contacts</topic>
+          <contact>
+            <!-- libsdformat appends _collision to the explicit URDF name. -->
+            <collision>cad_${side}_wheel_link_collision_collision</collision>
+            <topic>/${side}_wheel_contacts_raw</topic>
+          </contact>
+        </sensor>
+      </gazebo>
+    </xacro:macro>
+    <xacro:wheel_contact side="left"/><xacro:wheel_contact side="right"/>
+  </xacro:if>
+</robot>

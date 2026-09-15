@@ -1,0 +1,6 @@
+<library path="tap_bounded_gazebo_system">
+  <class name="tap_sim/BoundedGazeboSystem" type="tap_sim::BoundedGazeboSystem"
+         base_class_type="gz_ros2_control::GazeboSimSystemInterface">
+    <description>Experimental bounded-force leg and wheel actuators.</description>
+  </class>
+</library>

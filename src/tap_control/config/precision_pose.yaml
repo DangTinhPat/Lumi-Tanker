@@ -1,0 +1,22 @@
+# Experimental bounded-actuator pose profile, separate from legacy stationary_show.
+# Requires jump_model:=true, jump_leg_speed:=12.566370614359172,
+# jump_leg_velocity_damping:=0.6. Jumping itself is NOT validated by pose tests.
+balance_controller_node:
+  ros__parameters:
+    jump.enabled: true
+    jump.profile: rated_120rpm
+    jump.wheel_frame_compensation: true
+    jump.leg_torque_limit_nm: 5.0
+    jump.wheel_torque_limit_nm: 0.13
+    mpc.min_pendulum_length: 0.125
+    mpc.max_ground_accel: 2.0
+    mpc.max_ground_velocity: 0.35
+    pose_hip_max_rad: 1.05
+    pose_knee_min_rad: -1.6
+    station_keeper:
+      enabled: true
+      position_gain_hz: 3.0
+      acquire_dwell_s: 0.5
+      yaw_gain_hz: 2.0
+      max_forward_m_s: 0.08
+      max_yaw_rad_s: 0.25

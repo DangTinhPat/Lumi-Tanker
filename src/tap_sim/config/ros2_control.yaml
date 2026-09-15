@@ -1,0 +1,15 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 1000
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    wheel_effort_controller:
+      type: velocity_controllers/JointGroupVelocityController
+    leg_effort_controller:
+      type: effort_controllers/JointGroupEffortController
+wheel_effort_controller:
+  ros__parameters:
+    joints: [cad_left_wheel, cad_right_wheel]
+leg_effort_controller:
+  ros__parameters:
+    joints: [cad_left_hip, cad_left_knee, cad_right_hip, cad_right_knee]

@@ -1,0 +1,15 @@
+# Experimental native-CAD symmetric squat profile; not calibrated encoder limits.
+# Layered over balance_controller.yaml by sim.launch.py. Keep torque, sensor
+# watchdog and fall limits unchanged. See docs/DEEP_SQUAT.md for tested scope.
+balance_controller_node:
+  ros__parameters:
+    pose_hip_max_rad: 1.05
+    pose_knee_min_rad: -1.6
+    mpc:
+      min_pendulum_length: 0.125
+    station_keeper:
+      enabled: true
+      position_gain_hz: 0.8
+      yaw_gain_hz: 2.0
+      max_forward_m_s: 0.08
+      max_yaw_rad_s: 0.25

@@ -1,0 +1,33 @@
+# Isolated test profile for LandingImpedance (see LandingImpedance.hpp): a
+# virtual leg-length spring-damper via GAIN SCHEDULING (soften Kp, raise Kd
+# toward critical damping on real touchdown, for ALL FOUR leg joints), not
+# an active force or position target. Every other landing mechanism
+# (LandingReflex, mpc.landing_* boosts) is left at its own default
+# (0/inert) here for a clean A/B against the stock controller.
+#
+# REVISION (this session, per the user-provided reference on wheeled-biped
+# touchdown physics): three earlier revisions all ACTIVELY drove the hip (a
+# virtual spring force onto hip+knee, then knee-only, then a coordinated
+# hip+knee IK position target) - the two that moved the hip both measured
+# WORSE than stock on the 20 cm ledge test (40-50% vs stock's fresh
+# 45-70% across batches); only knee-only (no hip motion at all) measured
+# better (75% combined). This revision is qualitatively different: it never
+# drives any joint anywhere. It only changes HOW STIFFLY the existing
+# position controller resists whatever real force is already acting on the
+# leg - Kp down (soft), Kd up (critically damped) during Impact, ramping
+# back during Rebound. Passive/dissipative by construction, so it cannot
+# inject a new disturbance the way the earlier active designs did. This is
+# the closest match yet to Ascento's own real mechanism (a virtual
+# spring-damper simulated in the hip motors) and has NOT yet been measured
+# fresh in closed-loop Gazebo. Re-run tools/clean_ledge_smoke.py (n>=10 each
+# condition, ideally two independent batches - stock itself has ranged
+# 40-70% recovered across batches in this session) before trusting any
+# number here.
+balance_controller_node:
+  ros__parameters:
+    landing_impedance.impact_kp_scale: 0.15
+    landing_impedance.impact_kd_scale: 3.0
+    landing_impedance.touchdown_velocity_threshold_m_s: 0.05
+    landing_impedance.rebound_blend_s: 0.2
+    landing_impedance.max_impact_duration_s: 0.4
+    landing_impedance.min_airborne_before_touchdown_s: 0.15
