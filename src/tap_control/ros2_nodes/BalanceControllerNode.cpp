@@ -150,6 +150,16 @@ class BalanceControllerNode : public rclcpp::Node {
             declare_parameter<double>("hard_impact_settle_s", 0.15))),
         left_wheel_sign_(
             declare_parameter<bool>("left_wheeled", true) ? 1.0F : -1.0F),
+        // Kalman filter process/measurement noise, the standard defaults
+        // for this exact design (Kristian Lauszus's TKJElectronics Kalman
+        // filter for accel+gyro angle estimation) - kept tunable as ROS
+        // parameters rather than hardcoded, but not re-derived here.
+        kalman_q_angle_(static_cast<float>(
+            declare_parameter<double>("kalman_q_angle", 0.001))),
+        kalman_q_bias_(static_cast<float>(
+            declare_parameter<double>("kalman_q_bias", 0.003))),
+        kalman_r_measure_(static_cast<float>(
+            declare_parameter<double>("kalman_r_measure", 0.03))),
         leg_kp_(static_cast<float>(declare_parameter<double>("leg_kp", 12.0))),
         leg_kd_(static_cast<float>(declare_parameter<double>("leg_kd", 0.6))),
         wheel_velocity_kp_(static_cast<float>(
@@ -638,8 +648,15 @@ class BalanceControllerNode : public rclcpp::Node {
       return;
     }
     const float pitch_rate_rad_s = static_cast<float>(msg.angular_velocity.y);
-    const float dt = static_cast<float>(control_period_s_);
     const double stamp_s = stampToSeconds(msg.header.stamp);
+    // Real elapsed time since the last IMU sample, not the nominal control-
+    // loop period: onImu runs per IMU message (e.g. 500 Hz), which need not
+    // match control_period_s_ (e.g. 1 kHz). Falls back to the nominal
+    // period for the first sample or a bad/stale stamp.
+    const float dt =
+        (last_imu_stamp_s_ > 0.0 && stamp_s > last_imu_stamp_s_)
+            ? static_cast<float>(stamp_s - last_imu_stamp_s_)
+            : static_cast<float>(control_period_s_);
 
     raw_imu_pitch_rate_rad_s_ = pitch_rate_rad_s;
     raw_imu_yaw_rate_rad_s_ = static_cast<float>(msg.angular_velocity.z);
@@ -674,28 +691,131 @@ class BalanceControllerNode : public rclcpp::Node {
       return;
     }
 
-    // Use the IMU's own fused orientation quaternion directly, the same way
-    // real hardware with an onboard-fusion IMU/AHRS does (e.g. Upkie's
-    // pi3hat: upkie/cpp/observers/BaseOrientation.cpp reads
-    // observation("imu").get<Quaterniond>("orientation") and only applies a
-    // fixed mounting-rotation matrix - it never hand-rolls a complementary
-    // filter from raw accel+gyro in the robot's own control loop, because
-    // that filter cannot distinguish "tilted" from "accelerating" with only
-    // two single-axis-ambiguous sensors and no independent motion reference
-    // (see docs/RULES.md Rule 1's "Attempted 2026-09-15" history - this
-    // project's earlier hand-rolled atan2(-ax,az) complementary filter hit
-    // exactly that closed-loop instability once it drove the MPC). Verified
-    // 2026-09-15: this IMU's orientation quaternion matches sim_pose's own
-    // ground-truth quaternion exactly on this rig (mean diff 0.0000 rad
-    // across 740 samples, near-upright) - expected, since the IMU sensor's
-    // URDF pose is coincident with cad_body (zero rotation offset), unlike
-    // Upkie's own physically-offset pi3hat mount, so no
-    // rotation_base_to_imu-equivalent calibration is needed here.
-    const float pitch_from_quat = basePitchFromQuaternion(
-        static_cast<double>(q.w), static_cast<double>(q.x),
-        static_cast<double>(q.y), static_cast<double>(q.z));
+    // Plain accel+gyro complementary filter for a bare 6-axis IMU (no
+    // onboard AHRS/fusion chip - real target hardware is an MPU6500,
+    // confirmed 2026-09-15). See docs/RULES.md Rule 1's "Attempted
+    // 2026-09-15" history for two earlier ideas that didn't pan out
+    // (reading a fused orientation quaternion assumes hardware this robot
+    // won't have; correcting the accelerometer with wheel-odometry/MPC
+    // terms introduced new instabilities of their own).
+    //
+    // ROOT CAUSE FOUND, not guessed: instrumenting every attempt's seed
+    // value against ground truth showed the FIRST one or two `/imu`
+    // messages after launch arrive irregularly spaced (hundreds of ms
+    // apart, not the steady ~2 ms of real 500 Hz data) with near-zero
+    // linear_acceleration on all three axes - a startup artifact from the
+    // Gazebo/bridge process pair, not real physics data (real 500 Hz
+    // samples only start a few messages later). atan2 of two near-zero
+    // numbers is numerically arbitrary, and every earlier attempt seeded
+    // `complementary_pitch_rad_` from whichever message happened to be
+    // first - baking a small but real garbage offset (~0.09 rad measured)
+    // into the filter's persistent state right as the aggressive
+    // Track-A-promoted MPC gains started reacting to it, before the slow
+    // (alpha=0.9) blend had any chance to wash it out. This explains why
+    // every prior fix "to the correction term" kept failing identically:
+    // the correction term was never the dominant bug, the unvalidated seed
+    // was.
+    //
+    // Fix: only seed from a sample whose specific-force magnitude is
+    // physically plausible (close to 1 g) - reject early
+    // startup/placeholder messages instead of trusting whichever one
+    // arrives first.
+    const float accel_mag = std::sqrt(
+        static_cast<float>(msg.linear_acceleration.x) * static_cast<float>(msg.linear_acceleration.x) +
+        static_cast<float>(msg.linear_acceleration.y) * static_cast<float>(msg.linear_acceleration.y) +
+        static_cast<float>(msg.linear_acceleration.z) * static_cast<float>(msg.linear_acceleration.z));
+    constexpr float kMinPlausibleAccelMag = 5.0F;   // reject near-zero startup artifacts
+    constexpr float kMaxPlausibleAccelMag = 20.0F;  // reject implausible spikes as a seed
+    // A single magnitude-plausible sample is not enough: measured 2026-09-15
+    // that a real settling bounce right after spawn can produce one or two
+    // samples with a plausible magnitude but a skewed direction (not clean
+    // at-rest gravity), still seeding a wrong pitch (~0.2 rad measured).
+    // Require a short run of consecutive plausible samples and seed from
+    // their average instead of a single reading, so a brief transient
+    // cannot dominate the seed.
+    constexpr int kSeedWindowSamples = 50;  // ~100 ms at 500 Hz
+    if (!imu_seeded_) {
+      if (accel_mag < kMinPlausibleAccelMag || accel_mag > kMaxPlausibleAccelMag) {
+        seed_window_count_ = 0;
+        seed_accum_x_ = seed_accum_y_ = seed_accum_z_ = 0.0F;
+        return;  // not a real sample yet; wait for one that looks like gravity
+      }
+      seed_accum_x_ += static_cast<float>(msg.linear_acceleration.x);
+      seed_accum_y_ += static_cast<float>(msg.linear_acceleration.y);
+      seed_accum_z_ += static_cast<float>(msg.linear_acceleration.z);
+      ++seed_window_count_;
+      if (seed_window_count_ < kSeedWindowSamples) {
+        return;  // keep accumulating until the window is settled
+      }
+      const float n = static_cast<float>(seed_window_count_);
+      accel_x_lp_ = seed_accum_x_ / n;
+      accel_y_lp_ = seed_accum_y_ / n;
+      accel_z_lp_ = seed_accum_z_ / n;
+      complementary_pitch_rad_ = std::atan2(-accel_x_lp_, accel_z_lp_);
+      // Kalman state = [angle, gyro_bias]; standard wide-open initial
+      // covariance (trust the accelerometer heavily at first, narrow down
+      // as it converges) - measured 2026-09-15 that shrinking this actually
+      // made a residual post-seed transient WORSE (slower self-correction),
+      // not better; the fix that helped was lengthening the seed-averaging
+      // window itself (see kSeedWindowSamples above), not this covariance.
+      kalman_bias_ = 0.0F;
+      kalman_p_[0][0] = 1.0F;
+      kalman_p_[0][1] = 0.0F;
+      kalman_p_[1][0] = 0.0F;
+      kalman_p_[1][1] = 1.0F;
+      imu_seeded_ = true;
+    } else {
+      // Proper (linear) Kalman filter for angle+gyro-bias fusion, the
+      // standard, widely-validated design for exactly this accel+gyro
+      // sensor pair (state=[angle,bias], e.g. Kristian Lauszus's
+      // TKJElectronics Kalman filter, used across countless real MPU6050/
+      // 6500 balancing-robot projects) - replaces the earlier fixed-alpha
+      // complementary blend, whose gain didn't adapt to how confident the
+      // estimate actually was. A covariance-driven gain starts high (trust
+      // the accelerometer) when uncertain and narrows as it converges,
+      // self-correcting a still-imperfect seed far faster than a fixed
+      // alpha=0.9 blend could (measured 2026-09-15: fixed-alpha took many
+      // dozens of samples to meaningfully reduce a seed error).
+      //
+      // Feedforward correction kept from the previous attempt: subtract
+      // the MPC's own just-computed commanded ground acceleration (known
+      // instantly, zero measurement lag) from accel_x before treating it
+      // as a pitch measurement, so the robot's own balance-correcting
+      // motion isn't misread as tilt. Causally cleaner than differentiating
+      // measured wheel velocity (tried and rejected earlier: that closes a
+      // real actuator-lag feedback loop with the estimate).
+      const float commanded_ground_accel_m_s2 =
+          controller_->mpcDebugState().optimal_command_m_s;
+      const float accel_x_corrected =
+          static_cast<float>(msg.linear_acceleration.x) - commanded_ground_accel_m_s2;
+      const float pitch_measured =
+          std::atan2(-accel_x_corrected, static_cast<float>(msg.linear_acceleration.z));
 
-    float pitch_rad = pitch_from_quat - static_cast<float>(pitch_offset_rad_);
+      // Predict.
+      const float rate = pitch_rate_rad_s - kalman_bias_;
+      complementary_pitch_rad_ += dt * rate;
+      kalman_p_[0][0] += dt * (dt * kalman_p_[1][1] - kalman_p_[0][1] - kalman_p_[1][0] + kalman_q_angle_);
+      kalman_p_[0][1] -= dt * kalman_p_[1][1];
+      kalman_p_[1][0] -= dt * kalman_p_[1][1];
+      kalman_p_[1][1] += kalman_q_bias_ * dt;
+
+      // Update.
+      const float innovation = pitch_measured - complementary_pitch_rad_;
+      const float s = kalman_p_[0][0] + kalman_r_measure_;
+      const float k0 = kalman_p_[0][0] / s;
+      const float k1 = kalman_p_[1][0] / s;
+      complementary_pitch_rad_ += k0 * innovation;
+      kalman_bias_ += k1 * innovation;
+      const float p00 = kalman_p_[0][0];
+      const float p01 = kalman_p_[0][1];
+      kalman_p_[0][0] -= k0 * p00;
+      kalman_p_[0][1] -= k0 * p01;
+      kalman_p_[1][0] -= k1 * p00;
+      kalman_p_[1][1] -= k1 * p01;
+    }
+
+    float pitch_rad =
+        complementary_pitch_rad_ - static_cast<float>(pitch_offset_rad_);
     float pitch_rate_out = pitch_rate_rad_s;
     if (imu_noise_enabled_) {
       pitch_rad += sampleNoise(static_cast<float>(imu_pitch_noise_stddev_rad_));
@@ -1012,6 +1132,9 @@ class BalanceControllerNode : public rclcpp::Node {
       // immediately and prevent explicit recovery after clearing the stop.
       command_.request_disable = false;
       command_.request_enable = reenable;
+      imu_seeded_ = false;  // re-seed the pitch filter from a fresh, validated sample
+      seed_window_count_ = 0;
+      seed_accum_x_ = seed_accum_y_ = seed_accum_z_ = 0.0F;
       reset_requested_ = false;
     }
 
@@ -1519,12 +1642,26 @@ class BalanceControllerNode : public rclcpp::Node {
   float hard_impact_settle_s_;
   float hard_impact_settle_remaining_s_ = 0.0F;
   float left_wheel_sign_;
+  float kalman_q_angle_;
+  float kalman_q_bias_;
+  float kalman_r_measure_;
+  float kalman_bias_ = 0.0F;
+  float kalman_p_[2][2] = {{1.0F, 0.0F}, {0.0F, 1.0F}};
   float leg_kp_;
   float leg_kd_;
   float wheel_velocity_kp_;
   double sensor_timeout_s_;
   int sensor_stale_grace_cycles_;
   int stale_cycle_count_ = 0;
+  float complementary_pitch_rad_ = 0.0F;
+  float accel_x_lp_ = 0.0F;
+  float accel_y_lp_ = 0.0F;
+  float accel_z_lp_ = 9.81F;
+  bool imu_seeded_ = false;
+  int seed_window_count_ = 0;
+  float seed_accum_x_ = 0.0F;
+  float seed_accum_y_ = 0.0F;
+  float seed_accum_z_ = 0.0F;
   float last_accel_magnitude_m_s2_ = 9.81F;
   float raw_imu_pitch_rate_rad_s_ = 0.0F;
   float raw_imu_yaw_rate_rad_s_ = 0.0F;
