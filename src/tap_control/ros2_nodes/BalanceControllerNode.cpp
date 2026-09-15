@@ -150,10 +150,6 @@ class BalanceControllerNode : public rclcpp::Node {
             declare_parameter<double>("hard_impact_settle_s", 0.15))),
         left_wheel_sign_(
             declare_parameter<bool>("left_wheeled", true) ? 1.0F : -1.0F),
-        complementary_alpha_(static_cast<float>(
-            declare_parameter<double>("complementary_alpha", 0.9))),
-        accel_lowpass_period_s_(static_cast<float>(
-            declare_parameter<double>("accel_lowpass_period_s", 0.15))),
         leg_kp_(static_cast<float>(declare_parameter<double>("leg_kp", 12.0))),
         leg_kd_(static_cast<float>(declare_parameter<double>("leg_kd", 0.6))),
         wheel_velocity_kp_(static_cast<float>(
@@ -678,49 +674,28 @@ class BalanceControllerNode : public rclcpp::Node {
       return;
     }
 
-    // The gz IMU's orientation quaternion is not usable for this vendored URDF
-    // (it maps different attitudes inconsistently). Estimate pitch from the
-    // accelerometer instead: low-pass the specific-force vector to recover the
-    // DC gravity direction (killing vibration / motion AC), then take its
-    // sagittal tilt. atan2(-ax, az) is 0 upright, +pi/2 nose-down.
-    if (!imu_seeded_) {
-      accel_x_lp_ = static_cast<float>(msg.linear_acceleration.x);
-      accel_y_lp_ = static_cast<float>(msg.linear_acceleration.y);
-      accel_z_lp_ = static_cast<float>(msg.linear_acceleration.z);
-    }
-    const float lp = clampf(dt / std::max(accel_lowpass_period_s_, 1.0e-3F),
-                            0.0F, 1.0F);
-    accel_x_lp_ += lp * (static_cast<float>(msg.linear_acceleration.x) -
-                         accel_x_lp_);
-    accel_y_lp_ += lp * (static_cast<float>(msg.linear_acceleration.y) -
-                         accel_y_lp_);
-    accel_z_lp_ += lp * (static_cast<float>(msg.linear_acceleration.z) -
-                         accel_z_lp_);
-    const float pitch_from_accel =
-        std::atan2(-accel_x_lp_, accel_z_lp_);
+    // Use the IMU's own fused orientation quaternion directly, the same way
+    // real hardware with an onboard-fusion IMU/AHRS does (e.g. Upkie's
+    // pi3hat: upkie/cpp/observers/BaseOrientation.cpp reads
+    // observation("imu").get<Quaterniond>("orientation") and only applies a
+    // fixed mounting-rotation matrix - it never hand-rolls a complementary
+    // filter from raw accel+gyro in the robot's own control loop, because
+    // that filter cannot distinguish "tilted" from "accelerating" with only
+    // two single-axis-ambiguous sensors and no independent motion reference
+    // (see docs/RULES.md Rule 1's "Attempted 2026-09-15" history - this
+    // project's earlier hand-rolled atan2(-ax,az) complementary filter hit
+    // exactly that closed-loop instability once it drove the MPC). Verified
+    // 2026-09-15: this IMU's orientation quaternion matches sim_pose's own
+    // ground-truth quaternion exactly on this rig (mean diff 0.0000 rad
+    // across 740 samples, near-upright) - expected, since the IMU sensor's
+    // URDF pose is coincident with cad_body (zero rotation offset), unlike
+    // Upkie's own physically-offset pi3hat mount, so no
+    // rotation_base_to_imu-equivalent calibration is needed here.
+    const float pitch_from_quat = basePitchFromQuaternion(
+        static_cast<double>(q.w), static_cast<double>(q.x),
+        static_cast<double>(q.y), static_cast<double>(q.z));
 
-    // Light complementary blend with the gyro for the fast term. alpha is
-    // pushed toward the gyro only while the (low-passed) specific force is far
-    // from 1 g, i.e. the base is genuinely accelerating.
-    const float g_mag = std::sqrt(accel_x_lp_ * accel_x_lp_ +
-                                  accel_y_lp_ * accel_y_lp_ +
-                                  accel_z_lp_ * accel_z_lp_);
-    const float g_err = std::abs(g_mag - 9.81F);
-    const float alpha =
-        clampf(complementary_alpha_ + 0.1F * clampf(g_err / 3.0F, 0.0F, 1.0F),
-               0.0F, 0.999F);
-
-    if (!imu_seeded_) {
-      complementary_pitch_rad_ = pitch_from_accel;
-      imu_seeded_ = true;
-    } else {
-      complementary_pitch_rad_ =
-          alpha * (complementary_pitch_rad_ + pitch_rate_rad_s * dt) +
-          (1.0F - alpha) * pitch_from_accel;
-    }
-
-    float pitch_rad =
-        complementary_pitch_rad_ - static_cast<float>(pitch_offset_rad_);
+    float pitch_rad = pitch_from_quat - static_cast<float>(pitch_offset_rad_);
     float pitch_rate_out = pitch_rate_rad_s;
     if (imu_noise_enabled_) {
       pitch_rad += sampleNoise(static_cast<float>(imu_pitch_noise_stddev_rad_));
@@ -1037,7 +1012,6 @@ class BalanceControllerNode : public rclcpp::Node {
       // immediately and prevent explicit recovery after clearing the stop.
       command_.request_disable = false;
       command_.request_enable = reenable;
-      imu_seeded_ = false;  // re-seed the pitch filter
       reset_requested_ = false;
     }
 
@@ -1545,18 +1519,12 @@ class BalanceControllerNode : public rclcpp::Node {
   float hard_impact_settle_s_;
   float hard_impact_settle_remaining_s_ = 0.0F;
   float left_wheel_sign_;
-  float complementary_alpha_;
-  float accel_lowpass_period_s_;
   float leg_kp_;
   float leg_kd_;
   float wheel_velocity_kp_;
   double sensor_timeout_s_;
   int sensor_stale_grace_cycles_;
   int stale_cycle_count_ = 0;
-  float complementary_pitch_rad_ = 0.0F;
-  float accel_x_lp_ = 0.0F;
-  float accel_y_lp_ = 0.0F;
-  float accel_z_lp_ = 9.81F;
   float last_accel_magnitude_m_s2_ = 9.81F;
   float raw_imu_pitch_rate_rad_s_ = 0.0F;
   float raw_imu_yaw_rate_rad_s_ = 0.0F;
@@ -1583,7 +1551,6 @@ class BalanceControllerNode : public rclcpp::Node {
   std::array<double, 2> last_wheel_command_rad_s_{0.0, 0.0};
   int last_sim_pose_index_ = -1;
   std::size_t last_sim_pose_count_ = 0;
-  bool imu_seeded_ = false;
   bool auto_enable_;
   bool allow_motion_commands_;
   bool imu_noise_enabled_;
