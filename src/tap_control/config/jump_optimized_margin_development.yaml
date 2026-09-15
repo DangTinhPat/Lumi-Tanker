@@ -4,6 +4,7 @@
 # jump_leg_velocity_damping:=0.6. Default profiles remain unchanged.
 balance_controller_node:
   ros__parameters:
+    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
     jump.crouch_duration_s: 3.0
     jump.crouch_knee_rad: -1.6
     jump.enabled: true

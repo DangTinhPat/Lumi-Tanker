@@ -6,6 +6,19 @@ balance_controller_node:
     cmd_vel_timeout_s: 0.5
     wheel_radius_m: 0.03
     left_wheeled: true
+    # STILL sim_pose (ground truth), NOT YET the mandatory IMU default per
+    # docs/RULES.md Rule 1 -- attempted 2026-09-15 and reverted after finding
+    # a genuine closed-loop instability in the existing complementary filter
+    # (BalanceControllerNode::onImu) once it actually drives the MPC: "hold"
+    # pitch error grew to ~0.12 rad with the wheel runaway-driving at
+    # +/-0.6 m/s (direction flips between runs -- oscillatory, not a fixed
+    # bias). Measured separately: the filter's own static bias while
+    # sim_pose-stabilized is small (~0.017 rad) and NOT the cause; adding
+    # pitch_offset_rad compensation and a slower accel_lowpass_period_s
+    # (0.4s) did not fix it. This needs real estimator engineering (tuning
+    # methodology, possibly a proper EKF) before it can safely become
+    # default -- see Rule 1's "Current known violation" section for the
+    # full status and what's needed to finish this migration.
     pitch_source: sim_pose
     sim_pose_topic: /tap_robot/pose
     sim_pose_child_frame: tap_robot

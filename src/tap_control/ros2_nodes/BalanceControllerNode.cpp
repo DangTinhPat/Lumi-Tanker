@@ -486,6 +486,8 @@ class BalanceControllerNode : public rclcpp::Node {
             return;
           }
           jump_contact_last_seen_[side]=stamp;
+          any_wheel_contact_[side]=!msg->contacts.empty();
+          any_wheel_contact_stamps_[side]=stamp;
           bool touching=false;
           for(const auto& c:msg->contacts) {
             const auto& a=c.collision1.name;const auto& b=c.collision2.name;
@@ -910,12 +912,16 @@ class BalanceControllerNode : public rclcpp::Node {
       return;
     }
 
-    // There is no bridged Gazebo contact sensor in this setup. Treat a large
-    // base-height loss or a near-horizontal torso as invalid floor contact so
-    // the balance integrators stop accumulating after the plant has unloaded.
-    // This is deliberately simulation-only; hardware must provide contact or
-    // slip feedback instead of inferring it from pose.
-    state_.floor_contact = true;
+    // Real per-wheel contact sensing (docs/RULES.md Rule 1 / Track B.1):
+    // when not using sim_pose ground truth, floor_contact comes from actual
+    // Gazebo contact sensor data (requires measure_contacts:=true at launch,
+    // see sim.launch.py; defaults on for this reason), never from a
+    // simulator-omniscient pose heuristic. Missing/stale contacts must not
+    // imply grounded balance -- fail closed (not-fresh means not-grounded),
+    // matching jumpContactFresh()'s own fail-closed idiom below.
+    state_.floor_contact = pitch_source_ == "sim_pose"
+        ? true
+        : (anyWheelContactFresh() && (any_wheel_contact_[0] || any_wheel_contact_[1]));
     if (pitch_source_ == "sim_pose" && have_sim_pose_) {
       state_.floor_contact =
           last_sim_pose_z_m_ >= sim_contact_min_base_z_m_ &&
@@ -1270,9 +1276,18 @@ class BalanceControllerNode : public rclcpp::Node {
     return true;
   }
 
+  bool anyWheelContactFresh() const {
+    for(double stamp:any_wheel_contact_stamps_) {
+      const double age=now().seconds()-stamp;
+      if(!(stamp>0 && age>=-kJumpContactClockToleranceS && age<=jump_contact_timeout_s_)) return false;
+    }
+    return true;
+  }
+
   void resetJumpContacts() {
     jump_contact_stamps_.fill(0);jump_contact_last_seen_.fill(0);
     jump_left_contact_=jump_right_contact_=false;
+    any_wheel_contact_.fill(false);any_wheel_contact_stamps_.fill(0);
   }
 
   double jumpEstimatedComZ() const {
@@ -1605,6 +1620,14 @@ class BalanceControllerNode : public rclcpp::Node {
   static constexpr double kJumpContactClockToleranceS=0.010;
   std::array<double,2> jump_contact_stamps_{};
   std::array<double,2> jump_contact_last_seen_{};
+  // Generic per-wheel "touching anything" signal, independent of
+  // jump_ground_collision_ name-matching (which rejects e.g. ledge_pad as
+  // "unrecognized" -- correct for jump's own single-surface world, wrong for
+  // the general floor_contact use below, which just needs real contact vs.
+  // no contact, not which named surface). Set from the same subscription
+  // callback as jump_contact_stamps_, same freshness idiom.
+  std::array<bool,2> any_wheel_contact_{};
+  std::array<double,2> any_wheel_contact_stamps_{};
   std::array<std::string,2> jump_contact_topics_;
   std::string jump_profile_,jump_ground_collision_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr jump_status_pub_;

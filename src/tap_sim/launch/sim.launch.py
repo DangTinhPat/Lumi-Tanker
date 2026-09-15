@@ -63,14 +63,18 @@ def generate_launch_description():
         DeclareLaunchArgument('gui', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('auto_enable', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('jump_model', default_value='false', choices=['true', 'false']),
-        DeclareLaunchArgument('measure_contacts', default_value='false', choices=['true', 'false'],
-                              description='Opt-in wheel contact sensors (observational telemetry '
-                                          'only, see BalanceControllerNode status contact_l=/contact_r= '
-                                          '- does not feed floor_contact or any control logic), '
-                                          'decoupled from jump_model so it does not also swap in '
-                                          'BoundedGazeboSystem/lower actuator limits. Requires world '
-                                          'support for the gz-sim-contact-system plugin; only '
-                                          'ledge_test.sdf (terrain:=ledge) has it so far.'),
+        DeclareLaunchArgument('measure_contacts', default_value='true', choices=['true', 'false'],
+                              description='Wheel contact sensors. Defaults on as of 2026-09-15 '
+                                          '(docs/RULES.md Rule 1): the default pitch_source is now '
+                                          'IMU-based, not sim_pose ground truth, and floor_contact for '
+                                          'that path is derived from this real contact data (see '
+                                          'BalanceControllerNode - anyWheelContactFresh()), not a pose '
+                                          'heuristic. Also still published as observational telemetry '
+                                          '(contact_l=/contact_r= on /jump_status) independent of that. '
+                                          'Decoupled from jump_model so it does not also swap in '
+                                          'BoundedGazeboSystem/lower actuator limits. All three worlds '
+                                          '(empty.sdf, rough_training.sdf, ledge_test.sdf) now load the '
+                                          'required gz-sim-contact-system plugin.'),
         DeclareLaunchArgument('terrain', default_value='none', choices=['none', 'rough', 'ledge'],
                               description='rough selects worlds/rough_training.sdf (heightfield + '
                                           'step arenas ported from rl-basic); ledge selects '

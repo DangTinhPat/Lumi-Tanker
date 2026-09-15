@@ -2,6 +2,7 @@
 # Matched log/jump_1789205832822611013: 6.83 cm COM rise, failed landing.
 balance_controller_node:
   ros__parameters:
+    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
     jump.enabled: true
     jump.wheel_frame_compensation: true
     jump.profile: manual_curve_experimental

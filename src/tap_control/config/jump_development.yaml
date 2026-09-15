@@ -1,6 +1,7 @@
 # Isolated development candidate; never a hardware or validated demo profile.
 balance_controller_node:
   ros__parameters:
+    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
     jump.enabled: true
     jump.wheel_frame_compensation: true
     jump.profile: manual_curve_experimental

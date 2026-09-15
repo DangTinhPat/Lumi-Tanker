@@ -59,14 +59,22 @@ as a Bool, reject stale/invalid feedback, and use the native joint convention.
 - `jump_model:=true` selects `jump.sdf`, wheel contact sensors, and the
   `tap_sim/BoundedGazeboSystem` effort-producing hardware plugin. Defaults above
   remain unchanged. Masses remain approximate and unchanged.
-- `measure_contacts:=true` is a separate, independent opt-in (not implied by
-  and not implying `jump_model`) that enables the same wheel contact sensors
-  on whatever world is selected via `terrain:=`, without swapping in
-  `BoundedGazeboSystem` or lower actuator limits. Only `ledge_test.sdf`
-  (`terrain:=ledge`) loads the required `gz-sim-contact-system` world plugin
-  so far; `empty.sdf`/`rough_training.sdf` do not yet. Purely observational -
-  no control logic in `BalanceControllerNode` reads this differently from the
-  `jump_model` case (see next point's caveat, which applies here too).
+- `measure_contacts` (default `true` as of 2026-09-15, independent of and not
+  implying `jump_model`) enables the same wheel contact sensors on whatever
+  world is selected via `terrain:=`, without swapping in
+  `BoundedGazeboSystem` or lower actuator limits. All three worlds
+  (`empty.sdf`, `rough_training.sdf`, `ledge_test.sdf`) load the required
+  `gz-sim-contact-system` world plugin. **No longer purely observational**:
+  per `docs/RULES.md` Rule 1, the default `pitch_source` is now IMU-based
+  (not `sim_pose` ground truth), and `BalanceControllerNode`'s
+  `floor_contact` for that path is derived directly from this real contact
+  data (`anyWheelContactFresh()` / `any_wheel_contact_`, a wheel-vs-anything
+  signal that does not restrict to a named ground collision, unlike the
+  stricter jump-specific `jump_ground_collision_` matching described below)
+  rather than a pose heuristic. Setting `measure_contacts:=false` while
+  `pitch_source` is not `sim_pose` leaves `floor_contact` permanently false
+  (fail-closed, per the freshness contract below) - not a supported
+  combination for anything expecting normal balance behavior.
 - `/left_wheel_contacts` and `/right_wheel_contacts` bridge Gazebo Contacts to
   `ros_gz_interfaces/msg/Contacts`. Consumers must check fresh timestamps and
   wheel/ground collision pairs, not merely a nonempty array. The opt-in
