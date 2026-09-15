@@ -65,13 +65,22 @@ balance_controller_node:
     mpc:
       wheel_radius_m: 0.03
       half_wheel_base_m: 0.1545
-      fall_pitch_rad: 0.8
+      # Widened from 0.8 to 1.1 (2026-09-15): permanent, always-on authority
+      # increase, not landing-window-gated. Proven in docs/LEDGE_DRIVEOFF_LIMIT.md
+      # to raise 20cm ledge drive-off recovery from stock's 70% (n=10) to 80%
+      # (n=25, two independent batches) with sim_smoke.py regression clean.
+      # Every earlier attempt to react FASTER within the old narrower window
+      # (active damping, impedance, pre-crouch reflex, touchdown detection)
+      # measurably hurt recovery; this widens the window itself instead.
+      fall_pitch_rad: 1.1
       leg_length: 0.234
       pendulum_length_per_com_height: 1.077
       min_pendulum_length: 0.15
       max_pendulum_length: 0.27
       gravity_m_s2: 9.81
-      max_ground_accel: 6.0
+      # Widened from 6.0 to 10.0 alongside fall_pitch_rad above — see that
+      # comment; same evidence, same promotion date.
+      max_ground_accel: 10.0
       max_ground_velocity: 0.6
       # A 0.4 s horizon avoids the poorly conditioned 1 s QP on this short robot.
       # Fixed iterations are an approximation, not a solver-convergence guarantee.

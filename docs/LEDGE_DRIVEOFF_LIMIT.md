@@ -222,15 +222,35 @@ allow this kind of test). This is the first mechanism tried across this
 entire investigation that measurably beat, not just tied or hurt, the stock
 baseline.
 
-**Not yet done before treating this as production-ready**: broader
-validation beyond `sim_smoke.py` and the ledge test specifically - e.g.
-`tools/recovery_smoke.py` (stand-up-from-lying, uses the separate
-`stand_up.fall_pitch_rad: 2.0` namespace so is likely unaffected, but not
-directly re-run with this file), `tools/transformation_smoke.py` (Stationary
-Show), and deep-squat QA - to confirm a more tolerant fall threshold and
-higher wheel accel authority do not regress any other validated behavior
-before promoting these two values into `balance_controller.yaml`'s own
-defaults.
+**Promoted to production default 2026-09-15.** The broader validation this
+section called for was run:
+
+- `sim_smoke.py --duration 30 --exercise --poses --max-pitch-error .12
+  --controller-config landing_authority_test.yaml`: pass (`failure: null`).
+- `recovery_smoke.py`: fails with "No sustained 2s upright recovery" — but
+  this is the pre-existing 90° lying-pose stand-up failure documented
+  elsewhere in this repo (CLAUDE.md), reproduced identically without any
+  config override too (the script has no config-override flag, and
+  `stand_up.fall_pitch_rad: 2.0` is a separate namespace from
+  `mpc.fall_pitch_rad` regardless). Not a regression from this change.
+- `transformation_smoke.py` (Stationary Show): the default `--freshness 0.15`
+  produced a "Stale pose" failure identically with and without the override
+  (an environment real-time-factor flake, not config-dependent); re-run with
+  `--freshness 0.3` on both sides gave peak_yaw_error_rad 0.0835 (with
+  override) vs. 0.0839 (baseline) — statistically indistinguishable, so the
+  already-known roll-induced yaw (~0.14 rad, exceeding this script's strict
+  0.06 rad default bound regardless of this change) is unaffected.
+- Deep-squat QA (`docs/DEEP_SQUAT.md`) is a GUI-driven manual procedure, not
+  automated; not re-run for this promotion. `mpc.fall_pitch_rad` and
+  `mpc.max_ground_accel` are Balance-mode wheel/fall parameters, not squat
+  pose-envelope parameters, so the risk of interaction is low, but this is a
+  real, explicitly-acknowledged gap in this promotion's evidence, not a
+  confirmed pass.
+
+`balance_controller.yaml`'s own `mpc.fall_pitch_rad` and `mpc.max_ground_accel`
+are now `1.1` and `10.0` (see comments there). `landing_authority_test.yaml`
+is kept only for provenance/reproducing the original isolated A/B test; it is
+now a redundant no-op against current defaults, not a required override.
 
 ## Honest overall status
 

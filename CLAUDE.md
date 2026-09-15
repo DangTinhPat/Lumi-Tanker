@@ -172,10 +172,15 @@ validated. `docs/UPSTREAM.md` documents source provenance.
   helped: raising `mpc.fall_pitch_rad` (0.8→1.1) and `mpc.max_ground_accel`
   (6.0→10.0) as a permanent, always-on change (not gated by any
   touchdown-detection signal) — 80% recovered, n=25 across two batches,
-  `sim_smoke.py` regression still passes
-  (`src/tap_control/config/landing_authority_test.yaml`). Not yet promoted
-  to the production default pending broader validation (stand-up/show/
-  deep-squat QA). The earlier conclusion that this ledge was categorically
+  `sim_smoke.py` regression still passes. **Promoted to
+  `balance_controller.yaml`'s own defaults on 2026-09-15** after re-running
+  `sim_smoke.py` (pass) and `transformation_smoke.py`/`recovery_smoke.py`
+  (no regression vs. baseline; see `docs/LEDGE_DRIVEOFF_LIMIT.md`'s
+  promotion note for exact numbers and the one acknowledged gap — deep-squat
+  QA is GUI-manual and was not re-run for this promotion).
+  `src/tap_control/config/landing_authority_test.yaml` is kept only for
+  provenance; it is now a redundant no-op against current defaults. The
+  earlier conclusion that this ledge was categorically
   unrecoverable was also wrong — an artifact of the heightfield confound,
   not a torque/energy limit. See `docs/LEDGE_DRIVEOFF_LIMIT.md` for full
   evidence.

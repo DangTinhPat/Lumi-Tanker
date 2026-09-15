@@ -1,3 +1,9 @@
+# PROMOTED 2026-09-15: these two values are now balance_controller.yaml's own
+# defaults (see its mpc.fall_pitch_rad / mpc.max_ground_accel comments). This
+# override file is kept only for provenance/reproducing the isolated A/B test
+# recorded in docs/LEDGE_DRIVEOFF_LIMIT.md; passing it via --controller-config
+# today is redundant (a harmless no-op against current defaults), not wrong.
+#
 # Always-on (not landing-window-gated) increase to wheel control authority
 # and fall-declaration tolerance, isolated from every other landing
 # mechanism tried this session. Rationale: the chaotic snag failures give
