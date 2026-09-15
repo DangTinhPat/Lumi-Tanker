@@ -752,17 +752,29 @@ class BalanceControllerNode : public rclcpp::Node {
       accel_y_lp_ = seed_accum_y_ / n;
       accel_z_lp_ = seed_accum_z_ / n;
       complementary_pitch_rad_ = std::atan2(-accel_x_lp_, accel_z_lp_);
-      // Kalman state = [angle, gyro_bias]; standard wide-open initial
-      // covariance (trust the accelerometer heavily at first, narrow down
-      // as it converges) - measured 2026-09-15 that shrinking this actually
-      // made a residual post-seed transient WORSE (slower self-correction),
-      // not better; the fix that helped was lengthening the seed-averaging
-      // window itself (see kSeedWindowSamples above), not this covariance.
+      // Kalman state = [angle, gyro_bias]. Bug found and fixed 2026-09-15:
+      // checked this implementation against the actual canonical reference
+      // (TKJElectronics/KalmanFilter, Kristian Lauszus - the design this is
+      // ported from) instead of trusting memory of the algorithm alone.
+      // The math matched exactly, but the INITIAL COVARIANCE didn't: this
+      // code used P=1.0 ("trust the accelerometer heavily at first"), the
+      // opposite of the reference's own documented intent - "we assume
+      // that the bias is 0 and we KNOW the starting angle (via setAngle),
+      // [so] the error covariance matrix is set like so" - i.e. P=0,
+      // fully trust the seeded angle and let uncertainty grow gradually via
+      // Q_angle/Q_bias, not distrust it from sample zero. With P=1.0 the
+      // very first post-seed Kalman gain was already ~0.97 (S=1.0+R_measure,
+      // K0=P00/S), nearly fully substituting the first raw accelerometer
+      // reading for the (already-good, window-averaged) seed - reintroducing
+      // exactly the single-sample fragility the seed-averaging fix was
+      // built to avoid. This explains why lowering P further (tried
+      // earlier, P=0.05) made things worse, not better: 1.0 was already
+      // wrong in that same direction, just less so.
       kalman_bias_ = 0.0F;
-      kalman_p_[0][0] = 1.0F;
+      kalman_p_[0][0] = 0.0F;
       kalman_p_[0][1] = 0.0F;
       kalman_p_[1][0] = 0.0F;
-      kalman_p_[1][1] = 1.0F;
+      kalman_p_[1][1] = 0.0F;
       imu_seeded_ = true;
     } else {
       // Proper (linear) Kalman filter for angle+gyro-bias fusion, the
