@@ -6,20 +6,25 @@ balance_controller_node:
     cmd_vel_timeout_s: 0.5
     wheel_radius_m: 0.03
     left_wheeled: true
-    # STILL sim_pose (ground truth), NOT YET the mandatory IMU default per
-    # docs/RULES.md Rule 1 -- attempted 2026-09-15 and reverted after finding
-    # a genuine closed-loop instability in the existing complementary filter
-    # (BalanceControllerNode::onImu) once it actually drives the MPC: "hold"
-    # pitch error grew to ~0.12 rad with the wheel runaway-driving at
-    # +/-0.6 m/s (direction flips between runs -- oscillatory, not a fixed
-    # bias). Measured separately: the filter's own static bias while
-    # sim_pose-stabilized is small (~0.017 rad) and NOT the cause; adding
-    # pitch_offset_rad compensation and a slower accel_lowpass_period_s
-    # (0.4s) did not fix it. This needs real estimator engineering (tuning
-    # methodology, possibly a proper EKF) before it can safely become
-    # default -- see Rule 1's "Current known violation" section for the
-    # full status and what's needed to finish this migration.
-    pitch_source: sim_pose
+    # IMU default per docs/RULES.md Rule 1 (2026-09-15). History: a first
+    # complementary-filter attempt was genuinely unstable (closed-loop,
+    # couldn't separate tilt from self-motion); replaced with a proper
+    # Kalman filter (state=[angle,gyro_bias]) ported from the real
+    # TKJElectronics/KalmanFilter reference (Kristian Lauszus) after
+    # verifying this codebase's math against that actual source line by
+    # line. Root-caused the remaining instability to (a) seeding from an
+    # unvalidated first /imu sample during a Gazebo/bridge startup artifact
+    # (fixed: seed from a magnitude-plausible, window-averaged sample) and
+    # (b) an initial covariance P=1.0 that contradicted the reference's own
+    # documented design (P=0 - fully trust the seeded angle) (fixed).
+    # kalman_r_measure raised from the reference's stock 0.03 to 0.1,
+    # measured to clear the "hold" stage cleanly. jump.enabled and
+    # station_keeper.enabled still hard-require sim_pose (world-frame
+    # position has no sensor-backed estimate here yet - a different,
+    # unsolved problem from pitch) and pin it explicitly in their own
+    # config files.
+    pitch_source: imu
+    kalman_r_measure: 0.1
     sim_pose_topic: /tap_robot/pose
     sim_pose_child_frame: tap_robot
     sim_pose_index: 0

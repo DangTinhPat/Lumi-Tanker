@@ -157,6 +157,16 @@ validated. `docs/UPSTREAM.md` documents source provenance.
 
 ## Current validation status (do not overstate)
 
+**Every number below predates 2026-09-15's `pitch_source` default change**
+(`sim_pose` → `imu`, per `docs/RULES.md` Rule 1 — see that file and
+`docs/LEDGE_DRIVEOFF_LIMIT.md`'s "Known regression" section). General
+balance (hold/squat/drive) is close to parity under the new IMU default;
+the 20 cm ledge drive-off specifically regressed from 70-88% to **0/10
+recovered** under IMU — a known, accepted, separately-tracked tradeoff, not
+a re-validation of the numbers below. Treat anything below as "what
+ground truth was capable of," not the active configuration's current
+behavior, until it is re-measured under `pitch_source: imu`.
+
 - ~67 s N20 sim trial passed hold/drive/moderate poses (25% squat, 20% roll
   only); roll caused up to 0.066 m translation and ~0.14 rad unintended yaw.
 - Deep squat (-1.6 rad knee) and Stationary Show (25% squat/roll sequence) are

@@ -1,5 +1,39 @@
 # Driving off a 20 cm ledge: current findings (second correction)
 
+## Known regression: `pitch_source: imu` default (2026-09-15)
+
+**Every number below this point was measured with `pitch_source: sim_pose`
+(ground truth), which was the default at the time.** As of 2026-09-15,
+`pitch_source: imu` is the new default (`docs/RULES.md` Rule 1 - no
+control decision may depend on simulator ground truth). This is a
+deliberate, user-approved tradeoff, not an oversight:
+
+- General balance (standing, squat, roll, driving on flat ground) with the
+  IMU path (a real Kalman filter, `state=[angle,gyro_bias]`, verified
+  against the canonical `TKJElectronics/KalmanFilter` reference) is close
+  to sim_pose parity - `sim_smoke.py`'s "hold" stage passes cleanly with
+  `kalman_r_measure: 0.1`; "squat" is marginal (~0.120-0.121 rad against
+  the test's 0.12 bound, itself an arbitrary threshold calibrated against
+  ground-truth precision, not a real hardware-derived requirement).
+- **This 20 cm ledge drive-off test specifically regressed hard: 0/10
+  (0%) recovered with the IMU default**, down from sim_pose's 70-88%
+  documented below. Every trial shows a real, physical full flip (peak
+  pitch 1.8-2.6 rad), not a small estimation error. The violent,
+  high-angular-rate nature of this specific failure mode (already
+  characterized below as resistant to nearly every hand-designed
+  intervention tried, even under perfect ground truth) appears to amplify
+  the IMU-based estimator's small residual noise far more than the calm
+  scenarios (hold/squat) that were tuned against.
+- **Decision (user, 2026-09-15): keep `pitch_source: imu` as the default
+  anyway, accept this landing regression as a known, separate, tracked
+  problem to solve later** - not a reason to fall back to ground truth.
+  Rule 1 compliance is the higher priority; landing-specific IMU
+  robustness is future work, scoped separately from general balance.
+- Before resuming ledge-drop-recovery work, re-derive any new baseline
+  under the current `pitch_source: imu` default, not the sim_pose numbers
+  below - they are no longer the active configuration's behavior, only a
+  historical/reference point for what ground truth was capable of.
+
 ## Correction history
 
 1. An earlier version of this document concluded the 20 cm
