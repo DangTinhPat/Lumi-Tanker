@@ -124,6 +124,16 @@ DEEP_SQUAT_FULL_DEPTH_MIN_TRANSITION_S = 11.
 # crouch direction, and generate_stand_tall's own monotonicity check rejects
 # anything past the real geometric peak regardless.
 STAND_TALL_KNEE_RAD = 0.5
+# The GUI's own "natural"/default operating pose (2026-09-16, user-requested
+# deep crouch) - matches balance_controller.yaml's stand_up.stand_pose_rad.
+# Deliberately kept separate from pose_curves.json's own 'rest_pose': that
+# field is still the real anchor Show/Jump/Deep-squat's baked curve tables
+# were generated from (ShowSequence enforces tables share this exact
+# endpoint), so changing it there breaks those tables' own internal
+# consistency without regenerating them - a larger, separate task. This
+# constant is only for the GUI's idle/Enable-time default target and the
+# "Neutral pose" button, not anything curve-table-anchored.
+DEFAULT_POSE = [0.90, -1.3962634016, 0.90, -1.3962634016]
 # Mirrors sim.launch.py's own terrain-conditioned spawn_x/spawn_y/spawn_z
 # defaults (src/tap_sim/launch/sim.launch.py) so Launch sim and Reset standup
 # agree on where "home" is for the selected terrain. 0.2372 m is the flat
@@ -194,7 +204,7 @@ class Dashboard:
         self.measured_wall = 0.
         self.show_tracking_since = None
         self.phase = 0.
-        self.pose = list(curves['rest_pose'])
+        self.pose = list(DEFAULT_POSE)
         self.mode_text = 'No controller feedback'
         self.telemetry_text = 'Pitch: -- | Reference: -- | CoM: -- | Sensors: -- | Speed: --'
         self.motor_text = 'No motor commands'
@@ -1167,7 +1177,7 @@ class Dashboard:
         self.stop_show()
         self.workflow.set('Native joints')
         self.depth.set(0.)
-        for var, angle in zip(self.jvars, self.curves['rest_pose']):
+        for var, angle in zip(self.jvars, DEFAULT_POSE):
             var.set(angle)
 
     def change_workflow(self):
@@ -1313,12 +1323,14 @@ class Dashboard:
             return list(self.pose)
         elif mode == 'Native joints':
             target = [v.get() for v in self.jvars]
-            # Until explicitly opted in, keep manual motions close to neutral.
+            # Until explicitly opted in, keep manual motions close to the
+            # GUI's own natural/default pose (DEFAULT_POSE), not
+            # pose_curves.json's separate curve-table-anchored rest_pose.
             if not self.experimental.get():
                 target = [max(r - .15, min(r + .15, q))
-                          for q, r in zip(target, self.curves['rest_pose'])]
+                          for q, r in zip(target, DEFAULT_POSE)]
         elif not self.experimental.get():
-            target = self.curves['rest_pose']
+            target = list(DEFAULT_POSE)
         else:
             amount = self.depth.get()
             if mode == 'Wiggle':

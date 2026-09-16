@@ -774,6 +774,14 @@ class DashboardShowTest(unittest.TestCase):
             with self.subTest(action=action):
                 self.gui.enabled, self.gui.estopped = True, False
                 self.gui.drive = (0., 0.)
+                # A prior iteration's 'neutral' action moves self.pose to
+                # DEFAULT_POSE (deliberately not pose_curves.json's own
+                # rest_pose - see dashboard.py's DEFAULT_POSE comment),
+                # which start_show()'s own neutral precondition requires;
+                # reset it so each subTest is independent of iteration order.
+                self.gui.pose = list(self.gui.curves['rest_pose'])
+                self.gui.jvars = [Value(q) for q in self.gui.pose]
+                self.gui.measured_pose = list(self.gui.pose)
                 self.gui.start_show()
                 self.assertIsNotNone(self.gui.show)
                 if action == 'start_drive':
@@ -802,7 +810,12 @@ class DashboardShowTest(unittest.TestCase):
         self.gui.start_show()
         self.assertIsNone(self.gui.show, 'New start must still require neutral')
         self.gui.neutral()
+        # neutral() moves pose/jvars to DEFAULT_POSE (deep crouch); start_show()
+        # still requires the Show curves' own anchor (rest_pose) - reset both
+        # explicitly, as this test wants to exercise a genuine re-start, not
+        # neutral()'s new default destination.
         self.gui.pose = list(self.gui.curves['rest_pose'])
+        self.gui.jvars = [Value(q) for q in self.gui.pose]
         self.gui.measured_pose = list(self.gui.pose)
         self.gui.start_show()
         self.assertIsNotNone(self.gui.show)
@@ -1001,8 +1014,8 @@ class DashboardDeepSquatTest(unittest.TestCase):
         self.gui.change_workflow()
         self.assertIsNone(self.gui.show)
         self.assertEqual(self.gui.workflow.get(), 'Deep squat')
-        self.assertEqual(self.gui.curves['hip_bounds'], [-.6, .6])
-        self.assertEqual(self.gui.curves['knee_bounds'], [-.8, .2])
+        self.assertEqual(self.gui.curves['hip_bounds'], [-.6, 1.0])
+        self.assertEqual(self.gui.curves['knee_bounds'], [-1.6, .2])
 
     def test_deep_neutral_entry_and_stale_sensors_hold_without_resume(self):
         self.profile()
@@ -1440,7 +1453,9 @@ class DashboardJumpTest(unittest.TestCase):
         self.gui.neutral()
         self.assertFalse(self.gui.pose_commands_blocked)
         self.assertEqual(self.gui.workflow.get(), 'Native joints')
-        self.assertEqual(self.gui.jvars[1].get(), 0.)
+        # neutral() resets jvars to DEFAULT_POSE (deep crouch), not
+        # pose_curves.json's old rest_pose.
+        self.assertAlmostEqual(self.gui.jvars[1].get(), -1.3962634016)
 
     def test_reset_sag_requires_explicit_neutral_before_pose_publication(self):
         self.gui.workflow.set('Squat')
@@ -1456,12 +1471,16 @@ class DashboardJumpTest(unittest.TestCase):
         self.assertEqual(self.gui.pose, self.gui.measured_pose)
         self.quiet_tick()
         command = self.gui.pub['target_pose'].publish.call_args.args[0].data
-        self.assertGreater(command[1], -.041)
-        self.assertLessEqual(command[1], -.026+1e-10)
+        # neutral() now slews toward DEFAULT_POSE (deep crouch, knee=-1.4),
+        # not pose_curves.json's old rest_pose (knee=0) - one 0.05s tick at
+        # the 0.3 rad/s slew rate moves -.041 -> -.056, away from rest_pose
+        # rather than toward it.
+        self.assertLess(command[1], -.041)
+        self.assertGreaterEqual(command[1], -.056-1e-10)
 
     def test_reset_invalid_or_out_of_manual_bounds_never_clips_measured_pose(self):
         self.gui.reset()
-        for pose in ([.98, -1.6, .98, -1.6], [float('nan')] * 4, [0.] * 3):
+        for pose in ([1.5, -2.0, 1.5, -2.0], [float('nan')] * 4, [0.] * 3):
             self.gui.measured_pose = pose
             self.gui.neutral()
             self.assertTrue(self.gui.pose_commands_blocked)

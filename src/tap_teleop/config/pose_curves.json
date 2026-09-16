@@ -10,10 +10,10 @@
   ],
   "hip_bounds": [
     -0.6,
-    0.6
+    1.0
   ],
   "knee_bounds": [
-    -0.8,
+    -1.6,
     0.2
   ],
   "shortening_sign": -1.0,

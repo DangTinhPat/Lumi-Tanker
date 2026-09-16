@@ -100,14 +100,32 @@ balance_controller_node:
       # under this deeper stance too; ledge specifically is not re-tested
       # here since it has no working baseline to regress from.
       # Deep crouch (2026-09-16, user-requested visual match to a reference
-      # image): knee=-1.4/hip=0.868 (generate_deep_squat, knee_max=1.4,
-      # dx-balanced), com_height 0.217->0.143m (~34% drop). Requires
-      # pose_hip_max_rad/pose_knee_min_rad above raised to match, or
-      # discardPendingPose() silently clamps it back to a shallow -0.8 the
-      # moment motion starts (see that comment) - root-caused after an
-      # earlier attempt at this exact pose appeared to "sag" under load.
-      stand_pose_rad: [0.8677594936825335, -1.4, 0.0,
-                       0.8677594936825335, -1.4, 0.0]
+      # image, explicit 100 deg knee interior angle - 80 deg of deviation
+      # from a straight leg): knee=-1.3962634 rad (-80 deg). Hip refined
+      # twice:
+      #  1. generate_deep_squat's simplified leg-only (thigh+shank+wheel)
+      #     dx=0 solve gave hip=0.8657005 rad - but real telemetry showed a
+      #     genuine ~1.8 deg (0.031 rad) body lean at that hip, because
+      #     WholeBodyModel::compute() (the real controller's equilibrium
+      #     model) also includes the body's own mass, which the simplified
+      #     2-link solve ignores - not a bug, whole_body_compensation was
+      #     correctly finding the TRUE equilibrium lean for an off-balance
+      #     hip choice.
+      #  2. Live secant search against the real running controller's own
+      #     wb_dx telemetry (holding knee fixed, sweeping hip via
+      #     /target_pose) converged at hip=0.90 rad (51.6 deg), wb_dx~0 -
+      #     this is the hip that makes the REAL full-body equilibrium level,
+      #     not just the simplified leg-only approximation. Chosen per user
+      #     request (planned future camera mount needs a level body,
+      #     "gimbal-like") without disabling whole_body_compensation itself,
+      #     which stays valuable for other poses/real disturbances.
+      # com_height ~0.144m.  Requires pose_hip_max_rad/pose_knee_min_rad
+      # above raised to match, or discardPendingPose() silently clamps it
+      # back to a shallow -0.8 the moment motion starts (see that comment) -
+      # root-caused after an earlier attempt at this exact pose appeared to
+      # "sag" under load.
+      stand_pose_rad: [0.90, -1.3962634016, 0.0,
+                       0.90, -1.3962634016, 0.0]
       tuck_pose_rad: [0.542801486, -0.8, 0.0, 0.542801486, -0.8, 0.0]
       fall_direction_aware: false
       tuck_duration_s: 1.0
