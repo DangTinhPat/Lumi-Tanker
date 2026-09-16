@@ -9,6 +9,7 @@ import time
 import tkinter as tk
 
 from owned_process import start_owned_process, cleanup_group
+from tap_launch import sim_launch_command
 
 
 def main():
@@ -51,9 +52,9 @@ def main():
 
     node.create_subscription(TFMessage, '/tap_robot/pose', on_pose, qos_profile_sensor_data)
     stream = (log / 'sim.log').open('w')
-    process = start_owned_process([str(workspace/'run_sim.sh'),
+    process = start_owned_process(sim_launch_command(
         f'gui:={str(args.gui).lower()}', 'jump_model:=true', 'jump_leg_velocity_damping:=0.6',
-        f'controller_config:={workspace}/src/tap_control/config/precision_pose.yaml'],
+        f'controller_config:={workspace}/src/tap_control/config/precision_pose.yaml'),
         cwd=workspace, stdout=stream, stderr=stream)
     stage, epoch, cycle = 'startup', 0., 0
     start = time.monotonic()

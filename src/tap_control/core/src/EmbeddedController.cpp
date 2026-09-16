@@ -300,7 +300,8 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   // instead of being driven anywhere. Same scope as the reflex above;
   // default (1.0/1.0) config makes this an exact no-op every cycle.
   const LandingImpedance::Output impedance = landing_impedance_.update(
-      state.floor_contact, state.joints.position_rad[left_hip],
+      state.left_floor_contact, state.right_floor_contact,
+      state.joints.position_rad[left_hip],
       state.joints.position_rad[left_knee], state.joints.position_rad[right_hip],
       state.joints.position_rad[right_knee], state.joints.velocity_rad_s[left_hip],
       state.joints.velocity_rad_s[left_knee], state.joints.velocity_rad_s[right_hip],
@@ -378,13 +379,15 @@ void EmbeddedController::writeBalancedCommand(
   // default (impedance inactive) the knee scale below is exactly 1.0.
   output.kp_scale[left_hip] = balance.leg_kp_scale;
   output.kp_scale[right_hip] = balance.leg_kp_scale;
-  output.kp_scale[left_knee] = balance.leg_kp_scale * impedance.leg_kp_scale;
-  output.kp_scale[right_knee] = balance.leg_kp_scale * impedance.leg_kp_scale;
+  // Per-side (ROLL axis, 2026-09-16): each knee scaled by ITS OWN side's
+  // impedance output, not a shared value - see LandingImpedance.hpp.
+  output.kp_scale[left_knee] = balance.leg_kp_scale * impedance.left_leg_kp_scale;
+  output.kp_scale[right_knee] = balance.leg_kp_scale * impedance.right_leg_kp_scale;
 
   output.kd_scale[left_hip] = balance.leg_kd_scale;
   output.kd_scale[right_hip] = balance.leg_kd_scale;
-  output.kd_scale[left_knee] = balance.leg_kd_scale * impedance.leg_kd_scale;
-  output.kd_scale[right_knee] = balance.leg_kd_scale * impedance.leg_kd_scale;
+  output.kd_scale[left_knee] = balance.leg_kd_scale * impedance.left_leg_kd_scale;
+  output.kd_scale[right_knee] = balance.leg_kd_scale * impedance.right_leg_kd_scale;
 
   output.torque_nm[left_hip] = config_.leg_max_torque_nm;
   output.torque_nm[left_knee] = config_.leg_max_torque_nm;

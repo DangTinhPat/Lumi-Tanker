@@ -17,12 +17,19 @@ def generate_launch_description():
     jump_model = LaunchConfiguration('jump_model')
     measure_contacts = LaunchConfiguration('measure_contacts')
     terrain = LaunchConfiguration('terrain')
+    ledge_world = LaunchConfiguration('ledge_world')
     # jump_model takes priority: rough_training.sdf/ledge_test.sdf have no jump
-    # contact sensors/plugin.
-    world = PathJoinSubstitution([sim, 'worlds', PythonExpression([
+    # contact sensors/plugin. ledge_world (an absolute path), when nonempty,
+    # overrides everything else - used by tools/ledge_height_smoke.py to test
+    # a swept-height family of generated ledge worlds (see
+    # tools/generate_ledge_world.py) without adding a new terrain choice per
+    # height.
+    default_world = PathJoinSubstitution([sim, 'worlds', PythonExpression([
         "'jump.sdf' if '", jump_model, "' == 'true' else "
         "('rough_training.sdf' if '", terrain, "' == 'rough' else "
         "('ledge_test.sdf' if '", terrain, "' == 'ledge' else 'empty.sdf'))"])])
+    world = PythonExpression([
+        "'", ledge_world, "' if '", ledge_world, "' != '' else '", default_world, "'"])
     gui_config = PathJoinSubstitution([sim, 'config', 'gui.config'])
     xacro = PathJoinSubstitution([description, 'description', 'cad_robot', 'simulation.urdf.xacro'])
     base_controller_config = PathJoinSubstitution([
@@ -75,6 +82,12 @@ def generate_launch_description():
                                           'BoundedGazeboSystem/lower actuator limits. All three worlds '
                                           '(empty.sdf, rough_training.sdf, ledge_test.sdf) now load the '
                                           'required gz-sim-contact-system plugin.'),
+        DeclareLaunchArgument('ledge_world', default_value='',
+                              description='Absolute path to a generated world sdf (see '
+                                          'tools/generate_ledge_world.py), overriding terrain/'
+                                          'jump_model world selection entirely when nonempty. For '
+                                          'testing a swept family of ledge heights without a new '
+                                          'terrain choice per height.'),
         DeclareLaunchArgument('terrain', default_value='none', choices=['none', 'rough', 'ledge'],
                               description='rough selects worlds/rough_training.sdf (heightfield + '
                                           'step arenas ported from rl-basic); ledge selects '

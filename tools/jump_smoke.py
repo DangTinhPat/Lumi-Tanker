@@ -369,6 +369,7 @@ def main():
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.signals import SignalHandlerOptions
     from owned_process import cleanup_group, start_owned_process
+    from tap_launch import sim_launch_command
     sys.path.insert(0, str(ROOT/'src/tap_teleop'))
     from tap_teleop.pose_curves import RobotGeometry
 
@@ -588,8 +589,8 @@ def main():
             rclpy.spin_once(node, timeout_sec=.05)
         if cache or now is not None:
             raise RuntimeError('Domain already has traffic; refusing to launch or actuate')
-        launch = [str(ROOT/'run_sim.sh'), 'gui:=false', 'auto_enable:=true',
-                  f'controller_config:={args.config.resolve()}', *model_args, *args.launch_arg]
+        launch = sim_launch_command('gui:=false', 'auto_enable:=true',
+                  f'controller_config:={args.config.resolve()}', *model_args, *args.launch_arg)
         event('launch', launch)
         launch_wall = time.monotonic()
         process = start_owned_process(launch, cwd=ROOT, stdout=launch_log,

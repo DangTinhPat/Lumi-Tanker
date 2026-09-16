@@ -2,7 +2,8 @@
 
 ```bash
 colcon build --symlink-install --packages-select tap_robot_description
-./run_preview.sh
+source install/setup.bash
+ros2 launch tap_robot_description cad_preview.launch.py
 ```
 
 RViz displays the assembled robot; Joint State Publisher sliders move the two

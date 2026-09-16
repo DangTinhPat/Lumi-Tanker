@@ -4,6 +4,41 @@ Executable: `ros2 run gui gui`. Curve/trajectory generation (native pose
 order, squat/roll/deep-squat tables) lives in the separate `tap_teleop`
 package and is imported here; see `src/tap_teleop/README.md` for that math.
 
+## Layout
+
+Redesigned (2026-09-16) to match the wheel_leg reference GUI's dark,
+card/tab look and add its extra tooling — every existing TAP control
+(Launch/Stop sim, terrain, Reset upright, Jump, Squat/Roll/Wiggle/Deep
+squat/Standup, native joint sliders) kept its exact backend wiring, only
+its visual home moved. Four `ttk.Notebook` tabs:
+
+- **Control** — sim launch/terrain/spawn/Reset-upright, a D-pad (hold to
+  drive, or use the arrow keys anywhere in the window; Space stops), a
+  **Shove** card (simulation-only disturbance-rejection test: click a
+  direction to apply a one-physics-step impulse via `gz_world.wrench()`,
+  no-ops with a log line if no sim is running), Enable/Disable/Clear
+  E-stop/Reset controller/E-STOP, the Jump controls, and a monospace STATE
+  block (mode/pitch/reference/CoM/sensors/torque text, unchanged content).
+- **Pose** — the mode radiobuttons, Experimental-motions gate, depth
+  slider, native joint sliders, and the Neutral/Stand-up/Show/Hold-squat/
+  Deep-squat/Standup buttons.
+- **Telemetry** (new) — a live joint table (position/velocity/effort, all
+  six joints) plus two real-time plots (pitch/pitch-rate, and joint
+  position/velocity) over a rolling ~12 s window, fed from `/control_mode`
+  and `/joint_states` (no new subscriptions). Falls back to a small
+  canvas-based strip chart if matplotlib is unavailable. Plots only redraw
+  while this tab is selected — the single most expensive thing the GUI
+  can do.
+- **Log** (new) — a scrolling event log (enable/disable/e-stop/reset/
+  stand-up/shove/etc.) and a CSV recorder: while armed, every fresh
+  `/control_mode` sample appends one timestamped row (mode, pitch,
+  pitch_rate, cmd_v, cmd_w, wheel_vel, contact, fresh) to the given file.
+
+All of this is additive to the existing state machine — `Dashboard`'s
+attribute names, callbacks, and the topic contract below are unchanged, so
+`tools/gui_deep_smoke.py` and `tools/gui_reset_standup_smoke.py` still
+exercise the real thing end-to-end without modification.
+
 **Package name collision warning:** this machine's `~/bin/ros2` wrapper
 sources `/home/dvt/wheel_leg/install/setup.bash` (if present) before running
 the real `ros2` — and that workspace also installs its own `gui` package
@@ -28,8 +63,10 @@ was started from (the usual precondition for this workspace, see the
 collision warning above) — the subprocess inherits that environment, so the
 launched sim resolves `tap_sim` correctly even though this machine's
 `~/bin/ros2` wrapper also layers in `/home/dvt/wheel_leg/install`.
-`run_sim.sh` itself is untouched and still used standalone by
-`tools/*_smoke.py` and manual headless runs; the GUI just no longer calls it.
+There is no `run_sim.sh` any more (removed 2026-09-16, along with
+`run_jump.sh`/`run_preview.sh` — no shell-script launchers anywhere in this
+repo); `tools/*_smoke.py` and manual headless runs call `ros2 launch tap_sim
+sim.launch.py` directly too (`tools/tap_launch.py`'s `sim_launch_command()`).
 A plain test cycle needs only `ros2 run gui gui` — no separate terminal.
 Closing the window stops a sim launched this way; a sim started independently
 (by hand, or by a QA tool) is never touched, because `cleanup_group` refuses
@@ -37,10 +74,22 @@ to act on any process it did not spawn itself.
 
 The **Terrain** dropdown next to Launch sim selects `sim.launch.py`'s
 `terrain` argument (`none` or `rough` — see "Rough training terrain" below);
-it locks while a sim is running. Other `run_sim.sh`/`sim.launch.py` arguments
-— Stationary Show, Deep Squat, jump profiles, precision pose — still need the
-two-terminal `./run_sim.sh <args>` + `ros2 run gui gui` flow; a general
-argument-passthrough UI is a documented follow-up, not built yet.
+it locks while a sim is running.
+
+The **Profile** dropdown next to Terrain (2026-09-16) adds a
+`controller_config:=` launch override, so a one-click Launch sim can start
+with a non-default controller profile without a second terminal — `Default`
+(`balance_controller.yaml` alone) or `Deep squat`
+(`src/tap_control/config/deep_squat.yaml`, the profile the Pose tab's Deep
+squat/Standup buttons need: without it, the controller's own
+`pose_knee_max_rad`/`pose_hip_max_rad` stay at the narrow default and
+`deep_ready()` correctly refuses rather than silently clipping the motion).
+It locks while a sim is running, same as Terrain. This is a short, curated
+list (`SIM_PROFILES` in `dashboard.py`), not a general argument-passthrough
+UI — the remaining `sim.launch.py` profiles (Stationary Show, jump variants,
+precision pose, the landing-test configs) still need a second terminal
+running `ros2 launch tap_sim sim.launch.py controller_config:=<path>`
+alongside `ros2 run gui gui`.
 
 The **Spawn X/Y/Z** fields next to Terrain hold the position used both by
 Launch sim (as `spawn_x`/`spawn_y`/`spawn_z` launch args) and by Reset
@@ -171,10 +220,14 @@ The mocked dashboard/gz_world/sim_process tests are registered with CTest
 when `BUILD_TESTING` is enabled. They do not open a window, initialize a ROS
 node, launch Gazebo, or call the real `gz` CLI.
 
-Optional simulation-only deep squat profile:
+Deep squat and Standup are on by default (2026-09-16, `--deep-squat-knee 1.6`
+and `--stand-tall-knee 0.5`), each the fully tested candidate depth from
+`docs/DEEP_SQUAT.md` / `tap_teleop.deep_squat.generate_stand_tall`; disable
+either with `--no-deep-squat` / `--no-stand-tall`, or pick a different depth:
 
 ```bash
-ros2 run gui gui --deep-squat-knee 1.6
+ros2 run gui gui --deep-squat-knee 1.2
+ros2 run gui gui --no-deep-squat --no-stand-tall
 ```
 
 See `src/tap_teleop/README.md` for the full deep-squat trajectory contract

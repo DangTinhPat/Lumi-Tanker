@@ -2,19 +2,20 @@
 sim.launch.py` subprocess -- matching the wheel_leg reference GUI's own
 pattern of the GUI backend directly constructing and running the literal
 `ros2 launch` invocation itself, rather than shelling out to a separate
-wrapper script.
+wrapper script. run_sim.sh/run_jump.sh/run_preview.sh were removed
+2026-09-16 (no shell-script launchers anywhere in this repo, GUI or tools/);
+tools/tap_launch.py now holds the shared `ros2 launch` command builders,
+mirroring this module's own launch_sim().
 
 Kept separate from dashboard.py so the workspace-resolution trick and the
 process-lifecycle wrapping live in exactly one place, and so both are
 testable without Tk/rclpy.
 
-Unlike run_sim.sh (still used standalone by tools/*_smoke.py and manual
-headless runs -- untouched, not removed), this does not need to re-source
-install/setup.bash or fix up CONDA_PREFIX/LD_LIBRARY_PATH: the GUI process
-itself is already running from a correctly sourced ROS environment (`ros2
-run gui gui` requires that), and `subprocess.Popen` inherits the parent's
-environment by default, so the launched sim gets the same environment for
-free.
+Does not re-source install/setup.bash or fix up CONDA_PREFIX/LD_LIBRARY_PATH:
+the GUI process itself is already running from a correctly sourced ROS
+environment (`ros2 run gui gui` requires that), and `subprocess.Popen`
+inherits the parent's environment by default, so the launched sim gets the
+same environment for free.
 
 This runs the literal `ros2` command (PATH lookup), matching wheel_leg's own
 GUI exactly (it shells out to `exec ros2 launch balance_firmware_core
@@ -41,21 +42,24 @@ def resolve_workspace():
 
     This repo always builds with `colcon build --symlink-install`, so an
     installed ament_cmake_python module resolves, via Path.resolve(), back
-    through the symlink to its real path under src/gui/... — the same trick
-    run_sim.sh uses in bash via `dirname "${BASH_SOURCE[0]}"`.
+    through the symlink to its real path under src/gui/.... CLAUDE.md is the
+    marker file (unique, always present at the workspace root); prior to
+    2026-09-16 this used run_sim.sh's existence instead, which broke the
+    moment that file was removed.
     """
     here = Path(__file__).resolve()
     for candidate in (here, *here.parents):
-        if (candidate / 'tools' / 'owned_process.py').is_file() and (candidate / 'run_sim.sh').is_file():
+        if (candidate / 'tools' / 'owned_process.py').is_file() and (candidate / 'CLAUDE.md').is_file():
             return candidate
     raise RuntimeError(
         f'Could not locate the TAP workspace root from {here}; expected an '
-        'ancestor directory containing both tools/owned_process.py and run_sim.sh.')
+        'ancestor directory containing both tools/owned_process.py and CLAUDE.md.')
 
 
 WORKSPACE = resolve_workspace()
 sys.path.insert(0, str(WORKSPACE / 'tools'))
 from owned_process import cleanup_group, start_owned_process  # noqa: E402
+from tap_launch import sim_launch_command  # noqa: E402
 
 # activate_controllers's own proven get_logger().info bring-up milestones;
 # do not invent unverified controller_manager/spawn log strings here.
@@ -80,11 +84,10 @@ def sim_stage(log_path, elapsed):
 
 def launch_sim(extra_args=(), log_dir=None):
     """Launch `ros2 launch tap_sim sim.launch.py <extra_args>` as an owned
-    subprocess, built and run directly by this module (no run_sim.sh). No env
-    overrides: the GUI's own rclpy node and its later gz_world calls must land
-    on the same ROS_DOMAIN_ID/GZ_PARTITION as the sim this launches, unlike
-    the isolated QA smoke tools, which deliberately randomize those for
-    concurrent trials.
+    subprocess, via tap_launch.sim_launch_command. No env overrides: the
+    GUI's own rclpy node and its later gz_world calls must land on the same
+    ROS_DOMAIN_ID/GZ_PARTITION as the sim this launches, unlike the isolated
+    QA smoke tools, which deliberately randomize those for concurrent trials.
     """
     if not (WORKSPACE / 'install' / 'tap_sim' / 'share' / 'tap_sim' / 'package.xml').is_file():
         raise RuntimeError('Build the TAP workspace first: colcon build --symlink-install')
@@ -92,8 +95,8 @@ def launch_sim(extra_args=(), log_dir=None):
     log_dir.mkdir(parents=True)
     log_path = log_dir / 'sim.log'
     stream = log_path.open('w')
-    command = ['ros2', 'launch', 'tap_sim', 'sim.launch.py', *extra_args]
-    process = start_owned_process(command, cwd=WORKSPACE, stdout=stream, stderr=stream)
+    process = start_owned_process(sim_launch_command(*extra_args), cwd=WORKSPACE,
+                                  stdout=stream, stderr=stream)
     return process, log_path, stream
 
 

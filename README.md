@@ -11,34 +11,34 @@ After activating a ROS 2 Jazzy environment:
 ```bash
 colcon build --symlink-install
 source install/setup.bash
-./run_preview.sh
-./run_sim.sh                     # Gazebo starts paused, awaiting Enable
-ros2 run gui gui                 # Dashboard, separate terminal, same ROS domain
+ros2 launch tap_robot_description cad_preview.launch.py
+ros2 launch tap_sim sim.launch.py           # Gazebo starts paused, awaiting Enable
+ros2 run gui gui                            # Dashboard, separate terminal, same ROS domain
 ```
 
-`run_preview.sh`/`run_sim.sh` preserve the sourced workspace even when a
-machine has a custom `ros2` wrapper that sources another workspace, so they
-are safe to run without sourcing anything yourself first. `ros2 run gui gui`
-does not have that protection: **source this workspace's own
-`install/setup.bash` yourself before running it** — the `gui` package name
-matches `DangTinhPat/wheel_leg`'s own reference GUI package, and a machine
-with both workspaces' overlays available (e.g. a `ros2` wrapper that sources
-`wheel_leg`'s install first) could otherwise resolve `ros2 run gui gui` to
-the wrong one. See `src/gui/README.md` if that's a concern on your machine.
+No shell-script launchers anywhere in this repo — always **source this
+workspace's own `install/setup.bash` yourself first**, every terminal, before
+any of the three commands above. This matters most for `ros2 run gui gui`:
+the `gui` package name matches `DangTinhPat/wheel_leg`'s own reference GUI
+package, and a machine with both workspaces' overlays available (e.g. a
+`ros2` wrapper that sources `wheel_leg`'s install first) could otherwise
+resolve `ros2 run gui gui` to the wrong one. See `src/gui/README.md` if
+that's a concern on your machine.
 
-`ros2 run gui gui` can also launch and stop its own default simulation from
-the Simulation panel (Launch sim / Stop sim), so a plain
-enable/drive/reset-standup test cycle needs only one command. Profiles that
-need `run_sim.sh` arguments (Stationary Show, Deep Squat, jump profiles,
-precision pose below) still need the two-terminal `./run_sim.sh <args>` +
-`ros2 run gui gui` flow.
+`ros2 run gui gui` can also launch and stop its own simulation from the
+Control tab (Launch sim / Stop sim, with a Profile dropdown for Deep squat),
+so a plain enable/drive/reset-standup/deep-squat test cycle needs only one
+command, no second terminal. Profiles the Profile dropdown doesn't cover yet
+(Stationary Show, jump profiles, precision pose below) still need a second
+terminal running `ros2 launch tap_sim sim.launch.py controller_config:=<path>`
+alongside `ros2 run gui gui`.
 
 Wait for controller/sensor readiness, then use Enable in the dashboard.
 Load the dashboard before unpausing: rendering/trajectory generation can briefly
 delay joint feedback on this PC, correctly tripping the sensor watchdog.
 After a fall, restart the simulation; reset does not reposition the robot.
 
-For headless physics use `./run_sim.sh gui:=false auto_enable:=true`.
+For headless physics use `ros2 launch tap_sim sim.launch.py gui:=false auto_enable:=true`.
 Run one TAP simulation per ROS domain / Gazebo partition. RViz preview has its
 own joint-state topic and does not command the simulator.
 
@@ -48,7 +48,7 @@ Start a new simulation with the opt-in world-position feedback profile (do not
 start it alongside an existing simulation in the same domain):
 
 ```bash
-./run_sim.sh controller_config:="$PWD/src/tap_control/config/stationary_show.yaml"
+ros2 launch tap_sim sim.launch.py controller_config:="$PWD/src/tap_control/config/stationary_show.yaml"
 ros2 run gui gui                     # Separate terminal, same ROS domain
 ```
 
@@ -69,12 +69,17 @@ remaining limits and [wheel kinematics](docs/WHEEL_KINEMATICS.md) for analysis.
 For the separately tested deeper symmetric squat (native knee -1.6 rad), use:
 
 ```bash
-./run_sim.sh controller_config:="$PWD/src/tap_control/config/deep_squat.yaml"
-ros2 run gui gui --deep-squat-knee 1.6
+ros2 run gui gui   # Deep squat and Standup are on by default; pick "Deep squat"
+                   # in the Control tab's Profile dropdown, then Launch sim
 ```
 
+(Or the two-terminal form: `ros2 launch tap_sim sim.launch.py
+controller_config:="$PWD/src/tap_control/config/deep_squat.yaml"` +
+`ros2 run gui gui` in a separate terminal.)
+
 Select Experimental motions, then Deep squat and amplitude 1 after Enable and
-neutral feedback. Full travel takes at least 11 seconds. Hold squat holds depth;
+neutral feedback (or just press the one-click "Deep squat" button on the Pose
+tab). Full travel takes at least 11 seconds. Hold squat holds depth;
 Neutral pose returns along the coordinated curve. The normal Squat/roll/Show
 limits remain unchanged. See [deep squat evidence](docs/DEEP_SQUAT.md): the body
 reached about 0.125 m height in two-cycle Gazebo testing. This is a tested
@@ -118,9 +123,9 @@ A fallen robot needs a new simulation, not merely another Enable click.
 The bounded model/profile used for the GUI regression is:
 
 ```bash
-./run_sim.sh controller_config:="$PWD/src/tap_control/config/precision_pose.yaml" \
+ros2 launch tap_sim sim.launch.py controller_config:="$PWD/src/tap_control/config/precision_pose.yaml" \
   jump_model:=true jump_leg_velocity_damping:=0.6
-ros2 run gui gui --deep-squat-knee 1.6
+ros2 run gui gui
 ```
 
 GUI-driven Gazebo QA: `python3 tools/gui_deep_smoke.py --gui` and
@@ -186,9 +191,9 @@ and deep asymmetric poses remain unvalidated.
 Experimental jumping is developed separately from the validated legacy squat
 profile. See [jump development and evidence](docs/JUMP.md) for research,
 motor-envelope assumptions, single-shot controls and acceptance criteria.
-`run_jump.sh` opts into bounded actuators and measured wheel contacts; ordinary
-`run_sim.sh` is unchanged by default. A working jump button is not proof of
-greater-than-10-cm flight or successful landing.
+`tools/run_jump.py` opts into bounded actuators and measured wheel contacts;
+plain `ros2 launch tap_sim sim.launch.py` is unchanged by default. A working
+jump button is not proof of greater-than-10-cm flight or successful landing.
 
 ```bash
 python3 -m unittest discover -s tests -v

@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     from owned_process import cleanup_group, start_owned_process
+    from tap_launch import sim_launch_command
     os.environ['ROS_DOMAIN_ID'] = '109'
     os.environ['GZ_PARTITION'] = f'tap_recovery_{os.getpid()}_{time.time_ns()}'
     out = ROOT / 'log' / f'recovery_{int(time.time())}'
@@ -98,7 +99,7 @@ def main():
         observe(.1)
 
     try:
-        process = start_owned_process([str(ROOT / 'run_sim.sh'), 'gui:=false', 'auto_enable:=true'],
+        process = start_owned_process(sim_launch_command('gui:=false', 'auto_enable:=true'),
                                       cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 70
         while state.get('mode') != 'Balance' and time.monotonic() < deadline:

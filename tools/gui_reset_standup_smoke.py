@@ -20,6 +20,7 @@ import time
 import tkinter as tk
 
 from owned_process import start_owned_process, cleanup_group
+from tap_launch import sim_launch_command
 
 ROOT = Path(__file__).resolve().parents[1]
 # A moderate tip (0.9 rad, just over the 0.8 rad mpc.fall_pitch_rad threshold
@@ -61,7 +62,7 @@ def main():
 
     stream = (log / 'sim.log').open('w')
     process = start_owned_process(
-        [str(ROOT / 'run_sim.sh'), 'gui:=false', 'auto_enable:=true'],
+        sim_launch_command('gui:=false', 'auto_enable:=true'),
         cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
 
     result = {'passed': False, 'cycles': []}

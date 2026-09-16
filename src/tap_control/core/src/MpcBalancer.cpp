@@ -193,9 +193,12 @@ float MpcBalancer::solveHorizon(const StateVec& x0,
                                 float target_ground_velocity_m_s,
                                 float pitch_ref_rad,
                                 float accel_limit_boost_m_s2) {
-  const float accel_limit = std::max(
-      config_.max_ground_accel_m_s2 + std::max(accel_limit_boost_m_s2, 0.0F),
-      0.1F);
+  const float friction_accel_limit_m_s2 =
+      std::max(config_.wheel_ground_mu, 0.0F) * std::max(config_.gravity_m_s2, 0.0F);
+  const float accel_limit = std::min(
+      std::max(config_.max_ground_accel_m_s2 + std::max(accel_limit_boost_m_s2, 0.0F),
+               0.1F),
+      std::max(friction_accel_limit_m_s2, 0.1F));
 
   bool near_ref_state = std::abs(target_ground_velocity_m_s) < 1.0e-6F &&
                         std::abs(x0[0] - ground_position_target_m_) < 1.0e-6F &&
@@ -399,10 +402,21 @@ MpcBalancer::Output MpcBalancer::update(const RobotState& state,
   const float ref_wheel_velocity_rad_s =
       output.ground_velocity_m_s / wheel_radius;
   const float yaw_to_wheel = s_sign * config_.half_wheel_base_m / wheel_radius;
+  // Close the loop on real yaw disturbance: `yaw` above is the commanded
+  // rate alone (open-loop feed-forward); measured gyro-Z yaw rate is
+  // available every tick via state.imu.yaw_rate_rad_s but was never
+  // consulted before. Only active while grounded and integrating, matching
+  // `yaw` itself above - airborne/disabled yaw rate is real but this wheel
+  // differential cannot do anything about it (no ground contact to push
+  // against), so correcting it would just wind up for nothing.
+  const float yaw_command =
+      (state.floor_contact && integrate && std::isfinite(state.imu.yaw_rate_rad_s))
+          ? yaw + config_.yaw_rate_feedback_kp * (yaw - state.imu.yaw_rate_rad_s)
+          : yaw;
   output.left_wheel_velocity_rad_s = s_sign * ref_wheel_velocity_rad_s -
-                                     yaw_to_wheel * yaw;
+                                     yaw_to_wheel * yaw_command;
   output.right_wheel_velocity_rad_s =
-      s_sign * ref_wheel_velocity_rad_s + yaw_to_wheel * yaw;
+      s_sign * ref_wheel_velocity_rad_s + yaw_to_wheel * yaw_command;
 
   const float turning_prob =
       (std::abs(yaw) > config_.stiff_yaw_rate_rad_s)

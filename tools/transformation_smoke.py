@@ -145,6 +145,7 @@ def metrics(rows, anchor):
 
 def main():
     from owned_process import cleanup_group, start_owned_process
+    from tap_launch import sim_launch_command
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--domain', type=int, default=113)
     parser.add_argument('--amplitude', type=float, default=.25)
@@ -537,7 +538,7 @@ def main():
             rclpy.spin_once(node, timeout_sec=.05)
         if cache or now_sim is not None:
             raise RuntimeError('Requested ROS domain already has simulation/control traffic')
-        argv = [str(ROOT / 'run_sim.sh'), 'gui:=false', 'auto_enable:=true']
+        argv = sim_launch_command('gui:=false', 'auto_enable:=true')
         if args.config is not None:
             argv.append(f'controller_config:={config}')
         argv.extend(args.launch_arg)

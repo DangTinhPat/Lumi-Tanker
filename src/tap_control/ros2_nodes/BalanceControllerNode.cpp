@@ -160,8 +160,37 @@ class BalanceControllerNode : public rclcpp::Node {
             declare_parameter<double>("kalman_q_bias", 0.003))),
         kalman_r_measure_(static_cast<float>(
             declare_parameter<double>("kalman_r_measure", 0.03))),
+        // Adaptive-trust term, not part of the base TKJElectronics design:
+        // scales R_measure up when |accel_mag - g| is large, i.e. when a
+        // real linear acceleration (not tilt) is disturbing the
+        // accelerometer reading. The drive-direction case already has a
+        // feedforward correction (MPC's own commanded ground accel,
+        // subtracted from accel_x above); squat/pose changes have no such
+        // model (CoM height change perturbs accel_z, not something the
+        // planner exposes as a clean feedforward term), so this generic,
+        // axis-agnostic fallback catches that case too. 0 disables it
+        // (pre-2026-09-16 behavior).
+        kalman_accel_trust_gain_(static_cast<float>(
+            declare_parameter<double>("kalman_accel_trust_gain", 0.0))),
         leg_kp_(static_cast<float>(declare_parameter<double>("leg_kp", 12.0))),
-        leg_kd_(static_cast<float>(declare_parameter<double>("leg_kd", 0.6))),
+        // Default is now derived from the real mass/geometry data (Track B
+        // item 3, 2026-09-16), not a guess: critical damping for a 2nd-order
+        // system I*theta'' + Kd*theta' + Kp*theta = 0 is Kd = 2*sqrt(Kp*I).
+        // leg_hip_inertia_kgm2/leg_knee_inertia_kgm2 (tools/
+        // generate_control_model.py's leg_inertia(), parallel-axis theorem
+        // from mesh_inertials.yaml/masses.yaml at the CAD-zero neutral
+        // pose) differ ~9x (hip swings thigh+shin+wheel, knee only
+        // shin+wheel) - the same single leg_kd_ already drives both joints
+        // (see the per-joint loop below), so take the larger (hip) inertia:
+        // that keeps the smaller (knee) joint non-oscillatory too, at the
+        // cost of slightly overdamping it, rather than risking the hip
+        // joint being underdamped by tuning to the knee's smaller inertia.
+        // Still a plain declare_parameter default - balance_controller.yaml
+        // or any override remains free to replace it.
+        leg_kd_(static_cast<float>(declare_parameter<double>(
+            "leg_kd", 2.0 * std::sqrt(static_cast<double>(leg_kp_) *
+                static_cast<double>(std::max(robot_control::geometry::leg_hip_inertia_kgm2,
+                                             robot_control::geometry::leg_knee_inertia_kgm2)))))),
         wheel_velocity_kp_(static_cast<float>(
             declare_parameter<double>("wheel_velocity_kp", 2.0))),
         sensor_timeout_s_(declare_parameter<double>("sensor_timeout_s", 0.15)),
@@ -205,6 +234,17 @@ class BalanceControllerNode : public rclcpp::Node {
         declare_parameter<double>("mpc.gravity_m_s2", 9.81));
     config.mpc.max_ground_accel_m_s2 = static_cast<float>(
         declare_parameter<double>("mpc.max_ground_accel", 10.0));
+    // Track B item 2 (2026-09-16): static friction-cone ceiling on top of
+    // max_ground_accel - see MpcBalancer::Config::wheel_ground_mu's own
+    // comment for the physics and why this is deliberately not gated on
+    // live contact force.
+    config.mpc.wheel_ground_mu = static_cast<float>(
+        declare_parameter<double>("mpc.wheel_ground_mu", 1.0));
+    // Yaw disturbance rejection via real gyro-Z feedback - see
+    // MpcBalancer::Config::yaw_rate_feedback_kp's own comment. 0 default:
+    // exact no-op, byte-identical to pre-2026-09-16 behavior.
+    config.mpc.yaw_rate_feedback_kp = static_cast<float>(
+        declare_parameter<double>("mpc.yaw_rate_feedback_kp", 0.0));
     config.mpc.nb_timesteps =
         static_cast<int>(declare_parameter<int>("mpc.nb_timesteps", 50));
     config.mpc.sampling_period_s = static_cast<float>(
@@ -513,9 +553,21 @@ class BalanceControllerNode : public rclcpp::Node {
         });
     }
     station_enabled_ = declare_parameter<bool>("station_keeper.enabled", false);
-    if (station_enabled_ && pitch_source_ != "sim_pose") {
-      throw std::invalid_argument("station_keeper requires simulation model pose");
-    }
+    // Station-keeping's own x/y/yaw feedback (StationKeeper::Input, below)
+    // reads last_sim_pose_x_m_/_y_m_ and state_.imu.yaw_rad directly and is
+    // gated on have_sim_pose_ at every update() call - it has no dependency
+    // on pitch_source_ at all (StationKeeper never reads pitch). This used
+    // to hard-require pitch_source=="sim_pose" too, which was never a real
+    // technical dependency, just historical coupling from when sim_pose was
+    // the only pitch source that existed. That stale guard crashed
+    // deep_squat.yaml and stationary_show.yaml at startup (std::invalid_
+    // argument, exit -6) the moment pitch_source's default became imu
+    // (2026-09-15) - found 2026-09-16 while re-running Deep Squat under the
+    // new default, exactly the kind of stale-config trap already seen once
+    // with the ledge landing test. World x/y/yaw position still has no
+    // sensor-backed estimate (a separate, still-open Rule 1 gap - see
+    // docs/RULES.md), but that gap is orthogonal to pitch and must not
+    // force pitch back to ground truth too.
     robot_control::StationKeeper::Config station_config;
     station_config.position_gain_hz = declare_parameter<double>("station_keeper.position_gain_hz", 0.8);
     station_config.acquire_dwell_s = declare_parameter<double>("station_keeper.acquire_dwell_s", 0.0);
@@ -811,9 +863,60 @@ class BalanceControllerNode : public rclcpp::Node {
       kalman_p_[1][0] -= dt * kalman_p_[1][1];
       kalman_p_[1][1] += kalman_q_bias_ * dt;
 
-      // Update.
+      // Update. Inflate R when the total specific-force magnitude departs
+      // from 1 g - evidence a real linear acceleration (squat CoM motion)
+      // is present, not just tilt, so the accel-derived pitch_measured is
+      // less trustworthy right now. Squared so small sensor noise near g
+      // barely changes anything but a real multi-m/s^2 event (measured
+      // ~1-2 m/s^2 sustained deviation during a 25% squat transition)
+      // visibly discounts the measurement.
+      //
+      // Gated to PoseChange only (measured 2026-09-16): applying this
+      // unconditionally, even at a small gain, measurably hurt plain Hold
+      // (drift 0.087->0.10-0.12 m at gain>=2) - normal settling-noise accel
+      // deviation during quiescent balancing got mistaken for a real
+      // disturbance and pushed the filter toward the noisier gyro-only
+      // path. Gating on the planner's own known mode (like the drive-
+      // direction feedforward above uses the MPC's own known command)
+      // targets exactly the CoM-motion case instead of reacting to
+      // ambiguous accel noise everywhere.
+      // Deadband before squaring: measured 2026-09-16 that gating on
+      // PoseChange mode alone still let ordinary sensor-noise-level accel
+      // deviations (~0.3-0.7 m/s^2, present even in quiescent Hold/startup)
+      // get amplified at gain>=40, marginally regressing Hold drift over a
+      // full 30s run. A real squat CoM-motion disturbance measured
+      // consistently >=1 m/s^2 sustained, well above ordinary noise - only
+      // count deviation past that as evidence of real motion.
+      constexpr float kExpectedGravityMps2 = 9.81F;
+      constexpr float kAccelDevDeadbandMps2 = 0.4F;
+      const float accel_dev = accel_mag - kExpectedGravityMps2;
+      const float accel_dev_excess =
+          std::max(0.0F, std::fabs(accel_dev) - kAccelDevDeadbandMps2);
+      const bool pose_changing =
+          controller_->mode() == robot_control::ControlMode::PoseChange;
+      // Extended 2026-09-16 (ledge-landing touchdown diagnosis): a fast
+      // whole-body rotation - measured directly, not inferred - is the same
+      // "real motion, not tilt" case PoseChange already covers, just from a
+      // touchdown impact instead of a commanded squat. Confirmed by tracing
+      // a real drive-off-the-ledge fall: dt_ms/jitter_ms/imu_age_ms were
+      // perfect (1.0/~0/1-2, no scheduling bug) throughout, yet the
+      // estimate lagged real pitch by up to 0.46 rad while pitch_rate
+      // climbed 0.65->3.5+ rad/s - the accelerometer-derived pitch_measured
+      // was corrupted by the fall's own uncontrolled linear acceleration
+      // (the same g*sin(pitch)-a_true ambiguity behind the PoseChange
+      // case), pulling the Kalman estimate away from gyro's own correct
+      // trajectory during exactly the window recovery depends on.
+      // kHighPitchRateRadS is set well above every normal-operation
+      // pitch_rate observed this session (hold/drive/yaw stayed under
+      // ~0.3 rad/s) so it does not fire during ordinary balancing.
+      constexpr float kHighPitchRateRadS = 1.5F;
+      const bool fast_rotation = std::fabs(pitch_rate_rad_s) > kHighPitchRateRadS;
+      const float r_effective =
+          kalman_r_measure_ *
+          (1.0F + ((pose_changing || fast_rotation) ? kalman_accel_trust_gain_ : 0.0F) *
+                      accel_dev_excess * accel_dev_excess);
       const float innovation = pitch_measured - complementary_pitch_rad_;
-      const float s = kalman_p_[0][0] + kalman_r_measure_;
+      const float s = kalman_p_[0][0] + r_effective;
       const float k0 = kalman_p_[0][0] / s;
       const float k1 = kalman_p_[1][0] / s;
       complementary_pitch_rad_ += k0 * innovation;
@@ -1029,6 +1132,13 @@ class BalanceControllerNode : public rclcpp::Node {
     state_.floor_contact = pitch_source_ == "sim_pose"
         ? true
         : (anyWheelContactFresh() && (any_wheel_contact_[0] || any_wheel_contact_[1]));
+    // Per-side (ROLL differential impedance): sim_pose's global height/pitch
+    // heuristic has no per-wheel granularity, so both sides mirror the
+    // combined value there; the real per-wheel contact path already has it.
+    state_.left_floor_contact = pitch_source_ == "sim_pose"
+        ? state_.floor_contact : (anyWheelContactFresh() && any_wheel_contact_[0]);
+    state_.right_floor_contact = pitch_source_ == "sim_pose"
+        ? state_.floor_contact : (anyWheelContactFresh() && any_wheel_contact_[1]);
     if (pitch_source_ == "sim_pose" && have_sim_pose_) {
       state_.floor_contact =
           last_sim_pose_z_m_ >= sim_contact_min_base_z_m_ &&
@@ -1577,7 +1687,7 @@ class BalanceControllerNode : public rclcpp::Node {
         "|ctrl=mpc|mpc_cmd=%.3f|mpc_end_pitch=%.3f|mpc_cmd_v=%.3f|mpc_iters=%d"
         "|wb_dx=%.4f|wb_h=%.3f|pitch_ref=%.4f|pose_tgt=%.2f,%.2f"
         "|station=%d|anchor_ex=%.4f|anchor_ey=%.4f|anchor_yaw=%.4f|station_v=%.4f|station_w=%.4f"
-        "|pose_hip_max=%.6f|pose_knee_min=%.6f",
+        "|pose_hip_max=%.6f|pose_knee_min=%.6f|pose_hip_min=%.6f|pose_knee_max=%.6f",
         robot_control::toString(mode), static_cast<double>(state_.imu.pitch_rad),
         static_cast<double>(state_.imu.pitch_rate_rad_s),
         static_cast<double>(command_.target_forward_velocity_m_s),
@@ -1615,7 +1725,8 @@ class BalanceControllerNode : public rclcpp::Node {
         station_output_.holding ? 1 : 0, station_output_.ex, station_output_.ey,
         station_output_.yawerror, station_output_.forward_correction_m_s,
         station_output_.yaw_correction_rad_s,
-        static_cast<double>(pose_hip_max_rad_), static_cast<double>(pose_knee_min_rad_));
+        static_cast<double>(pose_hip_max_rad_), static_cast<double>(pose_knee_min_rad_),
+        static_cast<double>(pose_hip_min_rad_), static_cast<double>(pose_knee_max_rad_));
     if (written < 0 || static_cast<std::size_t>(written) >= sizeof(buffer)) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "control_mode status was truncated");
@@ -1657,6 +1768,7 @@ class BalanceControllerNode : public rclcpp::Node {
   float kalman_q_angle_;
   float kalman_q_bias_;
   float kalman_r_measure_;
+  float kalman_accel_trust_gain_;
   float kalman_bias_ = 0.0F;
   float kalman_p_[2][2] = {{1.0F, 0.0F}, {0.0F, 1.0F}};
   float leg_kp_;

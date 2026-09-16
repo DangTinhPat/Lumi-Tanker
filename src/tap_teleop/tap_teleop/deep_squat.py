@@ -1,7 +1,9 @@
-"""Optional symmetric squat geometry, not a physical depth approval.
+"""Optional symmetric squat/stand geometry, not a physical depth approval.
 
 No existing manual, roll, or show defaults are changed. knee_max is a positive
-depth in radians: native knees run from zero to -knee_max, both with +Y axes.
+depth in radians: generate_deep_squat runs native knees from zero to
+-knee_max (crouch), generate_stand_tall from zero to +knee_max (extend
+toward the geometric height peak around knee~=0.57 rad), both with +Y axes.
 Callers must select a physically verified depth and controller envelope.
 URDF bounds are provisional native CAD limits, not calibrated hardware limits.
 The reported encoder range 30..145 degrees is not mapped without its CAD offset.
@@ -166,3 +168,71 @@ def generate_deep_squat(xacro, *, knee_max, hip_bounds=None, samples=101):
             'urdf_joint_limits': {n: list(v) for n, v in limits.items()},
             'rest_pose': table[0], 'table': table, 'com_height_m': heights,
             'com_offset_m': offsets, 'drop_m': heights[0] - heights[-1]}
+
+
+def generate_stand_tall(xacro, *, knee_max, hip_bounds=None, samples=101):
+    """Return native poses from neutral to the tallest requested extension.
+
+    Mirrors generate_deep_squat but sweeps knee from 0 toward +knee_max (the
+    body-height-increasing direction; see height_vs_knee analysis leading to
+    this function - FK height rises monotonically from the neutral CAD pose
+    (knee=0) up to knee~=0.57 rad, then folds back down past that point, so
+    knee_max must stay short of that geometric peak or the monotonicity
+    check below rejects it). hip_bounds defaults to the intersection of both
+    URDF hip limits, same as generate_deep_squat. No physical/hardware
+    travel-limit claim; see docs/DEEP_SQUAT.md's caveats, which apply here
+    too pending an equivalent audit for the extension direction.
+    """
+    knee_max = float(knee_max)
+    if not math.isfinite(knee_max) or knee_max <= 0:
+        raise ValueError('knee_max must be positive and finite')
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 2:
+        raise ValueError('samples must be an integer >= 2')
+    xml = subprocess.run(['xacro', str(xacro)], check=True, text=True,
+                         capture_output=True).stdout
+    root = ET.fromstring(xml)
+    limits = {}
+    for name in JOINTS:
+        matching = [j for j in root.findall('joint') if j.get('name') == name]
+        if len(matching) != 1 or matching[0].get('type') != 'revolute':
+            raise ValueError(f'Expected a bounded revolute joint: {name}')
+        limit = matching[0].find('limit')
+        if limit is None or 'lower' not in limit.attrib or 'upper' not in limit.attrib:
+            raise ValueError(f'Missing URDF limits: {name}')
+        limits[name] = _bounds([limit.get('lower'), limit.get('upper')])
+    urdf_hips = (max(limits[n][0] for n in JOINTS[::2]),
+                 min(limits[n][1] for n in JOINTS[::2]))
+    hips = _bounds(urdf_hips if hip_bounds is None else hip_bounds)
+    if hips[0] < urdf_hips[0] or hips[1] > urdf_hips[1]:
+        raise ValueError('Requested hip envelope exceeds URDF joint limits')
+    for name in JOINTS[1::2]:
+        lo, hi = limits[name]
+        if knee_max > hi or not lo <= 0 <= hi:
+            raise ValueError(f'Requested knee path exceeds URDF limits: {name}')
+    geometry = RobotGeometry(xacro)
+    import hashlib
+    if hashlib.sha256(xml.encode()).hexdigest() != geometry.fingerprint:
+        raise ValueError('URDF changed during curve generation')
+    table, heights, offsets = [], [], []
+    for knee in np.linspace(0., knee_max, samples):
+        def residual(hip):
+            return geometry.evaluate([hip, knee, hip, knee])['dx']
+        hip = _root(residual, *hips)
+        pose = [hip, float(knee), hip, float(knee)]
+        state = geometry.evaluate(pose)
+        if not all(math.isfinite(state[key]) for key in ('height', 'dx', 'lateral_margin')):
+            raise ValueError('Nonfinite FK result')
+        if state['height'] <= 0 or state['lateral_margin'] <= 0:
+            raise ValueError('Requested extension leaves geometric support envelope')
+        if heights and state['height'] < heights[-1] - 1e-7:
+            raise ValueError('Requested knee direction does not continuously raise stand height')
+        table.append(pose)
+        heights.append(state['height'])
+        offsets.append(state['dx'])
+    return {'schema': 1, 'experimental': True, 'physical_gate_passed': False,
+            'coordinate_frame': 'native_cad', 'encoder_offset_calibrated': False,
+            'urdf_sha256': geometry.fingerprint, 'joint_order': list(JOINTS),
+            'hip_bounds': list(hips), 'knee_bounds': [0., knee_max],
+            'urdf_joint_limits': {n: list(v) for n, v in limits.items()},
+            'rest_pose': table[0], 'table': table, 'com_height_m': heights,
+            'com_offset_m': offsets, 'rise_m': heights[-1] - heights[0]}

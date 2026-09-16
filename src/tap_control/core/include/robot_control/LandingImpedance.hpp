@@ -47,36 +47,39 @@ namespace robot_control {
 // control literature, adapted to this robot's specific measured
 // constraint.
 //
-// Trigger: the touchdown edge (floor_contact false->true) after a real,
-// debounced flight (same idiom as LandingReflex/earlier LandingImpedance
-// revisions). Additionally gated on the leg's own compression velocity
-// magnitude at that instant exceeding touchdown_velocity_threshold_m_s - a
-// gentle, low-speed contact (e.g. settling from a small pose change) does
-// not need or get any intervention, only a genuine dynamic impact does.
-// Impact -> Rebound triggers when the leg's real compression velocity
-// (from live joint velocities via WholeBodyModel::legHeight's Jacobian, NOT
-// a commanded motion) stops increasing - a physical bottom-of-stroke
-// signal - or after max_impact_duration_s as a stuck-sensor safety net.
+// PER-SIDE since 2026-09-16 (ROLL axis): a real touchdown is never
+// simultaneous on both wheels (asymmetric landing: uneven ground, or one
+// side reaching the edge first) - the earlier combined-both-sides version
+// used one averaged compression velocity and one shared Kp/Kd scale for
+// all four leg joints, so it could not let the side that's already down
+// absorb energy while the side still reaching for the ground kept its
+// normal tracking stiffness. This runs two fully independent phase state
+// machines (one per side) against each side's OWN measured leg height/
+// velocity and OWN floor_contact reading, still knee-only per the hip
+// finding above. All gains default to 1.0 (no scaling) so an unconfigured
+// controller is byte-identical to no impedance component at all, on
+// either side independently.
 //
-// All gains default to 1.0 (no scaling) and the velocity threshold is high
-// enough that no real contact ever triggers Impact by default, so an
-// unconfigured controller is byte-identical to no impedance component at
-// all (mirrors LandingReflex's own NoOpAtDefaults guarantee) - see the
-// explicit early-out in update() for the exact gate.
+// Trigger: each side's own touchdown edge (that side's floor_contact
+// false->true) after a real, debounced flight, additionally gated on that
+// side's own leg compression velocity magnitude at that instant exceeding
+// touchdown_velocity_threshold_m_s.
 class LandingImpedance {
  public:
   struct Config {
-    // Kp/Kd multipliers applied to ALL FOUR leg joints while in Impact,
-    // ramping through Rebound back to 1.0. impact_kp_scale should be well
-    // below 1 (soft, e.g. 0.1-0.3); impact_kd_scale should be well above 1,
-    // aiming at the leg's critical damping ratio for its effective inertia
-    // (Kd ~= 2*sqrt(Kp*M_effective) per the classic mass-spring-damper
-    // relation - M_effective is not derived here, tune empirically).
+    // Kp/Kd multipliers applied to ONE side's knee while that side is in
+    // Impact, ramping through Rebound back to 1.0. impact_kp_scale should
+    // be well below 1 (soft, e.g. 0.1-0.3); impact_kd_scale should be well
+    // above 1, aiming at the leg's critical damping ratio for its
+    // effective inertia (Kd ~= 2*sqrt(Kp*M_effective) per the classic
+    // mass-spring-damper relation - see BalanceControllerNode's leg_kd_
+    // default for where that inertia is now actually derived).
     float impact_kp_scale = 1.0F;
     float impact_kd_scale = 1.0F;
-    // Real-impact gate: |leg height velocity| at the debounced touchdown
-    // instant must exceed this for Impact to engage at all. High enough by
-    // default that no config is needed to disable it outright.
+    // Real-impact gate: |leg height velocity| at that side's debounced
+    // touchdown instant must exceed this for Impact to engage at all on
+    // that side. High enough by default that no config is needed to
+    // disable it outright.
     float touchdown_velocity_threshold_m_s = 1.0e6F;
     // Ramp Kp/Kd back to 1.0 over this long once bottomed out.
     float rebound_blend_s = 0.15F;
@@ -87,14 +90,17 @@ class LandingImpedance {
     float min_impact_before_rebound_s = 0.01F;
     float max_impact_duration_s = 0.4F;
     // Debounce: a touchdown edge is only honored once at least this much
-    // time has elapsed continuously airborne since the last confirmed
-    // liftoff - matches LandingReflex::Config::min_airborne_before_touchdown_s.
+    // time has elapsed continuously airborne (that side) since the last
+    // confirmed liftoff (that side) - matches
+    // LandingReflex::Config::min_airborne_before_touchdown_s.
     float min_airborne_before_touchdown_s = 0.15F;
   };
 
   struct Output {
-    float leg_kp_scale = 1.0F;
-    float leg_kd_scale = 1.0F;
+    float left_leg_kp_scale = 1.0F;
+    float left_leg_kd_scale = 1.0F;
+    float right_leg_kp_scale = 1.0F;
+    float right_leg_kd_scale = 1.0F;
   };
 
   LandingImpedance();
@@ -102,24 +108,34 @@ class LandingImpedance {
 
   void reset();
 
-  [[nodiscard]] Output update(bool floor_contact, float left_hip,
-                              float left_knee, float right_hip,
+  [[nodiscard]] Output update(bool left_floor_contact, bool right_floor_contact,
+                              float left_hip, float left_knee, float right_hip,
                               float right_knee, float left_hip_vel,
                               float left_knee_vel, float right_hip_vel,
                               float right_knee_vel, float dt_s);
 
   [[nodiscard]] bool active() const noexcept {
-    return phase_ != Phase::Grounded;
+    return left_side_.phase != Phase::Grounded ||
+           right_side_.phase != Phase::Grounded;
   }
 
  private:
   enum class Phase { Grounded, Airborne, Impact, Rebound };
 
+  struct Side {
+    Phase phase = Phase::Grounded;
+    bool prev_floor_contact = true;
+    float airborne_elapsed_s = 0.0F;
+    float phase_elapsed_s = 0.0F;
+  };
+
+  // One side's phase machine + its own (Kp,Kd) output, sharing config_.
+  void updateSide(Side& side, bool floor_contact, float h_dot, float dt_s,
+                  float& kp_scale, float& kd_scale) const;
+
   Config config_;
-  Phase phase_ = Phase::Grounded;
-  bool prev_floor_contact_ = true;
-  float airborne_elapsed_s_ = 0.0F;
-  float phase_elapsed_s_ = 0.0F;
+  Side left_side_{};
+  Side right_side_{};
 };
 
 }  // namespace robot_control

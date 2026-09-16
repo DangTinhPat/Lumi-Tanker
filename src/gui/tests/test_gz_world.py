@@ -58,6 +58,23 @@ class PauseAndSetPoseTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 gz_world.pause(True)
 
+    def test_wrench_builds_the_shove_topic_publish(self):
+        with patch('gui.gz_world.subprocess.run') as run:
+            run.return_value = Mock(returncode=0, stdout='', stderr='')
+            gz_world.wrench('tap_robot', 600.0, -0.0)
+            args = run.call_args.args[0]
+            self.assertEqual(args[:4], ['gz', 'topic', '-t', '/world/empty/wrench'])
+            self.assertIn('gz.msgs.EntityWrench', args)
+            request = args[args.index('-p') + 1]
+            self.assertIn('name: "tap_robot" type: MODEL', request)
+            self.assertIn('force: {x: 600.000 y: -0.000}', request)
+
+    def test_wrench_nonzero_returncode_raises(self):
+        with patch('gui.gz_world.subprocess.run') as run:
+            run.return_value = Mock(returncode=1, stdout='', stderr='boom')
+            with self.assertRaises(RuntimeError):
+                gz_world.wrench('tap_robot', 1.0, 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

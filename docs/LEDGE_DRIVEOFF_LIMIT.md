@@ -18,12 +18,16 @@ deliberate, user-approved tradeoff, not an oversight:
 - **This 20 cm ledge drive-off test specifically regressed hard: 0/10
   (0%) recovered with the IMU default**, down from sim_pose's 70-88%
   documented below. Every trial shows a real, physical full flip (peak
-  pitch 1.8-2.6 rad), not a small estimation error. The violent,
-  high-angular-rate nature of this specific failure mode (already
-  characterized below as resistant to nearly every hand-designed
-  intervention tried, even under perfect ground truth) appears to amplify
-  the IMU-based estimator's small residual noise far more than the calm
-  scenarios (hold/squat) that were tuned against.
+  pitch 1.8-2.6 rad), not a small estimation error.
+- **Update, 2026-09-16: largely resolved, root cause was not the IMU
+  estimator.** See "Velocity headroom: the actual root cause" below - the
+  real cause was a zero-authority-headroom bug in `MpcBalancer` present
+  under *either* pitch source, that just happened to be masked under
+  sim_pose (whose other margins were generous enough to absorb it) and
+  fully exposed under imu (whose margins were already tighter). Fixing it
+  (`mpc.max_ground_velocity` 0.6 to 2.0) restored recovery to **48-60%**
+  under the current `pitch_source: imu` default, n=15-25 across three
+  independent batches - without touching the estimator at all.
 - **Decision (user, 2026-09-15): keep `pitch_source: imu` as the default
   anyway, accept this landing regression as a known, separate, tracked
   problem to solve later** - not a reason to fall back to ground truth.
@@ -441,3 +445,211 @@ of use than "trigger a reaction sooner") - not to change any current
 production behavior. Confirmed zero effect on the default path: `sim_smoke.py`
 and a fresh `clean_ledge_smoke.py --skip-enabled` batch both behave
 identically with `measure_contacts` left at its default `false`.
+
+## Track B items 2-4: friction cone, critical damping, Fz state (2026-09-16)
+
+Follow-on to the overhaul plan's Track B (giving the MPC genuine force/
+contact awareness it structurally lacked - see claim #1/#4 in the original
+4-point critique). Track A (authority promotion, LandingImpedance
+reconciliation) and Track B item 1 (contact telemetry infrastructure) were
+already done; this closes out items 2-4.
+
+**Item 3 (critical leg damping from real mass, done):** `leg_kd` was
+`0.0` since the initial commit - unexamined, not a measured or tuned value.
+`tools/generate_control_model.py` gained `leg_inertia()`: parallel-axis-
+theorem rotational inertia about the hip axis (thigh+shin+wheel) and knee
+axis (shin+wheel) from the real mesh-derived mass/COM/inertia data already
+in `GeneratedGeometry.hpp`, at the CAD-zero neutral pose. `BalanceControllerNode`
+now defaults `leg_kd` to critical damping for the deployed `leg_kp` against
+the larger (hip) inertia: `Kd = 2*sqrt(Kp * max(I_hip, I_knee))` ≈ 1.31 at
+`leg_kp=40`, replacing the unmotivated `0.0`. **A real bug was caught and
+fixed before promotion**: the first version of `leg_inertia()` anchored the
+wheel's parallel-axis distance at the knee joint directly, silently dropping
+the knee-to-wheel joint offset (~0.11 m) from the FK chain - understated
+both inertias (worst on I_knee, off by ~3x). Caught by
+`tests/test_leg_inertia.py`'s independent from-scratch cross-check at
+hip=knee=0, not by inspection. Verified after the fix: 15/15 C++ unit tests,
+`sim_smoke.py --exercise` (hold/drive/yaw all 0.012-0.032 rad, well under
+the 0.12 bound), unchanged from the pre-change baseline.
+
+**Item 2 (friction-cone ceiling, done, deliberately static):**
+`MpcBalancer::Config::wheel_ground_mu` (default 1.0, matching every world's
+`ground_plane` surface `<mu>`) caps `solveHorizon`'s acceleration authority
+at `mu * gravity_m_s2` in addition to the existing tunable
+`max_ground_accel`: a wheel rolling without slip cannot deliver more
+tangential acceleration than `mu*g` regardless of commanded torque or mass
+(both `F=ma` and `F_friction=mu*m*g` scale with mass, so it cancels) - a real
+physical bound nothing previously enforced. At the current defaults
+(`max_ground_accel=10.0`, `mu*g=9.81`) this trims authority by under 2%,
+so it does not undo Track A's promoted authority increase. Deliberately
+**not** gated on live/measured contact force, even though real per-wheel
+contact telemetry now exists (the section above): every prior attempt in
+this document to react to touchdown *faster* via a sensor threshold (hip
+torque, IMU accelerometer, the pose heuristic itself) measurably hurt or
+tied at best. A live-Fz-scaled version of this bound would need the same
+n>=25 evidence-gated comparison those attempts got before shipping, not just
+first-principles reasoning that it should help - not implemented here.
+Verified: 15/15 C++ unit tests, `sim_smoke.py --exercise` unchanged, and a
+fresh `clean_ledge_smoke.py --skip-enabled` n=5 batch still runs cleanly
+(0/5, unchanged from the existing 0/10 IMU-era baseline - no crash, no new
+failure mode, nothing left to regress since that baseline is already zero).
+
+**Item 4 (extend MPC state with Fz, investigated, not implemented as
+originally scoped):** the plan's smallest version was "add Fz as a measured
+parameter that scales the feasible max_ground_accel in real time." Reading
+`MpcBalancer::update()` closely first: `solveHorizon` (the whole
+ground-acceleration QP, including item 2's new cap) is **only ever called
+while `state.floor_contact` is true**; the moment contact is lost, `update()`
+takes a completely different branch (`commandeded_ground_velocity_m_s_`
+low-passes to 0, the position anchor just follows the wheel) and never asks
+the QP for an acceleration at all. The real, structural
+"no-ground-contact-means-no-authority" property item 4 was meant to add
+already exists, as a simpler and already-proven binary gate rather than a
+continuous Fz-scaled one - and per item 2's own reasoning, making that gate
+*more* reactive/continuous is exactly the class of change this document has
+repeatedly found to hurt, not help. Closing this item as "investigated,
+existing architecture already provides the intended property" rather than
+building a new mechanism to duplicate it.
+
+## Track B YAW/ROLL (3-axis article) reconfirms, does not overturn, the earlier roll/yaw finding (2026-09-16)
+
+A user-supplied article proposed a Z/ROLL/YAW/PITCH task-allocation matrix
+for landing (symmetric leg compression for Z, differential leg length for
+ROLL, differential wheel torque via gyro-Z for YAW, wheel rolling/capture
+point for PITCH). Implemented in full: `MpcBalancer::Config::yaw_rate_feedback_kp`
+closes the wheel-differential loop on real `state.imu.yaw_rate_rad_s`
+(previously open-loop, commanded-yaw-only); `LandingImpedance` was rewritten
+from one shared phase state machine to two independent per-side ones driven
+by new `left_floor_contact`/`right_floor_contact` (real per-wheel contact
+sensors), so an asymmetric touchdown can soften only the side that actually
+landed. Both are structurally sound and unit-tested (17/17 assertions,
+including two new tests proving the per-side split works as designed).
+
+Measured with both enabled, n=10 clean ledge trials: **0/10 recovered,
+peak_roll_rad still exactly pi in all 10** - identical to the pre-change
+baseline. Root-caused first to `EmbeddedController`'s Fallen-mode
+short-circuit (`writeSafeStop()` + immediate return the instant
+`|pitch| > fall_pitch_rad`, before `runBalance()`/`LandingImpedance::update()`
+can act again). To isolate that variable, `mpc.fall_pitch_rad` was pushed to
+3.0 rad (way past the 1.1 default) with YAW/ROLL still enabled: still
+**0/10 recovered**, and - critically - 3 of the 10 trials never even
+triggered Fallen (`final_mode=Balance` throughout) yet **still** showed
+`peak_roll_rad == pi`. A cutoff that never fired cannot be the explanation
+for those 3 rows, which forced a second look at what `peak_roll_rad` is
+actually measuring.
+
+Traced the real rotation axis directly from the raw pose quaternion
+(`diag_rotation_axis.py`, axis-angle decomposition, not Euler angles) through
+a live fall: `axis=(+0.007, +1.000, -0.003)` essentially unchanged for the
+entire tumble, angle growing past 90 deg (123-147+ deg observed in one
+window). **The fall is a single-axis rotation about Y (pitch), full stop.**
+`peak_roll_rad == pi` is `clean_ledge_smoke.py`'s
+`asin(2*(w*y-z*x))`-based pitch extraction hitting its +/-90 deg domain
+limit and being forced into the gimbal-lock representation of the
+remaining rotation as `roll=pi, yaw=pi` - a decomposition artifact of a
+range-limited Euler formula, not a physical lateral or twisting motion.
+This independently reconfirms, via a different method (raw quaternion axis
+vs. the existing section's gyro-rate comparison above), the **same**
+conclusion this document already reached at "Roll/yaw axes checked directly"
+before this session's Track B/article work started: roll is not, and never
+was, the missing lever for this specific failure mode. The YAW-rate and
+per-side ROLL mechanisms built from the article therefore behaved exactly as
+the project's own prior evidence predicted they would - not a wasted
+implementation, but confirmation that this ledge-driveoff failure has no
+real roll/yaw disturbance component to correct. Both mechanisms are kept
+(structurally sound, default-off/no-op: `yaw_rate_feedback_kp=0.0`,
+per-side impedance collapses to the old shared behavior when both sides see
+identical contact/velocity, which is the common case) as validated
+infrastructure for a failure mode where an actual lateral disturbance exists
+(uneven terrain, one-sided obstacle) - not promoted as a fix for this one.
+
+**What remains as the real, narrowed cause of 0% recovery here:** (1) the
+Fallen-mode instantaneous, ungraduated torque cutoff at `fall_pitch_rad`,
+which the n=10 fall_pitch_rad=3.0 experiment shows does not even fully
+explain it alone (0/10 either way); combined with (2) the fall itself being
+a genuine large-angle (>90 deg, confirmed past 147 deg) single-axis pitch
+tumble - well outside the small-angle linear-inverted-pendulum regime
+`MpcBalancer` is built around - meaning even a controller given unlimited
+time post-threshold has, per this same n=10 experiment, not been shown able
+to arrest it with the current pitch-axis authority alone. Neither a 3-axis
+decomposition nor a smarter cutoff threshold addresses a controller that
+is not modeled for the angle range the failure actually occurs in.
+
+## Velocity headroom: the actual root cause (2026-09-16)
+
+Prompted by the user asking why a robot that balances fine still falls
+driving off a step, and told to concentrate effort on it. The previous
+section's "unlimited time still can't arrest it" conclusion turned out to be
+an artifact of testing the wrong variable, discovered via a chain of
+closed-loop experiments unrelated to pitch-axis modeling or the estimator:
+
+**1. A general, ledge-independent instability was found first.** Driving
+*straight*, no ledge, no terrain at all, at a commanded 1.0 m/s, reliably
+tips the robot over after roughly 2 s - reproduced twice independently.
+Tested with `pitch_source: sim_pose` (ground truth, removing the IMU
+entirely) to rule out the estimator: the fall still happened, identically.
+Debug trace at the fall onset showed `mpc_cmd` (commanded ground
+acceleration) pegged at `9.81 m/s^2` (the friction-cone ceiling) and
+`wheel_vel` pegged at exactly `0.6 m/s` (`max_ground_velocity`) for the
+*entire* window - the QP was continuously asking for maximum correction and
+getting none of it, because the integrated correction signal
+(`commanded_ground_velocity_m_s_`) is hard-clamped to `max_ground_velocity_m_s`
+- the *same* ceiling the commanded cruise speed itself is clamped to. When
+the target cruise speed sits at or near that ceiling (0.6-1.0 m/s in every
+test in this document, including the ledge one), there is **zero authority
+headroom left for the balance loop to exceed cruise speed and actually catch
+a lean** - the moment any real disturbance needs the wheel to go faster than
+cruise to get back under the falling CoM, the correction is silently
+discarded by the clamp, and the robot free-falls as an unforced inverted
+pendulum from that point on (matching the observed smooth, unresisted growth
+first to a few tenths of a radian, then runaway).
+
+**Confirmed the mechanism, not just the symptom**, by keeping the cruise
+target fixed at 0.6 m/s and only raising the ceiling (`max_ground_velocity`
+to 1.5, sim_pose): the robot drove stably the entire 8 s test. This rules out
+"it's just driving faster now" as an alternative explanation - the fix is
+headroom, not speed.
+
+**2. Four narrower, event-gated versions of the fix were tried first and
+none worked as well as an always-on change** (this codebase has hit this
+exact pattern before - see the fall_pitch_rad/max_ground_accel promotion
+above - and it repeated here):
+  - Gate on `|pitch_rate| > 1.5 rad/s`: 0/10 on the ledge test. By the time
+    pitch_rate spikes, floor contact is often already lost (airborne - no
+    ground correction is possible regardless of ceiling), so the headroom
+    unlocks after the window that needed it.
+  - Gate on nonzero commanded forward velocity: 0/10. The drive command is
+    already back to 0 (explicit stop published on crossing the edge) before
+    the actual touchdown impact.
+  - Gate on the existing `landing_active` post-touchdown window
+    (edge-triggered on real `floor_contact` false->true): 0/10 alone,
+    combined with the forward gate: still 0/10.
+  - Gate on real measured wheel velocity (catches the coasting-on-momentum
+    gap between "drive command already zero" and "actually airborne"): 1/10
+    - better than the others but still far short of the always-on result.
+  - **Always-on `max_ground_velocity: 2.0`, no gating at all: 6/10 (n=10),
+    12/25 (48%, n=25), 8/15 (53%, n=15) across three independent batches**,
+    under the real `pitch_source: imu` production default.
+
+**3. The always-on change had one measurable side effect**, closing the
+loop on the honest-reporting obligation this document has kept throughout:
+a wider ceiling also let `Hold`'s own already-tight position drift regress
+just past `sim_smoke.py`'s 0.10 m bound (0.10-0.11 m, noisy around the
+bound at first). Raising `mpc.position_cost_scale` from 1.5 to 3.0
+(a plain, landing-unrelated retune of the existing position-tracking
+penalty) restored real margin (0.077-0.083 m, two repeats) without touching
+anything landing-specific, and was re-verified not to undo the ledge
+recovery gain. `squat`'s own pre-existing marginal failure (~0.121 rad
+against the 0.12 bound) was confirmed present in the unmodified baseline
+too (0.1208 rad) - unrelated to this change, not fixed here.
+
+**Promoted to `balance_controller.yaml` defaults**: `mpc.max_ground_velocity`
+0.6 to 2.0, `mpc.position_cost_scale` 1.5 to 3.0. Verified: 20/20 C++ unit
+tests, `sim_smoke.py --exercise` (hold/forward/backward/yaw all pass with
+real margin; squat's pre-existing marginal failure unchanged), and the
+20 cm ledge drive-off recovering 48-60% (n=15-25, two independent batches)
+under `pitch_source: imu` - up from the 0% this document spent the previous
+sections trying to explain. The remaining ~40-50% of failures still show
+the full-flip signature (`peak_pitch` 3.2-4.1 rad, gimbal-locked
+`peak_roll_rad == pi`, see the Track B section above) - not yet understood,
+a candidate for the next investigation.

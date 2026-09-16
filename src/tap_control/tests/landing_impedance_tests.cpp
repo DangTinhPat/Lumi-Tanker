@@ -22,17 +22,20 @@ void noOpAtDefaults() {
   bool ok = true;
   // Grounded, then a real liftoff/touchdown with a large, realistic
   // compression velocity - still must never engage Impact at defaults,
-  // since the velocity threshold is impossibly high.
-  (void)imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.001F);
+  // since the velocity threshold is impossibly high. Both sides toggled
+  // together here; the asymmetric case is its own test below.
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.001F);
   for (float t = 0.0F; t < 0.2F; t += 0.001F) {
-    const auto out =
-        imp.update(false, hip, knee, hip, knee, 0.3F, -0.6F, 0.3F, -0.6F, 0.001F);
-    ok = ok && out.leg_kp_scale == 1.0F && out.leg_kd_scale == 1.0F;
+    const auto out = imp.update(false, false, hip, knee, hip, knee, 0.3F,
+                                -0.6F, 0.3F, -0.6F, 0.001F);
+    ok = ok && out.left_leg_kp_scale == 1.0F && out.left_leg_kd_scale == 1.0F &&
+         out.right_leg_kp_scale == 1.0F && out.right_leg_kd_scale == 1.0F;
   }
   for (int i = 0; i < 500; ++i) {
-    const auto out =
-        imp.update(true, hip, knee, hip, knee, 0.3F, -0.6F, 0.3F, -0.6F, 0.001F);
-    ok = ok && out.leg_kp_scale == 1.0F && out.leg_kd_scale == 1.0F;
+    const auto out = imp.update(true, true, hip, knee, hip, knee, 0.3F, -0.6F,
+                                0.3F, -0.6F, 0.001F);
+    ok = ok && out.left_leg_kp_scale == 1.0F && out.left_leg_kd_scale == 1.0F &&
+         out.right_leg_kp_scale == 1.0F && out.right_leg_kd_scale == 1.0F;
   }
   check(ok, "LandingImpedance: default config is a no-op through a full "
             "liftoff/touchdown/settle sequence, even with real motion");
@@ -80,31 +83,64 @@ void engagesOnlyOnGenuineImpactVelocity() {
   const float hip = geometry::neutral_hip_rad, knee = 0.0F;
 
   // Liftoff, real flight, then a GENTLE touchdown (near-zero compression
-  // velocity) - must NOT engage Impact.
-  (void)imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  // velocity) on both sides - must NOT engage Impact.
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   }
   const auto gentle =
-      imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
-  check(!imp.active() && gentle.leg_kp_scale == 1.0F,
+      imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  check(!imp.active() && gentle.left_leg_kp_scale == 1.0F &&
+            gentle.right_leg_kp_scale == 1.0F,
         "LandingImpedance: a gentle touchdown (near-zero compression "
-        "velocity) does not engage the damper");
+        "velocity) does not engage the damper on either side");
 
   imp.reset();
   // Same sequence, but now with a real compression velocity at the
-  // touchdown instant (knee flexing fast, as it would under a genuine
-  // impact) - MUST engage Impact.
-  (void)imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  // touchdown instant on BOTH sides (knees flexing fast, as they would
+  // under a genuine symmetric impact) - MUST engage Impact on both.
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   }
-  const auto hard =
-      imp.update(true, hip, knee, hip, knee, 0.0F, -2.0F, 0.0F, -2.0F, 0.01F);
-  check(imp.active() && near_equal(hard.leg_kp_scale, cfg.impact_kp_scale) &&
-            near_equal(hard.leg_kd_scale, cfg.impact_kd_scale),
-        "LandingImpedance: a genuine impact (large compression velocity) "
-        "engages the scheduled soft-Kp/high-Kd Impact scale");
+  const auto hard = imp.update(true, true, hip, knee, hip, knee, 0.0F, -2.0F,
+                               0.0F, -2.0F, 0.01F);
+  check(imp.active() &&
+            near_equal(hard.left_leg_kp_scale, cfg.impact_kp_scale) &&
+            near_equal(hard.right_leg_kp_scale, cfg.impact_kp_scale) &&
+            near_equal(hard.left_leg_kd_scale, cfg.impact_kd_scale) &&
+            near_equal(hard.right_leg_kd_scale, cfg.impact_kd_scale),
+        "LandingImpedance: a genuine symmetric impact (large compression "
+        "velocity, both sides) engages the scheduled soft-Kp/high-Kd "
+        "Impact scale on both sides equally");
+}
+
+void asymmetricTouchdownOnlyEngagesTheSideThatLanded() {
+  // The actual point of the 2026-09-16 per-side rewrite (ROLL axis): one
+  // wheel touches down hard while the other is still airborne.
+  LandingImpedance::Config cfg;
+  cfg.impact_kp_scale = 0.15F;
+  cfg.impact_kd_scale = 3.0F;
+  cfg.touchdown_velocity_threshold_m_s = 0.05F;
+  cfg.min_airborne_before_touchdown_s = 0.05F;
+  LandingImpedance imp(cfg);
+  const float hip = geometry::neutral_hip_rad, knee = 0.0F;
+
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  for (float t = 0.0F; t < 0.1F; t += 0.01F) {
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  }
+  // Left touches down hard; right is still airborne.
+  const auto split = imp.update(true, false, hip, knee, hip, knee, 0.0F, -2.0F,
+                                0.0F, 0.0F, 0.01F);
+  check(near_equal(split.left_leg_kp_scale, cfg.impact_kp_scale) &&
+            near_equal(split.left_leg_kd_scale, cfg.impact_kd_scale),
+        "LandingImpedance: the side that actually touched down (left) "
+        "engages Impact");
+  check(split.right_leg_kp_scale == 1.0F && split.right_leg_kd_scale == 1.0F,
+        "LandingImpedance: the side still airborne (right) is untouched - "
+        "an asymmetric landing no longer softens/damps a leg that never hit "
+        "anything");
 }
 
 void reboundsAndRecoversToGroundedAndInert() {
@@ -117,29 +153,32 @@ void reboundsAndRecoversToGroundedAndInert() {
   cfg.rebound_blend_s = 0.1F;
   LandingImpedance imp(cfg);
   const float hip = geometry::neutral_hip_rad, knee = 0.0F;
-  (void)imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   }
-  const auto touchdown =
-      imp.update(true, hip, knee, hip, knee, 0.0F, -2.0F, 0.0F, -2.0F, 0.01F);
-  check(imp.active() && near_equal(touchdown.leg_kp_scale, cfg.impact_kp_scale),
-        "LandingImpedance: Impact engaged after a genuine touchdown");
+  const auto touchdown = imp.update(true, true, hip, knee, hip, knee, 0.0F,
+                                    -2.0F, 0.0F, -2.0F, 0.01F);
+  check(imp.active() && near_equal(touchdown.left_leg_kp_scale, cfg.impact_kp_scale) &&
+            near_equal(touchdown.right_leg_kp_scale, cfg.impact_kp_scale),
+        "LandingImpedance: Impact engaged after a genuine touchdown, both sides");
 
   // Velocity settles to 0 (leg stopped moving, bottomed out): with
   // min_impact_before_rebound_s == 0, the very next tick transitions to
   // Rebound.
-  (void)imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
   // Run out the rebound blend.
   LandingImpedance::Output settled{};
   for (int i = 0; i < 50; ++i) {
-    settled =
-        imp.update(true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    settled = imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F,
+                         0.0F, 0.01F);
   }
-  check(near_equal(settled.leg_kp_scale, 1.0F) &&
-            near_equal(settled.leg_kd_scale, 1.0F) && !imp.active(),
+  check(near_equal(settled.left_leg_kp_scale, 1.0F) &&
+            near_equal(settled.left_leg_kd_scale, 1.0F) &&
+            near_equal(settled.right_leg_kp_scale, 1.0F) &&
+            near_equal(settled.right_leg_kd_scale, 1.0F) && !imp.active(),
         "LandingImpedance: fully recovers to kp/kd scale 1.0 and Grounded "
-        "well after touchdown");
+        "well after touchdown, both sides");
 }
 
 void embeddedControllerNoOpAtDefaults() {
@@ -157,6 +196,8 @@ void embeddedControllerNoOpAtDefaults() {
   MotorCommand baseline{};
   for (int i = 0; i < 200; ++i) {
     state.floor_contact = true;
+    state.left_floor_contact = true;
+    state.right_floor_contact = true;
     baseline = controller.update(state, command);
   }
   check(controller.mode() == ControlMode::Balance ||
@@ -168,10 +209,13 @@ void embeddedControllerNoOpAtDefaults() {
   controller_b.reset(state);
   MotorCommand toggled{};
   for (int i = 0; i < 200; ++i) {
-    // Toggle floor_contact and knee velocity every cycle - with default
+    // Toggle floor_contact (both sides, independently out of phase with
+    // each other) and knee velocity every cycle - with default
     // LandingImpedance config this must have ZERO effect on the commanded
     // position, kp/kd scale or feedforward.
     state.floor_contact = (i % 2 == 0);
+    state.left_floor_contact = (i % 2 == 0);
+    state.right_floor_contact = (i % 3 == 0);
     state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] =
         (i % 2 == 0) ? 0.5F : -0.5F;
     toggled = controller_b.update(state, command);
@@ -185,7 +229,8 @@ void embeddedControllerNoOpAtDefaults() {
   }
   check(same,
         "EmbeddedController: default LandingImpedance config is a no-op "
-        "even under a toggling floor_contact/knee-velocity signal");
+        "even under independently-toggling left/right floor_contact and "
+        "knee-velocity signals");
 }
 
 void embeddedControllerAppliesScaleToKneeOnlyNotHip() {
@@ -207,16 +252,22 @@ void embeddedControllerAppliesScaleToKneeOnlyNotHip() {
   MotorCommand out{};
   for (int i = 0; i < 200; ++i) {
     state.floor_contact = true;
+    state.left_floor_contact = true;
+    state.right_floor_contact = true;
     out = controller.update(state, command);
   }
   for (int i = 0; i < 20; ++i) {
     state.floor_contact = false;
+    state.left_floor_contact = false;
+    state.right_floor_contact = false;
     out = controller.update(state, command);
   }
-  // Touchdown with a real compression velocity on the knee.
+  // Touchdown with a real compression velocity on the knee, both sides.
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -2.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -2.0F;
   state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = true;
   out = controller.update(state, command);
 
   constexpr auto lh = static_cast<std::size_t>(JointId::LeftHip);
@@ -238,15 +289,64 @@ void embeddedControllerAppliesScaleToKneeOnlyNotHip() {
         "EmbeddedController: LandingImpedance never changes the commanded "
         "position target itself, only the gains around it");
 }
+
+void embeddedControllerAsymmetricLandingOnlySoftensOneKnee() {
+  EmbeddedController::Config cfg;
+  cfg.landing_impedance.impact_kp_scale = 0.15F;
+  cfg.landing_impedance.impact_kd_scale = 3.0F;
+  cfg.landing_impedance.touchdown_velocity_threshold_m_s = 0.05F;
+  cfg.landing_impedance.min_airborne_before_touchdown_s = 0.05F;
+  EmbeddedController controller(cfg);
+  RobotState state;
+  state.dt_s = 0.005F;
+  state.joints.position_rad = {geometry::neutral_hip_rad, 0.0F, 0.0F,
+                               geometry::neutral_hip_rad, 0.0F, 0.0F};
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  command.request_enable = true;
+
+  controller.reset(state);
+  MotorCommand out{};
+  for (int i = 0; i < 200; ++i) {
+    state.floor_contact = true;
+    state.left_floor_contact = true;
+    state.right_floor_contact = true;
+    out = controller.update(state, command);
+  }
+  for (int i = 0; i < 20; ++i) {
+    state.floor_contact = false;
+    state.left_floor_contact = false;
+    state.right_floor_contact = false;
+    out = controller.update(state, command);
+  }
+  // Only the LEFT wheel touches down hard; right is still airborne - the
+  // ROLL case this whole rewrite exists for.
+  state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -2.0F;
+  state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = false;
+  out = controller.update(state, command);
+
+  constexpr auto lk = static_cast<std::size_t>(JointId::LeftKnee);
+  constexpr auto rk = static_cast<std::size_t>(JointId::RightKnee);
+  check(out.kp_scale[lk] < 0.9F && out.kd_scale[lk] > 1.1F,
+        "EmbeddedController: an asymmetric landing softens/damps the knee "
+        "that actually touched down (left)");
+  check(out.kp_scale[rk] == 1.0F && out.kd_scale[rk] == 1.0F,
+        "EmbeddedController: ... and leaves the still-airborne knee (right) "
+        "at normal stiffness, unlike the old combined-both-sides version");
+}
 }  // namespace
 
 int main() {
   noOpAtDefaults();
   legHeightJacobianMatchesFiniteDifference();
   engagesOnlyOnGenuineImpactVelocity();
+  asymmetricTouchdownOnlyEngagesTheSideThatLanded();
   reboundsAndRecoversToGroundedAndInert();
   embeddedControllerNoOpAtDefaults();
   embeddedControllerAppliesScaleToKneeOnlyNotHip();
+  embeddedControllerAsymmetricLandingOnlySoftensOneKnee();
   std::cout << (failures == 0 ? "ALL PASS\n" : "FAILURES PRESENT\n");
   return failures == 0 ? 0 : 1;
 }

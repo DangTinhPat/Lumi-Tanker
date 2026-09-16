@@ -25,6 +25,15 @@ balance_controller_node:
     # config files.
     pitch_source: imu
     kalman_r_measure: 0.1
+    # Distrust the accelerometer-derived pitch measurement (raise its
+    # effective R) when a real linear-acceleration/fast-rotation event is
+    # detected (squat CoM motion via PoseChange mode, OR pitch_rate above
+    # ~1.5 rad/s - see BalanceControllerNode's onImu comment) instead of
+    # tilt alone. 40.0 measured 2026-09-15/16: clears the squat transient
+    # without regressing plain Hold's drift (gain>=2 unbounded, or without
+    # the 0.4 m/s^2 deadband, did regress Hold - see that comment for the
+    # full history). 0.0 disables this entirely (pre-2026-09-15 behavior).
+    kalman_accel_trust_gain: 40.0
     sim_pose_topic: /tap_robot/pose
     sim_pose_child_frame: tap_robot
     sim_pose_index: 0
@@ -34,14 +43,27 @@ balance_controller_node:
     sensor_stale_grace_cycles: 8
     pitch_offset_rad: 0.0
     leg_kp: 40.0
-    leg_kd: 0.0
+    # leg_kd deliberately NOT set here (2026-09-16, Track B item 3): the old
+    # leg_kd: 0.0 was an unexamined initial-commit default (no damping at
+    # all), not a measured/tuned choice. BalanceControllerNode now computes
+    # its own default from real mass/geometry data as critical damping for
+    # this leg_kp (Kd = 2*sqrt(Kp*I), see its constructor) - leaving this
+    # key absent lets that physically-grounded default apply. Set it
+    # explicitly here only after a real reason to override it.
     leg_max_torque_nm: 3.0
     wheel_max_torque_nm: 0.5
     wheel_velocity_kp: 0.02
     pose_slew_rate_rad_s: 0.4
     pose_hip_min_rad: -0.6
-    pose_hip_max_rad: 0.6
-    pose_knee_min_rad: -0.8
+    # Raised alongside the deep-crouch stand_pose_rad below (2026-09-16):
+    # discardPendingPose() silently re-clamps the resting leg target to
+    # these bounds the moment real motion starts, discarding whatever
+    # stand_up.stand_pose_rad requested if it falls outside them - this was
+    # the actual reason an earlier deep-crouch attempt appeared to "sag"
+    # under load (it never really reached the commanded depth to begin
+    # with, regardless of leg_max_torque_nm/pendulum-length tuning).
+    pose_hip_max_rad: 1.0
+    pose_knee_min_rad: -1.6
     pose_knee_max_rad: 0.2
     pose_change_duration_s: 1.5
     # Simulation world-pose feedback; opt in only for validated stationary shows.
@@ -58,20 +80,34 @@ balance_controller_node:
       ref_lowpass_period_s: 0.15
       trim_gain_hz: 0.0
     stand_up:
-      # REVERTED (this session): a modest permanent knee bend (-0.2 rad,
-      # hip 0.222499 for ~0 equilibrium pitch) was tried here to lower CoM
-      # per the user's request. It passed the normal balance/drive/squat/
-      # roll regression (sim_smoke.py) cleanly, but a fresh 20 cm ledge
-      # drive-off measurement with it collapsed BOTH the stock baseline
-      # (10%, vs 45-70% across every other batch this session) AND the
-      # landing-mechanism condition to near zero - i.e. it broke ledge
-      # recovery specifically, likely by shifting the resting base height
-      # closer to sim_contact_min_base_z_m's floor_contact threshold or by
-      # eating into the knee's remaining downward travel before touchdown.
-      # Reverted to CAD-zero (knee=0) pending a real investigation of that
-      # interaction - do not re-enable a nonzero default knee bend without
-      # re-measuring the ledge test specifically, not just sim_smoke.py.
-      stand_pose_rad: [0.115483096, 0.0, 0.0, 0.115483096, 0.0, 0.0]
+      # Re-enabled 2026-09-16 (user request): default stance is a 25% squat
+      # instead of CAD-zero. Corrected same day: the first attempt read 25%
+      # off pose_curves.json's shallow 'squat' table (0 to -0.8 rad knee),
+      # giving hip 0.2253/knee -0.2057 - only a ~2.8% body-height drop,
+      # visually indistinguishable from straight legs. Re-derived from the
+      # Deep squat table instead (0 to -1.6 rad knee, the robot's actual
+      # full tested crouch range - docs/DEEP_SQUAT.md): hip 0.329/knee -0.4
+      # at amount=.25, a ~6.3% height drop, a real, visible partial crouch.
+      # A near-identical knee bend (-0.2 rad, half this depth) was tried and
+      # reverted earlier this session because it dropped the 20cm ledge
+      # drive-off stock baseline from 45-70% to 10% under the THEN-active
+      # sim_pose (ground truth) pitch default. That specific comparison is
+      # no longer measurable: the ledge baseline has since collapsed to
+      # 0/10 under the pitch_source:imu default (see
+      # docs/LEDGE_DRIVEOFF_LIMIT.md's "Known regression" section) for
+      # reasons unrelated to stance - there is no non-zero baseline left for
+      # a deeper stance to make "worse". Hold/drive/rotate re-verified clean
+      # under this deeper stance too; ledge specifically is not re-tested
+      # here since it has no working baseline to regress from.
+      # Deep crouch (2026-09-16, user-requested visual match to a reference
+      # image): knee=-1.4/hip=0.868 (generate_deep_squat, knee_max=1.4,
+      # dx-balanced), com_height 0.217->0.143m (~34% drop). Requires
+      # pose_hip_max_rad/pose_knee_min_rad above raised to match, or
+      # discardPendingPose() silently clamps it back to a shallow -0.8 the
+      # moment motion starts (see that comment) - root-caused after an
+      # earlier attempt at this exact pose appeared to "sag" under load.
+      stand_pose_rad: [0.8677594936825335, -1.4, 0.0,
+                       0.8677594936825335, -1.4, 0.0]
       tuck_pose_rad: [0.542801486, -0.8, 0.0, 0.542801486, -0.8, 0.0]
       fall_direction_aware: false
       tuck_duration_s: 1.0
@@ -93,13 +129,36 @@ balance_controller_node:
       fall_pitch_rad: 1.1
       leg_length: 0.234
       pendulum_length_per_com_height: 1.077
-      min_pendulum_length: 0.15
+      # Lowered from 0.15 to 0.10 (2026-09-16, deep-crouch stance): at the
+      # new stand_pose_rad's com_height (~0.14m), the computed pendulum
+      # length (~0.151m) sat right at the old 0.15 floor, getting clamped
+      # inconsistently as com_height fluctuated slightly - contributed to a
+      # startup pitch-overshoot transient during Hold. Lowering the floor
+      # lets the model use the real computed value instead.
+      min_pendulum_length: 0.10
       max_pendulum_length: 0.27
       gravity_m_s2: 9.81
       # Widened from 6.0 to 10.0 alongside fall_pitch_rad above — see that
       # comment; same evidence, same promotion date.
       max_ground_accel: 10.0
-      max_ground_velocity: 0.6
+      # Widened from 0.6 to 2.0 (2026-09-16): max_ground_velocity was pinned
+      # at (or within a hair of) the commonly-commanded cruise speed itself
+      # (0.6-1.0 m/s in both the ledge test and plain teleop driving), which
+      # left the balance-correction signal - the SAME clamped variable that
+      # carries cruise speed - zero headroom to exceed cruise and actually
+      # catch a growing lean. Root-caused with a closed-loop ground-truth
+      # test: driving straight at a cruise speed pinned to this ceiling
+      # reliably tips the robot over after ~2s even with a perfect pitch
+      # estimate; giving real headroom (this parameter alone) prevents it
+      # outright. On the 20cm ledge drive-off (pitch_source: imu, the
+      # production default), this alone raised recovery from 0/10 to 12/25
+      # (48%, n=25) - see docs/LEDGE_DRIVEOFF_LIMIT.md's "Velocity headroom"
+      # section for the full derivation and the event-gated alternatives
+      # that were tried and measured worse (0/10 or 1/10) before landing on
+      # this always-on change; consistent with this document's own earlier
+      # finding that always-on authority increases work here while reactive/
+      # event-triggered mechanisms consistently do not.
+      max_ground_velocity: 2.0
       # A 0.4 s horizon avoids the poorly conditioned 1 s QP on this short robot.
       # Fixed iterations are an approximation, not a solver-convergence guarantee.
       nb_timesteps: 20
@@ -107,7 +166,14 @@ balance_controller_node:
       stage_input_cost_weight: 0.001
       stage_state_cost_weight: 0.001
       terminal_cost_weight: 1.0
-      position_cost_scale: 1.5
+      # Raised from 1.5 to 3.0 alongside max_ground_velocity above: the wider
+      # velocity ceiling alone let Hold's own (already tight) position drift
+      # regress just over its 0.10 m smoke-test bound (0.10-0.11 m, run-to-
+      # run noise straddling the bound at 2.2); a tighter position penalty
+      # gives real margin below it without touching anything landing-
+      # specific - re-verified this does not undo the ledge recovery gain
+      # above.
+      position_cost_scale: 3.0
       velocity_cost_scale: 1.0
       max_target_distance_m: 0.25
       position_anchor_hold: false

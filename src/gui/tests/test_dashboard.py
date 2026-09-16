@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tap_teleop'))
 from std_msgs.msg import String
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
-from gui.dashboard import Dashboard, parse_options
+from gui.dashboard import ALL_JOINTS, Dashboard, parse_options
 from tap_teleop.pose_curves import JOINTS
 
 
@@ -52,6 +52,9 @@ class DashboardStopTest(unittest.TestCase):
         self.gui.experimental.get.return_value = True
         self.gui.sim_process = None
         self.gui.reset_standup_stage = None
+        self.gui.recording = Value(False)
+        self.gui.csv_writer = None
+        self.gui.pitch_history = []
 
     def feedback(self, text):
         self.gui.on_mode(String(data=text))
@@ -190,6 +193,9 @@ class OnModeLastPitchTest(unittest.TestCase):
         self.gui.deep_trajectory = None
         self.gui.stop_show = Mock()
         self.gui.stop_drive = Mock()
+        self.gui.recording = Value(False)
+        self.gui.csv_writer = None
+        self.gui.pitch_history = []
 
     def test_valid_pitch_and_pose_z_are_retained(self):
         self.gui.on_mode(String(data='Balance|fresh=1|estop=0|pitch=.05|pose_z=.24'))
@@ -219,6 +225,8 @@ class LaunchStopSimTest(unittest.TestCase):
         self.gui.sim_status = Mock()
         self.gui.sim_terrain_menu = Mock()
         self.gui.sim_terrain = Value('none')
+        self.gui.sim_profile_menu = Mock()
+        self.gui.sim_profile = Value('Default')
         self.gui.spawn_x = Value('0')
         self.gui.spawn_y = Value('0')
         self.gui.spawn_z = Value('0.2372')
@@ -228,6 +236,7 @@ class LaunchStopSimTest(unittest.TestCase):
         self.gui.estopped = True
         self.gui.feedback_grace_until = 0.
         self.gui.sim_started = 0.
+        self.gui.csv_file = None
 
     def test_refuses_when_a_real_sim_is_already_publishing_clock(self):
         # Regression test: an earlier version checked
@@ -260,6 +269,24 @@ class LaunchStopSimTest(unittest.TestCase):
             self.gui.launch_sim()
         launch.assert_called_once_with(
             ['auto_enable:=true', 'terrain:=rough', 'spawn_x:=0', 'spawn_y:=0', 'spawn_z:=0.2372'])
+
+    def test_deep_squat_profile_passes_controller_config_launch_arg(self):
+        self.gui.sim_profile.set('Deep squat')
+        with patch('gui.dashboard.sim_process.launch_sim',
+                  return_value=(Mock(), '/tmp/sim.log', Mock())) as launch:
+            self.gui.launch_sim()
+        args = launch.call_args.args[0]
+        matching = [a for a in args if a.startswith('controller_config:=')]
+        self.assertEqual(len(matching), 1)
+        self.assertTrue(matching[0].endswith('config/deep_squat.yaml'))
+
+    def test_default_profile_passes_no_controller_config_launch_arg(self):
+        self.gui.sim_profile.set('Default')
+        with patch('gui.dashboard.sim_process.launch_sim',
+                  return_value=(Mock(), '/tmp/sim.log', Mock())) as launch:
+            self.gui.launch_sim()
+        args = launch.call_args.args[0]
+        self.assertFalse(any(a.startswith('controller_config:=') for a in args))
 
     def test_passes_current_spawn_field_values_as_launch_args(self):
         self.gui.spawn_x.set('-4.6')
@@ -514,6 +541,65 @@ class DashboardWidgetTest(unittest.TestCase):
         for scale in g.joint_scales:
             self.assertEqual(str(scale.cget('state')), 'disabled')
 
+    def test_wheel_leg_style_tabs_and_new_widgets_are_built(self):
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        curves = json.loads((Path(__file__).resolve().parents[2] / 'tap_teleop'
+                             / 'config/pose_curves.json').read_text())
+        g = Dashboard(root, Mock(), curves)
+        tabs = [g.nb.tab(t, 'text') for t in g.nb.tabs()]
+        self.assertEqual(tabs, ['Control', 'Pose', 'Telemetry', 'Log'])
+        # New Control-tab widgets.
+        self.assertEqual(g.mode_pill.cget('text'), ' offline ')
+        # New Log-tab widgets.
+        self.assertFalse(g.recording.get())
+        self.assertEqual(str(g.logbox.cget('state')), 'disabled')
+        # New Telemetry-tab widgets.
+        self.assertEqual(set(g.jtree.get_children()), set(ALL_JOINTS))
+        self.assertEqual(g.pitch_history, [])
+        self.assertEqual(set(g.joint_history), set(ALL_JOINTS))
+
+    def test_shove_is_a_noop_and_logs_when_no_sim_is_running(self):
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        curves = json.loads((Path(__file__).resolve().parents[2] / 'tap_teleop'
+                             / 'config/pose_curves.json').read_text())
+        g = Dashboard(root, Mock(), curves)
+        self.assertIsNone(g.sim_process)
+        with patch('gui.dashboard.threading.Thread') as thread:
+            g._shove(1., 0.)
+            thread.assert_not_called()
+        self.assertIn('shove ignored', g.logbox.get('1.0', 'end'))
+
+    def test_toggle_record_writes_header_then_rows_and_closes(self):
+        import tempfile
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        curves = json.loads((Path(__file__).resolve().parents[2] / 'tap_teleop'
+                             / 'config/pose_curves.json').read_text())
+        g = Dashboard(root, Mock(), curves)
+        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as f:
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        g.csv_var.set(path)
+        g.toggle_record()
+        self.assertTrue(g.recording.get())
+        g.on_mode(String(data='Balance|fresh=1|estop=0|pitch=.05|pitch_rate=.01|'
+                          'cmd_v=0|cmd_w=0|wheel_vel=0|contact=1|pose_z=.2'))
+        g.toggle_record()
+        self.assertFalse(g.recording.get())
+        with open(path) as f:
+            rows = f.read().splitlines()
+        self.assertEqual(rows[0].split(',')[:3], ['wall_time', 'mode', 'pitch'])
+        self.assertEqual(len(rows), 2)
+        self.assertIn('Balance', rows[1])
+
 
 class DashboardShowTest(unittest.TestCase):
     def setUp(self):
@@ -547,6 +633,14 @@ class DashboardShowTest(unittest.TestCase):
         g.deep_trajectory = None
         g.deep_returning = False
         g.deep_text = ''
+        g.deep_mode = 'Deep squat'
+        g.deep_curves = None
+        g.stand_curves = None
+        g.recording = Value(False)
+        g.csv_writer = None
+        g.csv_file = None
+        g.pitch_history = []
+        g.joint_history = {name: [] for name in ALL_JOINTS}
         g.reset_standup_stage = None
         g.sim_process = None
         g.pub = {name: Mock() for name in
@@ -786,6 +880,38 @@ class DashboardShowTest(unittest.TestCase):
         self.assertIsNone(self.gui.show)
 
 
+class DashboardSquatDepthTest(unittest.TestCase):
+    """Plain 'Squat' mode reaches the Deep squat table's full depth (not the
+    shallow -0.8 rad 'squat' table) once deep_curves is available."""
+
+    def setUp(self):
+        DashboardShowTest.setUp(self)
+        self.gui.deep_curves = {'table': [list(self.gui.pose), [.979, -1.6, .979, -1.6]]}
+        self.gui.workflow.set('Squat')
+
+    def _settle(self, dt=.05, ticks=250):
+        pose = None
+        for _ in range(ticks):
+            pose = self.gui.target(dt)
+        return pose
+
+    def test_squat_mode_samples_deep_table_when_available(self):
+        self.gui.depth.set(1.)
+        target = self._settle()
+        self.assertAlmostEqual(target[1], -1.6, places=3)
+
+    def test_squat_mode_falls_back_to_shallow_table_without_deep_curves(self):
+        self.gui.deep_curves = None
+        self.gui.depth.set(1.)
+        target = self._settle()
+        self.assertGreater(target[1], -1.0)  # the plain squat table only reaches -0.8
+
+    def test_negative_slider_value_still_squats_forward_not_a_separate_curve(self):
+        self.gui.depth.set(-1.)
+        target = self._settle()
+        self.assertAlmostEqual(target[1], -1.6, places=3)
+
+
 class DashboardDeepSquatTest(unittest.TestCase):
     def setUp(self):
         DashboardShowTest.setUp(self)
@@ -808,7 +934,7 @@ class DashboardDeepSquatTest(unittest.TestCase):
             self.gui.measured_pose = list(self.gui.pose)
         return self.raw_target(dt)
 
-    def profile(self, extra='|pose_hip_max=.8|pose_knee_min=-1.2'):
+    def profile(self, extra='|pose_hip_max=.8|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2'):
         self.gui.on_mode(String(data='Balance|station=1|fresh=1|estop=0|cmd_v=0|cmd_w=0|pitch=.036|pose_z=.125' + extra))
 
     def test_explicit_profile_gate_and_existing_slew(self):
@@ -830,7 +956,7 @@ class DashboardDeepSquatTest(unittest.TestCase):
         held = self.gui.target(.05)
         for extra in ('|pitch=.121', '|pitch=-.121', '|pose_z=.1149',
                       '|pitch=nan', '|pose_z=inf', '|pitch=invalid', '|station=0'):
-            self.profile('|pose_hip_max=.8|pose_knee_min=-1.2' + extra)
+            self.profile('|pose_hip_max=.8|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2' + extra)
             self.assertTrue(self.gui.deep_paused)
             self.assertIsNotNone(self.gui.deep_trajectory)
             self.assertEqual(self.gui.target(.05), held)
@@ -843,7 +969,7 @@ class DashboardDeepSquatTest(unittest.TestCase):
 
     def test_deep_runtime_geometry_thresholds_and_missing_fields(self):
         for extra in ('|pitch=.12|pose_z=.115', '|pitch=-.12|pose_z=.115'):
-            self.profile('|pose_hip_max=.8|pose_knee_min=-1.2' + extra)
+            self.profile('|pose_hip_max=.8|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2' + extra)
             self.assertTrue(self.gui.deep_ready(100.))
         self.gui.on_mode(String(data='Balance|station=1|fresh=1|estop=0|cmd_v=0|cmd_w=0|pose_hip_max=.8|pose_knee_min=-1.2'))
         self.assertFalse(self.gui.deep_ready(100.))
@@ -1016,24 +1142,27 @@ class DashboardDeepSquatTest(unittest.TestCase):
 
     def test_cli_defaults_cap_and_ros_arguments(self):
         options, remaining = parse_options([])
-        self.assertIsNone(options.deep_squat_knee)
+        self.assertEqual(options.deep_squat_knee, 1.6)  # Deep squat is on by default (2026-09-16)
+        self.assertFalse(options.no_deep_squat)
         options, remaining = parse_options(['--deep-squat-knee', '1.6', '--ros-args'])
         self.assertEqual(options.deep_squat_knee, 1.6)
         self.assertEqual(remaining, ['--ros-args'])
         for value in ('0', '-1', '1.6001', '1.8', '2.1', 'nan', 'inf'):
             with patch('sys.stderr'), self.assertRaises(SystemExit):
                 parse_options(['--deep-squat-knee', value])
+        options, _ = parse_options(['--no-deep-squat'])
+        self.assertTrue(options.no_deep_squat)
 
     def test_controller_caps_cover_actual_table_not_unused_generator_bounds(self):
         self.gui.deep_curves['hip_bounds'] = [-1.57, 1.57]
-        self.profile('|pose_hip_max=.75|pose_knee_min=-1.2')
+        self.profile('|pose_hip_max=.75|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2')
         self.assertTrue(self.gui.deep_ready(100.))
-        self.profile('|pose_hip_max=.749|pose_knee_min=-1.2')
+        self.profile('|pose_hip_max=.749|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2')
         self.assertFalse(self.gui.deep_ready(100.))
 
     def test_approved_full_depth_requires_eleven_seconds(self):
         self.gui.deep_curves['table'][-1] = [.979, -1.6, .979, -1.6]
-        self.profile('|pose_hip_max=1.05|pose_knee_min=-1.6')
+        self.profile('|pose_hip_max=1.05|pose_knee_min=-1.6|pose_hip_min=-.6|pose_knee_max=.2')
         self.gui.start_deep()
         self.gui.deep_trajectory.advance(1., 0.)
         self.assertGreaterEqual(self.gui.deep_trajectory.duration_s, 11.)
@@ -1049,6 +1178,66 @@ class DashboardDeepSquatTest(unittest.TestCase):
         moved = self.raw_target(0.)
         self.assertLess(moved[1], initial[1])
         self.assertEqual(self.raw_target(.1), moved)
+
+
+class DashboardStandupTest(unittest.TestCase):
+    """The extension-direction sibling of DashboardDeepSquatTest, sharing the
+    same trajectory/hold state machine via self.gui.deep_mode."""
+
+    def setUp(self):
+        DashboardShowTest.setUp(self)
+        self.raw_target = self.gui.target
+        self.gui.target = self.sim_target
+        self.follow_measurement = True
+        self.gui.stand_curves = {'table': [list(self.gui.pose), [-.19, .5, -.19, .5]]}
+        self.gui.controller_pose_bounds = None
+        self.gui.controller_fresh = False
+        self.gui.deep_geometry_ready = False
+        self.gui.deep_text = ''
+        self.gui.deep_trajectory = None
+        self.gui.operator_zero = True
+        self.gui.workflow.set('Standup')
+        self.gui.deep_mode = 'Standup'
+        self.gui.depth.set(1.)
+
+    def sim_target(self, dt):
+        self.gui.sim_time += dt
+        if self.follow_measurement and self.gui.deep_trajectory is not None:
+            self.gui.measured_pose = list(self.gui.pose)
+        return self.raw_target(dt)
+
+    def profile(self, extra='|pose_hip_max=.8|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.5'):
+        self.gui.on_mode(String(data='Balance|station=1|fresh=1|estop=0|cmd_v=0|cmd_w=0|pitch=.036|pose_z=.125' + extra))
+
+    def test_go_stand_tall_selects_standup_profile_and_holds_at_full_extension(self):
+        self.gui.deep_curves = {'table': [list(self.gui.pose), [.75, -1.2, .75, -1.2]]}
+        self.profile()
+        self.assertTrue(self.gui.deep_ready(100.))
+        self.gui.go_stand_tall()
+        self.assertEqual(self.gui.deep_mode, 'Standup')
+        self.assertEqual(self.gui.workflow.get(), 'Standup')
+        self.assertIsNotNone(self.gui.deep_trajectory)
+        moved = self.gui.target(.05)
+        self.assertGreater(moved[1], 0.)  # knee moves toward the tallest extension, not a crouch
+        # Reaching full amplitude does not by itself trigger any return.
+        for _ in range(400):
+            moved = self.gui.target(.1)
+        self.assertAlmostEqual(moved[1], .5, places=6)
+        held = self.gui.target(.1)
+        self.assertEqual(held, moved)
+
+    def test_narrower_knee_max_bound_blocks_standup_but_not_squat(self):
+        self.gui.deep_curves = {'table': [list(self.gui.pose), [.75, -1.2, .75, -1.2]]}
+        self.profile('|pose_hip_max=.8|pose_knee_min=-1.2|pose_hip_min=-.6|pose_knee_max=.2')
+        self.gui.deep_mode = 'Standup'
+        self.assertFalse(self.gui.deep_ready(100.), 'stand_curves reaches knee=.5, past the .2 cap')
+        self.gui.deep_mode = 'Deep squat'
+        self.assertTrue(self.gui.deep_ready(100.))
+
+    def test_missing_profile_blocks_ready(self):
+        self.gui.stand_curves = None
+        self.profile()
+        self.assertFalse(self.gui.deep_ready(100.))
 
 
 class DashboardJumpTest(unittest.TestCase):
@@ -1083,6 +1272,18 @@ class DashboardJumpTest(unittest.TestCase):
         Dashboard.refresh_controls(g, 100.)
         for scale in g.joint_scales:
             scale.configure.assert_called_with(state='normal')
+
+    def test_squat_slider_is_one_sided_but_roll_keeps_both_directions(self):
+        g = self.gui
+        g.joint_scales = [Mock() for _ in range(4)]
+        g.depth_label, g.depth_scale, g.jump_button = Mock(), Mock(), Mock()
+        g.jump_status_var = Mock()
+        g.workflow.set('Squat')
+        Dashboard.refresh_controls(g, 100.)
+        g.depth_scale.configure.assert_called_with(from_=0, state='normal')
+        g.workflow.set('Roll')
+        Dashboard.refresh_controls(g, 100.)
+        g.depth_scale.configure.assert_called_with(from_=-1, state='normal')
 
     def test_jump_status_wrap_uses_remaining_width(self):
         button, label = Mock(), Mock()

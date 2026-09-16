@@ -27,4 +27,6 @@ inline constexpr float wheel_radius_m = 3.000000000000e-02F;
 inline constexpr float axle_spacing_m = 3.090000000000e-01F;
 inline constexpr float neutral_hip_rad = 1.154830957502e-01F;
 inline constexpr float neutral_knee_rad = 0.000000000000e+00F;
+inline constexpr float leg_hip_inertia_kgm2 = 1.073561527040e-02F;
+inline constexpr float leg_knee_inertia_kgm2 = 2.335969508843e-03F;
 }  // namespace robot_control::geometry

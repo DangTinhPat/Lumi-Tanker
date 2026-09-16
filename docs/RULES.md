@@ -21,6 +21,25 @@ this codebase today is `sim_pose` (the controller's default `pitch_source`:
 exact body orientation read straight from the physics engine's model pose,
 not estimated from any sensor).
 
+### Absolute framing (user, 2026-09-16)
+
+The robot's entire operating process — everything that decides a torque,
+velocity, or pose command — runs **completely on real-sensor data (IMU,
+joint encoders, per-wheel contact), with zero involvement of ground truth**.
+Gazebo is nothing more than the physics environment the real sensors happen
+to be simulated inside of; it is not itself a sensor and its internal model
+state must never reach a control decision, directly or indirectly.
+
+`sim_pose` (or any other ground-truth read) is permitted in exactly one
+role: **an offline diagnostic signal, read only by a debugging/analysis
+script, to compare against what the real-sensor path estimated, so a real
+bug can be found and fixed.** The moment a ground-truth value is read by
+`BalanceControllerNode` (or any other node that issues a real command) and
+used for anything the robot *does* — not just observes for a human to
+read afterward — that is a violation of this rule, full stop, regardless of
+whether the feature is "opt-in," "off by default," or "scoped as future
+work." There is no accepted resting state short of zero.
+
 ### Why this rule exists
 
 The user's stated goal (2026-09-15) is to keep this codebase as close as
@@ -63,26 +82,38 @@ physics engine:
   designer would also know it at design time — the line is "measured live
   from the sim" vs. "known in advance from the CAD/BOM").
 
-### Current known violation — not fixed yet, tracked deliberately
+### Current status (updated 2026-09-16 — corrects earlier stale text)
 
-`BalanceControllerNode`'s `pitch_source` parameter defaults to `"sim_pose"`
-today, and `station_keeper.enabled` / `jump.enabled` both hard-require
-`pitch_source == "sim_pose"` at construction (they throw otherwise). This is
-the single largest violation of this rule in the codebase and is the
-existing baseline that essentially all of Track A/B's QA evidence
-(`sim_smoke.py`, `clean_ledge_smoke.py`, `transformation_smoke.py`) was
-gathered against.
+**`pitch_source` now defaults to `"imu"`** (since 2026-09-15, commit
+`0ca725a`), not `sim_pose` — the earlier version of this section was out of
+date. Under the default config, pitch (`BalanceControllerNode::onImu`, a
+Kalman filter over real accelerometer+gyro) and floor contact
+(`any_wheel_contact_[0]`/`[1]`, real per-wheel contact sensors) are both
+real-sensor-only for every path `balance_controller.yaml` itself exercises
+(hold, drive, squat, the 20 cm ledge landing) — verified by reading
+`onImu`/`onSimPose`'s early-return guards and confirmed 2026-09-16 while
+root-causing the ledge landing regression (see
+`docs/LEDGE_DRIVEOFF_LIMIT.md`'s "Velocity headroom" section).
 
-This is **known, intentional debt, not an oversight** — switching it out is
-scoped as its own future track (see project memory
-`project_imu_only_direction.md` / the memory index) specifically *because*
-it is large enough to need its own from-scratch QA pass, not something to
-fold silently into unrelated work. The existing IMU-based complementary-
-filter path (`BalanceControllerNode::onImu`) is real-sensor-only and already
-exists in the codebase, but has never been run as the primary path for any
-committed evidence so far — treat any number gathered with `sim_pose` active
-as provisional once this migration happens, not as final validation of the
-IMU path's own behavior.
+**Two active violations remain, and per the Absolute framing above neither
+is acceptable as "scoped future work":**
+
+1. **Station Keeper** (`station_keeper.enabled`, off in
+   `balance_controller.yaml` by default, on in some other profiles) reads
+   `last_sim_pose_x_m_`/`last_sim_pose_y_m_` (Gazebo ground-truth world
+   position) directly as its x/y feedback, regardless of `pitch_source`.
+   A real robot has no such signal; this needs a real-sensor substitute
+   (e.g. wheel-odometry + gyro-yaw dead reckoning) before it can be
+   considered compliant.
+2. **Jump** (`jump.enabled`, off by default, experimental) hard-requires
+   `pitch_source == "sim_pose"` at construction and throws otherwise — it
+   cannot currently run on the real-sensor IMU path at all.
+
+Both are real, open defects to eliminate, not documented debt to leave in
+place — see project memory `project_imu_only_direction.md` for status
+tracking. Until fixed, any number gathered with either feature enabled is
+ground-truth-assisted evidence, not evidence about the real-sensor
+controller's own behavior, and must be labeled as such when reported.
 
 ### How to apply this rule going forward
 
@@ -103,6 +134,13 @@ Before adding or changing any control-path code:
 4. This rule does not block *using* simulation to develop and test — it
    blocks the *controller itself* from depending on simulator omniscience.
    The simulator is allowed to know everything; the controller is not.
+5. Ground truth is always fine in a standalone diagnostic script (e.g. this
+   session's `diag_*.py` scratchpad tools, or `clean_ledge_smoke.py`
+   reading `/tap_robot/pose` to score a trial) that only *reads and reports*
+   — never in anything that publishes back into the running node's own
+   command path. If a debugging script's ground-truth read is ever wired
+   into a topic/parameter the control node itself consumes to act, it has
+   crossed from diagnostic to control-path and this rule applies.
 
 ---
 

@@ -73,6 +73,36 @@ class MpcBalancer {
     float max_pendulum_length_m = 0.27F;
     float gravity_m_s2 = 9.81F;
     float max_ground_accel_m_s2 = 2.0F;
+    // Static friction-cone ceiling (Track B item 2, 2026-09-16): a wheel
+    // rolling without slip cannot deliver more tangential acceleration than
+    // mu*g regardless of commanded torque or robot mass (F=ma and
+    // F_friction=mu*m*g both scale with m, so it cancels) - nothing
+    // previously stopped the QP from planning an acceleration beyond what
+    // the wheel/ground contact can actually supply. mu=1.0 matches every
+    // world's ground_plane <surface><friction><ode><mu> (empty.sdf,
+    // ledge_test.sdf, jump.sdf, rough_training.sdf all use mu=mu2=1 there;
+    // not auto-synced from the SDF - there is no runtime channel from the
+    // physics engine's surface parameters back to this controller, so this
+    // must be kept in sync by hand if a world's ground friction changes).
+    // Deliberately static, not gated on live/measured contact force: this
+    // codebase has repeatedly measured that reactive touchdown-detection
+    // signals (hip-torque threshold, IMU-accelerometer threshold, contact
+    // sensor threshold - see docs/LEDGE_DRIVEOFF_LIMIT.md) either did
+    // nothing or hurt landing recovery, so a live Fz-gated version of this
+    // bound is not implemented without the same n>=25 evidence-gated
+    // comparison those attempts got, not just reasoning from first
+    // principles.
+    float wheel_ground_mu = 1.0F;
+    // Yaw-rate disturbance rejection (2026-09-16): the wheel differential
+    // below only ever tracked *commanded* yaw rate - a real spin-up from
+    // asymmetric friction/impact (a wheel catching a ledge corner, uneven
+    // touchdown) was never opposed, even though the gyro's own Z axis
+    // (state.imu.yaw_rate_rad_s) measures it directly every tick already.
+    // 0 (default) is an exact no-op: yaw_command == yaw, byte-identical to
+    // pre-2026-09-16 behavior. A positive value closes that loop: the wheel
+    // differential drives measured yaw rate toward the commanded one
+    // instead of just feed-forwarding the commanded value open-loop.
+    float yaw_rate_feedback_kp = 0.0F;
     int nb_timesteps = 30;
     float sampling_period_s = 0.02F;
     float stage_input_cost_weight = 1.0e-3F;

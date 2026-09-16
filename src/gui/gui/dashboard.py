@@ -9,9 +9,12 @@ unsupported actions honestly") and tap-qa-regression/SKILL.md ("do not
 inherit reference robot results").
 """
 import argparse
+import csv
 import math
+import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -26,14 +29,101 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 
 from tap_teleop.pose_curves import JOINTS, generate, sample
 from tap_teleop.show_sequence import ShowSequence
-from tap_teleop.deep_squat import DeepSquatTrajectory, generate_deep_squat
+from tap_teleop.deep_squat import DeepSquatTrajectory, generate_deep_squat, generate_stand_tall
 
 from . import gz_world, sim_process
+
+# wheel_leg reference dashboard's own dark palette (/home/dvt/wheel_leg/gui/
+# scripts/gui) - reused verbatim per the user's "redesign like wheel_leg" ask.
+BG = '#16181d'
+CARD = '#22252e'
+FG = '#e8eaf0'
+MUTED = '#98a0b0'
+ACCENT = '#4c8dff'
+GOOD = '#3ecf8e'
+WARN = '#ffb454'
+BAD = '#ff5c68'
+# All six physical joints in CLAUDE.md's documented order, for the Telemetry
+# tab's table/plots - wider than tap_teleop's JOINTS (hip/knee only, used by
+# the pose-control state machine, left untouched).
+ALL_JOINTS = ('cad_left_hip', 'cad_left_knee', 'cad_left_wheel',
+              'cad_right_hip', 'cad_right_knee', 'cad_right_wheel')
+HISTORY_S = 12.0
+
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    HAVE_MPL = True
+    MPL_ERR = ''
+except Exception as exc:  # pragma: no cover - environment dependent
+    HAVE_MPL = False
+    MPL_ERR = str(exc)
+
+
+class StripChart(tk.Canvas):
+    """Minimal dependency-free strip chart, used only if matplotlib is
+    unavailable (confirmed present in this environment; this is a defensive
+    fallback, not the common path). Ported near-verbatim from wheel_leg's
+    own StripChart."""
+
+    def __init__(self, master, series, ylabel, **kwargs):
+        super().__init__(master, bg='#1b1e26', highlightthickness=0, **kwargs)
+        self.series = series  # [(label, color), ...]
+        self.ylabel = ylabel
+        self.data = {label: [] for label, _ in series}
+        self.bind('<Configure>', lambda _e: self.redraw())
+
+    def push(self, label, t, value):
+        if label not in self.data:
+            self.data[label] = []
+        buf = self.data[label]
+        buf.append((t, value))
+        cutoff = t - HISTORY_S
+        while buf and buf[0][0] < cutoff:
+            buf.pop(0)
+
+    def redraw(self):
+        self.delete('all')
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 2 or h < 2:
+            return
+        all_vals = [v for buf in self.data.values() for _, v in buf]
+        if not all_vals:
+            return
+        lo, hi = min(all_vals), max(all_vals)
+        if hi - lo < 1e-6:
+            lo, hi = lo - 1, hi + 1
+        all_ts = [t for buf in self.data.values() for t, _ in buf]
+        if not all_ts:
+            return
+        t1 = max(all_ts)
+        t0 = t1 - HISTORY_S
+        self.create_text(4, 4, anchor='nw', fill=MUTED, font=('', 8),
+                         text=self.ylabel)
+        for label, color in self.series:
+            buf = self.data.get(label, [])
+            pts = []
+            for t, v in buf:
+                x = w * (t - t0) / max(1e-6, t1 - t0)
+                y = h - h * (v - lo) / (hi - lo)
+                pts.extend((x, y))
+            if len(pts) >= 4:
+                self.create_line(*pts, fill=color, width=1)
 
 DEEP_SQUAT_CANDIDATE_MAX_RAD = 1.6
 DEEP_SQUAT_GEOMETRY_CEILING_RAD = 1.6
 DEEP_SQUAT_GENERATION_HIP_BOUNDS = (-.6, 1.05)
 DEEP_SQUAT_FULL_DEPTH_MIN_TRANSITION_S = 11.
+# 0.5 rad stays well inside the monotonic-height region found by sampling FK
+# height vs. knee (peaks ~0.57 rad, then folds back down - see
+# generate_stand_tall's docstring); generated unconditionally (unlike Deep
+# squat's --deep-squat-knee opt-in) since this magnitude never approaches the
+# CAD wheel/thigh mesh-overlap risk documented in docs/DEEP_SQUAT.md for the
+# crouch direction, and generate_stand_tall's own monotonicity check rejects
+# anything past the real geometric peak regardless.
+STAND_TALL_KNEE_RAD = 0.5
 # Mirrors sim.launch.py's own terrain-conditioned spawn_x/spawn_y/spawn_z
 # defaults (src/tap_sim/launch/sim.launch.py) so Launch sim and Reset standup
 # agree on where "home" is for the selected terrain. 0.2372 m is the flat
@@ -43,14 +133,27 @@ TERRAIN_SPAWN = {
     'none': (0.0, 0.0, 0.2372),
     'rough': (-4.6, 0.0, 0.4372),
 }
+# Launch sim's Profile dropdown -> config filename under
+# src/tap_control/config/ (None = the launch's own default,
+# balance_controller.yaml alone). Deliberately a short, curated list of
+# GUI-relevant profiles, not every experimental config in that directory.
+SIM_PROFILES = {
+    'Default': None,
+    'Deep squat': 'deep_squat.yaml',
+}
 RESET_STANDUP_CONFIRM_S = 2.
 RESET_STANDUP_CONFIRM_TIMEOUT_S = 15.
 
 
 class Dashboard:
-    def __init__(self, root, node, curves, deep_curves=None, experimental_jump=False):
+    def __init__(self, root, node, curves, deep_curves=None, stand_curves=None, experimental_jump=False):
         self.root, self.node, self.curves = root, node, curves
         self.deep_curves = deep_curves
+        self.stand_curves = stand_curves
+        # Which extreme profile is currently in play ('Deep squat' or
+        # 'Standup'); drives status text and return_deep's target radio
+        # value so the two share one trajectory/hold state machine below.
+        self.deep_mode = 'Deep squat'
         self.updating_controls = False
         self.experimental_jump = experimental_jump
         self.jump_locked = False
@@ -109,6 +212,18 @@ class Dashboard:
         self.reset_standup_confirm_start = None
         self.reset_standup_confirm_deadline = 0.
         self._reset_standup_target = TERRAIN_SPAWN['none']
+        # Telemetry tab: rolling ~HISTORY_S-second history for the plots,
+        # appended by on_mode (pitch/pitch_rate) and on_joint_states (all six
+        # joints' position/velocity/effort) - additive to those callbacks'
+        # existing parsing, no change to the state they already compute.
+        self.pitch_history = []       # [(t, pitch, pitch_rate), ...]
+        self.joint_history = {name: [] for name in ALL_JOINTS}  # name -> [(t,p,v,e), ...]
+        self.push_mag = tk.DoubleVar(value=0.6)   # shove impulse [N s]
+        # Log tab.
+        self.recording = tk.BooleanVar(value=False)
+        self.csv_writer = None
+        self.csv_file = None
+        self._key_release_job = None
         self.pub = {topic: node.create_publisher(msg, '/' + topic, 10)
                     for topic, msg in [('cmd_vel', Twist), ('target_pose', Float64MultiArray),
                                        ('enable', Bool), ('emergency_stop', Bool),
@@ -120,30 +235,97 @@ class Dashboard:
         self.pub['jump_request'] = node.create_publisher(Bool, '/jump_request', 10)
         node.create_subscription(String, '/jump_status', self.on_jump_status, 10)
         root.title('TAP robot control')
-        root.geometry('780x800')
-        root.minsize(650, 780)
+        root.configure(bg=BG)
+        root.geometry('1040x760')
+        root.minsize(900, 640)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.bind('<FocusOut>', lambda event: self.stop_drive())
         root.bind('<ButtonRelease-1>', lambda event: self.stop_drive())
         root.bind('<Escape>', lambda event: self.estop())
-        main = ttk.Frame(root, padding=12)
-        main.pack(fill='both', expand=True)
-        main.columnconfigure(0, weight=1)
-        simulation = ttk.Frame(main)
-        simulation.grid(row=0, sticky='ew', pady=(0, 6))
-        self.sim_button = ttk.Button(simulation, text='Launch sim', command=self.toggle_sim)
+        self._style()
+        self.nb = ttk.Notebook(root)
+        self.nb.pack(fill='both', expand=True, padx=8, pady=8)
+        self._tab_control(curves)
+        self._tab_pose(curves)
+        self._tab_telemetry()
+        self._tab_log()
+        self._bind_keys()
+        self.refresh_controls(time.monotonic())
+        root.after(20, self.tick)
+        root.after(100, self._redraw_plots)
+
+    def _style(self):
+        s = ttk.Style()
+        try:
+            s.theme_use('clam')
+        except tk.TclError:
+            pass
+        s.configure('.', background=BG, foreground=FG, font=('', 10))
+        s.configure('TNotebook', background=BG, borderwidth=0)
+        s.configure('TNotebook.Tab', background=CARD, foreground=MUTED,
+                   padding=(16, 7), font=('', 10, 'bold'))
+        s.map('TNotebook.Tab', background=[('selected', ACCENT)],
+             foreground=[('selected', '#0b1220')])
+        s.configure('TFrame', background=BG)
+        s.configure('Card.TFrame', background=CARD)
+        s.configure('TLabel', background=BG, foreground=FG)
+        s.configure('Card.TLabel', background=CARD, foreground=FG)
+        s.configure('Muted.TLabel', background=BG, foreground=MUTED, font=('', 9))
+        s.configure('TButton', background='#2f3440', foreground=FG,
+                   borderwidth=0, padding=7)
+        s.map('TButton', background=[('active', '#3a404e'), ('pressed', ACCENT)])
+        s.configure('Accent.TButton', background=ACCENT, foreground='#0b1220',
+                   font=('', 10, 'bold'))
+        s.configure('Danger.TButton', background=BAD, foreground='#180a0c',
+                   font=('', 10, 'bold'))
+        s.configure('Drive.TButton', font=('', 15, 'bold'), padding=10)
+        s.configure('Treeview', background=CARD, fieldbackground=CARD,
+                   foreground=FG, borderwidth=0, rowheight=24)
+        s.configure('Treeview.Heading', background='#2f3440', foreground=MUTED,
+                   font=('', 9, 'bold'))
+
+    # ---------------- Control tab ----------------
+    def _tab_control(self, curves):
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text='Control')
+        outer = ttk.Frame(tab, padding=14)
+        outer.pack(fill='both', expand=True)
+
+        head = ttk.Frame(outer)
+        head.pack(fill='x', pady=(0, 10))
+        ttk.Label(head, text='TAP robot control', font=('', 16, 'bold')).pack(side='left')
+        self.mode_pill = tk.Label(head, text=' offline ', bg='#333', fg=FG,
+                                  font=('', 11, 'bold'), padx=12, pady=4)
+        self.mode_pill.pack(side='right')
+
+        simulation = ttk.Frame(outer, style='Card.TFrame', padding=10)
+        simulation.pack(fill='x', pady=(0, 10))
+        self.sim_button = ttk.Button(simulation, text='Launch sim', style='Accent.TButton',
+                                     command=self.toggle_sim)
         self.sim_button.pack(side='left')
-        ttk.Label(simulation, text='Terrain').pack(side='left', padx=(8, 2))
+        ttk.Label(simulation, text='Terrain', style='Card.TLabel').pack(side='left', padx=(8, 2))
         self.sim_terrain = tk.StringVar(value='none')
         self.sim_terrain_menu = ttk.Combobox(simulation, textvariable=self.sim_terrain,
                                              values=['none', 'rough'], state='readonly', width=6)
         self.sim_terrain_menu.pack(side='left')
         self.sim_terrain_menu.bind('<<ComboboxSelected>>', self.on_terrain_changed)
+        # One-click profile select for Launch sim, so a controller_config
+        # override (e.g. Deep squat's wider pose_knee_max/hip_max, needed
+        # for the Pose tab's Deep squat/Standup buttons to actually reach
+        # full depth instead of being silently clamped) no longer requires
+        # a separate terminal running `ros2 launch tap_sim sim.launch.py
+        # controller_config:=...` alongside the GUI - matches wheel_leg's
+        # "press button, it launches" expectation.
+        ttk.Label(simulation, text='Profile', style='Card.TLabel').pack(side='left', padx=(8, 2))
+        self.sim_profile = tk.StringVar(value='Default')
+        self.sim_profile_menu = ttk.Combobox(simulation, textvariable=self.sim_profile,
+                                             values=list(SIM_PROFILES), state='readonly', width=10)
+        self.sim_profile_menu.pack(side='left')
         # Spawn X/Y/Z: used both as Launch sim's spawn_x/y/z launch args and as
         # Reset standup's teleport target, so both agree on "home" for whatever
         # is currently selected -- editable, so a fall can be recovered from
         # without relaunching even at a custom, non-default position.
-        ttk.Label(simulation, text='Spawn X/Y/Z').pack(side='left', padx=(8, 2))
+        ttk.Label(simulation, text='Spawn X/Y/Z', style='Card.TLabel').pack(side='left', padx=(8, 2))
         self.spawn_x = tk.StringVar()
         self.spawn_y = tk.StringVar()
         self.spawn_z = tk.StringVar()
@@ -153,91 +335,70 @@ class Dashboard:
         ttk.Button(simulation, text='Reset upright (sim-only)',
                   command=self.reset_standup).pack(side='left', padx=(8, 2))
         self.sim_status = tk.StringVar(value='Sim not running')
-        ttk.Label(simulation, textvariable=self.sim_status).pack(side='left', padx=8)
-        self.status = tk.StringVar(value=self.mode_text)
-        header = ttk.Frame(main, height=68)
-        header.grid(row=1, sticky='ew', pady=4)
-        header.pack_propagate(False)
-        ttk.Label(header, textvariable=self.status).pack(anchor='w')
-        self.telemetry = tk.StringVar(value=self.telemetry_text)
-        telemetry_label = ttk.Label(header, textvariable=self.telemetry, wraplength=600)
-        telemetry_label.pack(anchor='w', fill='x')
-        header.bind('<Configure>', lambda event: telemetry_label.configure(wraplength=max(200, event.width - 8)))
-        controls = ttk.Frame(main)
-        controls.grid(row=2, sticky='ew', pady=6)
+        ttk.Label(simulation, textvariable=self.sim_status, style='Card.TLabel').pack(side='left', padx=8)
+
+        body = ttk.Frame(outer)
+        body.pack(fill='both', expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side='left', fill='y', padx=(0, 10))
+
+        drive = ttk.Frame(left, style='Card.TFrame', padding=14)
+        drive.pack(fill='x')
+        ttk.Label(drive, text='DRIVE  (hold / arrow keys)', style='Card.TLabel').pack(pady=(0, 8))
+        pad = ttk.Frame(drive, style='Card.TFrame')
+        pad.pack()
+        self._dbtn(pad, '▲', 0, 1, 1., 0.)
+        self._dbtn(pad, '◄', 1, 0, 0., 1.)
+        ttk.Button(pad, text='■', style='Drive.TButton', width=3,
+                  command=self.stop_drive).grid(row=1, column=1, padx=4, pady=4)
+        self._dbtn(pad, '►', 1, 2, 0., -1.)
+        self._dbtn(pad, '▼', 2, 1, -1., 0.)
+        speedf = ttk.Frame(drive, style='Card.TFrame')
+        speedf.pack(fill='x', pady=(10, 0))
+        self.speed = tk.DoubleVar(value=.5)
+        self.yaw = tk.DoubleVar(value=.3)
+        ttk.Label(speedf, text='Speed (m/s)', style='Card.TLabel').grid(row=0, column=0, sticky='w')
+        ttk.Spinbox(speedf, from_=0, to=1., increment=.02, textvariable=self.speed,
+                   width=6).grid(row=0, column=1, padx=4)
+        ttk.Label(speedf, text='Turn (rad/s)', style='Card.TLabel').grid(row=1, column=0, sticky='w')
+        ttk.Spinbox(speedf, from_=0, to=.8, increment=.1, textvariable=self.yaw,
+                   width=6).grid(row=1, column=1, padx=4)
+
+        ttk.Separator(drive, orient='horizontal').pack(fill='x', pady=10)
+        ttk.Label(drive, text='SHOVE  (click - disturbance test)', style='Card.TLabel').pack(pady=(0, 6))
+        ppad = ttk.Frame(drive, style='Card.TFrame')
+        ppad.pack()
+        self._pbtn(ppad, '↑', 0, 1, 1., 0.)
+        self._pbtn(ppad, '←', 1, 0, 0., 1.)
+        self._pbtn(ppad, '→', 1, 2, 0., -1.)
+        self._pbtn(ppad, '↓', 2, 1, -1., 0.)
+        pushf = ttk.Frame(drive, style='Card.TFrame')
+        pushf.pack(fill='x', pady=(8, 0))
+        ttk.Label(pushf, text='impulse', style='Card.TLabel').pack(side='left')
+        ttk.Scale(pushf, from_=.1, to=3., variable=self.push_mag,
+                 orient='horizontal').pack(side='left', fill='x', expand=True, padx=6)
+
+        right = ttk.Frame(body)
+        right.pack(side='left', fill='both', expand=True)
+
+        rob = ttk.Frame(right, style='Card.TFrame', padding=12)
+        rob.pack(fill='x')
+        ttk.Label(rob, text='ROBOT', style='Card.TLabel').pack(anchor='w')
+        r1 = ttk.Frame(rob, style='Card.TFrame')
+        r1.pack(fill='x', pady=(6, 4))
         for title, callback in [('Enable', self.enable), ('Disable', self.disable),
                                 ('Clear E-stop', self.clear_estop),
                                 ('Reset controller', self.reset)]:
-            ttk.Button(controls, text=title, command=callback).pack(side='left', padx=3)
-        tk.Button(controls, text='E-STOP', bg='#b42330', fg='white',
-                  command=self.estop).pack(side='right', padx=3)
-        drive = ttk.Frame(main)
-        drive.grid(row=3, sticky='ew', pady=8)
-        self.speed = tk.DoubleVar(value=.5)
-        self.yaw = tk.DoubleVar(value=.3)
-        ttk.Label(drive, text='Speed (m/s)').grid(row=0, column=0)
-        ttk.Spinbox(drive, from_=0, to=1., increment=.02, textvariable=self.speed,
-                    width=6).grid(row=0, column=1)
-        ttk.Label(drive, text='Turn (rad/s)').grid(row=0, column=2)
-        ttk.Spinbox(drive, from_=0, to=.8, increment=.1, textvariable=self.yaw,
-                    width=6).grid(row=0, column=3)
-        for col, (label, forward, yaw) in enumerate([('Left', 0, 1), ('Forward', 1, 0),
-                                                    ('Back', -1, 0), ('Right', 0, -1)]):
-            button = ttk.Button(drive, text=label)
-            button.grid(row=1, column=col, padx=3, pady=6)
-            button.bind('<ButtonPress-1>', lambda event, f=forward, y=yaw: self.start_drive(f, y))
-            button.bind('<Leave>', lambda event: self.stop_drive())
-        ttk.Separator(main).grid(row=4, sticky='ew', pady=6)
-        self.workflow = tk.StringVar(value='Native joints')
-        modes = ttk.Frame(main)
-        modes.grid(row=5, sticky='ew')
-        mode_names = ['Native joints', 'Squat', 'Roll', 'Wiggle']
-        if self.deep_curves is not None:
-            mode_names.append('Deep squat')
-        for label in mode_names:
-            ttk.Radiobutton(modes, text=label, value=label, variable=self.workflow,
-                            command=self.change_workflow).pack(side='left', padx=4)
-        self.experimental = tk.BooleanVar(value=False)
-        ttk.Checkbutton(main, text='Experimental motions', variable=self.experimental,
-                        command=self.change_workflow).grid(row=6, sticky='w', pady=6)
-        joints = ttk.Frame(main)
-        joints.grid(row=7, sticky='ew')
-        joints.columnconfigure(1, weight=1)
-        self.jvars = []
-        self.joint_scales = []
-        for i, name in enumerate(JOINTS):
-            var = tk.DoubleVar(value=self.pose[i])
-            self.jvars.append(var)
-            var.trace_add('write', lambda *_: self.manual_joint_change())
-            ttk.Label(joints, text=name.replace('cad_', '') + ' (rad)').grid(row=i, column=0, sticky='w')
-            lower, upper = curves['hip_bounds' if i % 2 == 0 else 'knee_bounds']
-            scale = tk.Scale(joints, from_=lower, to=upper, resolution=.005,
-                             orient='horizontal', variable=var, length=350)
-            scale.grid(row=i, column=1, sticky='ew')
-            self.joint_scales.append(scale)
-        self.depth = tk.DoubleVar(value=0.)
-        self.depth.trace_add('write', lambda *_: self.depth_change())
-        self.depth_label = ttk.Label(main, text='Squat / roll amplitude')
-        self.depth_label.grid(row=8, sticky='w')
-        self.depth_scale = tk.Scale(main, from_=-1, to=1, resolution=.01,
-                                    orient='horizontal', variable=self.depth)
-        self.depth_scale.grid(row=9, sticky='ew')
-        actions = ttk.Frame(main)
-        actions.grid(row=10, sticky='ew', pady=8)
-        ttk.Button(actions, text='Neutral pose', command=self.neutral).pack(side='left')
-        ttk.Button(actions, text='Stand up (experimental)', command=self.stand_up).pack(side='left', padx=8)
-        ttk.Button(actions, text='Show', command=self.start_show).pack(side='left', padx=3)
-        ttk.Button(actions, text='Stop show', command=self.stop_show).pack(side='left', padx=3)
-        if self.deep_curves is not None:
-            ttk.Button(actions, text='Hold squat', command=self.stop_deep).pack(side='left', padx=3)
-        self.reset_standup_status = tk.StringVar(value='')
-        ttk.Label(main, textvariable=self.reset_standup_status).grid(row=11, sticky='w')
-        self.show_status = tk.StringVar(value=self.show_text)
-        ttk.Label(main, textvariable=self.show_status).grid(row=12, sticky='w')
-        jump_controls = ttk.Frame(main)
-        jump_controls.grid(row=13, sticky='ew')
+            ttk.Button(r1, text=title, command=callback).pack(side='left', expand=True,
+                                                              fill='x', padx=2)
+        tk.Button(rob, text='EMERGENCY STOP', bg=BAD, fg='#180a0c', font=('', 10, 'bold'),
+                 bd=0, command=self.estop).pack(fill='x', pady=(4, 0))
+
+        jump_controls = ttk.Frame(right, style='Card.TFrame', padding=12)
+        jump_controls.pack(fill='x', pady=(10, 0))
         jump_controls.columnconfigure(1, weight=1, minsize=0)
-        self.jump_opt_in = tk.BooleanVar(value=experimental_jump)
+        self.jump_opt_in = tk.BooleanVar(value=self.experimental_jump)
         ttk.Checkbutton(jump_controls, text='Experimental jump (unstable landing)',
                         variable=self.jump_opt_in, command=self.change_jump_opt_in).grid(
                             row=0, column=0, columnspan=2, sticky='w')
@@ -245,19 +406,176 @@ class Dashboard:
         self.jump_button.grid(row=1, column=0, sticky='nw')
         self.jump_status_var = tk.StringVar(value=self.jump_text)
         jump_label = ttk.Label(jump_controls, textvariable=self.jump_status_var,
-                               width=1, wraplength=480, justify='left', anchor='nw')
+                               style='Card.TLabel', width=1, wraplength=380,
+                               justify='left', anchor='nw')
         jump_label.grid(row=1, column=1, sticky='new', padx=6)
         jump_controls.bind('<Configure>', lambda event: self.resize_jump_status(
             event.width, self.jump_button, jump_label))
+
+        state = ttk.Frame(right, style='Card.TFrame', padding=12)
+        state.pack(fill='both', expand=True, pady=(10, 0))
+        ttk.Label(state, text='STATE', style='Card.TLabel').pack(anchor='w')
+        self.status = tk.StringVar(value=self.mode_text)
+        self.telemetry = tk.StringVar(value=self.telemetry_text)
         self.motors = tk.StringVar(value=self.motor_text)
-        motor_frame = ttk.Frame(main, height=60)
-        motor_frame.grid(row=14, sticky='ew', pady=5)
-        motor_frame.pack_propagate(False)
-        motor_label = ttk.Label(motor_frame, textvariable=self.motors, wraplength=600)
-        motor_label.pack(anchor='w', fill='x')
-        motor_frame.bind('<Configure>', lambda event: motor_label.configure(wraplength=max(200, event.width - 8)))
-        self.refresh_controls(time.monotonic())
-        root.after(20, self.tick)
+        self.reset_standup_status = tk.StringVar(value='')
+        self.show_status = tk.StringVar(value=self.show_text)
+        for var in (self.status, self.telemetry, self.motors,
+                   self.reset_standup_status, self.show_status):
+            ttk.Label(state, textvariable=var, style='Card.TLabel',
+                     font=('monospace', 9), justify='left', wraplength=420).pack(
+                         anchor='w', pady=(4, 0))
+
+    def _dbtn(self, parent, text, r, c, vx, wz):
+        b = ttk.Button(parent, text=text, style='Drive.TButton', width=3)
+        b.grid(row=r, column=c, padx=4, pady=4)
+        b.bind('<ButtonPress-1>', lambda _e: self.start_drive(vx, wz))
+        b.bind('<ButtonRelease-1>', lambda _e: self.stop_drive())
+        b.bind('<Leave>', lambda _e: self.stop_drive())
+
+    def _pbtn(self, parent, text, r, c, fx, fy):
+        b = ttk.Button(parent, text=text, style='Drive.TButton', width=3,
+                       command=lambda: self._shove(fx, fy))
+        b.grid(row=r, column=c, padx=4, pady=4)
+
+    # ---------------- Pose tab ----------------
+    def _tab_pose(self, curves):
+        tab = ttk.Frame(self.nb, padding=14)
+        self.nb.add(tab, text='Pose')
+
+        modesf = ttk.Frame(tab, style='Card.TFrame', padding=10)
+        modesf.pack(fill='x')
+        self.workflow = tk.StringVar(value='Native joints')
+        mode_names = ['Native joints', 'Squat', 'Roll', 'Wiggle']
+        if self.deep_curves is not None:
+            mode_names.append('Deep squat')
+        if self.stand_curves is not None:
+            mode_names.append('Standup')
+        for label in mode_names:
+            ttk.Radiobutton(modesf, text=label, value=label, variable=self.workflow,
+                            command=self.change_workflow).pack(side='left', padx=4)
+        self.experimental = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tab, text='Experimental motions', variable=self.experimental,
+                        command=self.change_workflow).pack(anchor='w', pady=6)
+
+        jointsf = ttk.Frame(tab, style='Card.TFrame', padding=12)
+        jointsf.pack(fill='x', pady=(0, 8))
+        jointsf.columnconfigure(1, weight=1)
+        self.jvars = []
+        self.joint_scales = []
+        for i, name in enumerate(JOINTS):
+            var = tk.DoubleVar(value=self.pose[i])
+            self.jvars.append(var)
+            var.trace_add('write', lambda *_: self.manual_joint_change())
+            ttk.Label(jointsf, text=name.replace('cad_', '') + ' (rad)',
+                     style='Card.TLabel').grid(row=i, column=0, sticky='w')
+            lower, upper = curves['hip_bounds' if i % 2 == 0 else 'knee_bounds']
+            scale = tk.Scale(jointsf, from_=lower, to=upper, resolution=.005,
+                             orient='horizontal', variable=var, length=350,
+                             bg=CARD, fg=FG, highlightthickness=0, troughcolor=BG)
+            scale.grid(row=i, column=1, sticky='ew')
+            self.joint_scales.append(scale)
+
+        depthf = ttk.Frame(tab, style='Card.TFrame', padding=12)
+        depthf.pack(fill='x', pady=(0, 8))
+        self.depth = tk.DoubleVar(value=0.)
+        self.depth.trace_add('write', lambda *_: self.depth_change())
+        self.depth_label = ttk.Label(depthf, text='Squat / roll amplitude', style='Card.TLabel')
+        self.depth_label.pack(anchor='w')
+        self.depth_scale = tk.Scale(depthf, from_=-1, to=1, resolution=.01,
+                                    orient='horizontal', variable=self.depth,
+                                    bg=CARD, fg=FG, highlightthickness=0, troughcolor=BG)
+        self.depth_scale.pack(fill='x')
+
+        actions = ttk.Frame(tab, style='Card.TFrame', padding=10)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Neutral pose', command=self.neutral).pack(side='left')
+        ttk.Button(actions, text='Stand up (experimental)', command=self.stand_up).pack(side='left', padx=8)
+        ttk.Button(actions, text='Show', command=self.start_show).pack(side='left', padx=3)
+        ttk.Button(actions, text='Stop show', command=self.stop_show).pack(side='left', padx=3)
+        if self.deep_curves is not None:
+            ttk.Button(actions, text='Hold squat', command=self.stop_deep).pack(side='left', padx=3)
+            ttk.Button(actions, text='Deep squat', command=self.go_deep_squat).pack(side='left', padx=3)
+        if self.stand_curves is not None:
+            ttk.Button(actions, text='Standup', command=self.go_stand_tall).pack(side='left', padx=3)
+
+    # ---------------- Telemetry tab ----------------
+    def _tab_telemetry(self):
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text='Telemetry')
+        top = ttk.Frame(tab, style='Card.TFrame', padding=6)
+        top.pack(fill='x')
+        self.jtree = ttk.Treeview(top, columns=('p', 'v', 'e'),
+                                  show='tree headings', height=6)
+        self.jtree.heading('#0', text='joint')
+        self.jtree.heading('p', text='position [rad]')
+        self.jtree.heading('v', text='velocity [rad/s]')
+        self.jtree.heading('e', text='effort [Nm]')
+        self.jtree.column('#0', width=140)
+        for c in ('p', 'v', 'e'):
+            self.jtree.column(c, width=140, anchor='e')
+        for j in ALL_JOINTS:
+            self.jtree.insert('', 'end', iid=j, text=j, values=('-', '-', '-'))
+        self.jtree.pack(fill='x')
+        if HAVE_MPL:
+            self.pitch_fig = Figure(figsize=(8, 2.6), dpi=96, facecolor=CARD)
+            self.ax_pitch = self.pitch_fig.add_subplot(111)
+            self._style_axes(self.ax_pitch, 'pitch [rad] / rate [rad/s]')
+            self.l_pitch, = self.ax_pitch.plot([], [], color=GOOD, lw=1.4, label='pitch')
+            self.l_pitch_rate, = self.ax_pitch.plot([], [], color=ACCENT, lw=0.9, label='pitch_rate')
+            self.ax_pitch.legend(loc='upper left', fontsize=7, ncol=2,
+                                 facecolor='#1b1e26', labelcolor=MUTED)
+            self.pitch_fig.tight_layout()
+            self.pitch_canvas = FigureCanvasTkAgg(self.pitch_fig, master=tab)
+            self.pitch_canvas.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=(8, 4))
+
+            self.joint_fig = Figure(figsize=(8, 2.6), dpi=96, facecolor=CARD)
+            self.ax_joint_p = self.joint_fig.add_subplot(211)
+            self.ax_joint_v = self.joint_fig.add_subplot(212, sharex=self.ax_joint_p)
+            self._style_axes(self.ax_joint_p, 'pos [rad]')
+            self._style_axes(self.ax_joint_v, 'vel [rad/s]')
+            cols = ['#4c8dff', '#3ecf8e', '#ffb454', '#c586ff', '#ff5c68', '#66d9e8']
+            self.jl_p, self.jl_v = {}, {}
+            for i, j in enumerate(ALL_JOINTS):
+                self.jl_p[j], = self.ax_joint_p.plot([], [], color=cols[i], lw=1.0, label=j)
+                self.jl_v[j], = self.ax_joint_v.plot([], [], color=cols[i], lw=1.0)
+            self.ax_joint_p.legend(loc='upper left', fontsize=6, ncol=6,
+                                   facecolor='#1b1e26', labelcolor=MUTED)
+            self.joint_fig.tight_layout()
+            self.joint_canvas = FigureCanvasTkAgg(self.joint_fig, master=tab)
+            self.joint_canvas.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=(4, 8))
+        else:
+            self.pitch_strip = StripChart(tab, [('pitch', GOOD), ('pitch_rate', ACCENT)],
+                                          'pitch [rad] / rate [rad/s]', height=160)
+            self.pitch_strip.pack(fill='both', expand=True, padx=8, pady=(8, 4))
+            ttk.Label(tab, text='matplotlib unavailable (' + MPL_ERR[:80] +
+                     ') - using canvas fallback', style='Muted.TLabel').pack()
+
+    @staticmethod
+    def _style_axes(ax, ylabel):
+        ax.set_facecolor('#1b1e26')
+        ax.tick_params(colors=MUTED, labelsize=8)
+        ax.grid(True, color='#2b2f3a', lw=0.5)
+        ax.set_ylabel(ylabel, color=MUTED, fontsize=8)
+        for sp in ax.spines.values():
+            sp.set_color('#3a3f4d')
+
+    # ---------------- Log tab ----------------
+    def _tab_log(self):
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text='Log')
+        bar = ttk.Frame(tab, style='Card.TFrame', padding=8)
+        bar.pack(fill='x')
+        ttk.Label(bar, text='CSV file:', style='Card.TLabel').pack(side='left')
+        self.csv_var = tk.StringVar(value=os.path.expanduser('~/tap_dashboard_log.csv'))
+        ttk.Entry(bar, textvariable=self.csv_var, width=48).pack(side='left', padx=6)
+        self.rec_btn = ttk.Button(bar, text='● Record', command=self.toggle_record)
+        self.rec_btn.pack(side='left')
+        self.rec_lbl = ttk.Label(bar, text='', style='Card.TLabel')
+        self.rec_lbl.pack(side='left', padx=8)
+        self.logbox = tk.Text(tab, bg=CARD, fg=MUTED, bd=0, font=('monospace', 9), wrap='word')
+        self.logbox.pack(fill='both', expand=True, padx=8, pady=8)
+        self.logbox.configure(state='disabled')
 
     def change_jump_opt_in(self):
         self.experimental_jump = bool(self.jump_opt_in.get())
@@ -291,8 +609,8 @@ class Dashboard:
         mode = self.workflow.get()
         manual = (mode == 'Native joints' and self.deep_trajectory is None
                   and not self.jump_locked and not self.pose_commands_blocked)
-        deep = mode == 'Deep squat'
-        self.depth_label.configure(text='Deep squat depth' if deep else 'Squat / roll amplitude')
+        deep = mode in ('Deep squat', 'Standup')
+        self.depth_label.configure(text=f'{mode} depth' if deep else 'Squat / roll amplitude')
         # Tk Scale.configure writes its variable even for a state-only change.
         self.updating_controls = True
         try:
@@ -302,7 +620,12 @@ class Dashboard:
                     scale.configure(state=state)
             depth_state = 'normal' if (mode != 'Native joints' and not self.jump_locked
                                       and not self.pose_commands_blocked) else 'disabled'
-            lower = 0 if deep else -1
+            # Squat (unlike Roll) ignores the slider's sign entirely (see
+            # target()'s curve selection below), so a -1..1 range let either
+            # side of center produce the same squat - confusing and wastes
+            # half the travel. One-sided 0..1 fixes that; Roll/Wiggle still
+            # use sign to pick a side, so they keep the full -1..1 range.
+            lower = 0 if (deep or mode == 'Squat') else -1
             if (str(self.depth_scale.cget('state')) != depth_state
                     or float(self.depth_scale.cget('from')) != lower):
                 self.depth_scale.configure(from_=lower, state=depth_state)
@@ -426,7 +749,8 @@ class Dashboard:
             self.deep_geometry_ready = False
         self.last_contact = fields.get('contact')
         try:
-            bounds = tuple(float(fields[key]) for key in ('pose_hip_max', 'pose_knee_min'))
+            bounds = tuple(float(fields[key]) for key in
+                          ('pose_hip_max', 'pose_knee_min', 'pose_hip_min', 'pose_knee_max'))
             self.controller_pose_bounds = bounds if all(map(math.isfinite, bounds)) else None
         except (KeyError, ValueError):
             self.controller_pose_bounds = None
@@ -460,6 +784,29 @@ class Dashboard:
         self.feedback_grace_until = 0.
         if self.deep_trajectory is not None and not self.deep_ready(self.last_mode):
             self.stop_deep()
+        # Telemetry tab plot history - additive, does not affect any of the
+        # state/logic above.
+        try:
+            pitch_v, rate_v = float(fields['pitch']), float(fields.get('pitch_rate', 'nan'))
+            if math.isfinite(pitch_v) and math.isfinite(rate_v):
+                self._append_history(self.pitch_history, pitch_v, rate_v)
+        except (KeyError, ValueError):
+            pass
+        # Log tab CSV recording - additive, reuses the fields already parsed above.
+        if self.recording.get() and self.csv_writer is not None:
+            self.csv_writer.writerow([
+                time.time(), self.mode_text, fields.get('pitch', ''),
+                fields.get('pitch_rate', ''), fields.get('cmd_v', ''),
+                fields.get('cmd_w', ''), fields.get('wheel_vel', ''),
+                fields.get('contact', ''), fields.get('fresh', '')])
+
+    @staticmethod
+    def _append_history(buf, *values):
+        now = time.monotonic()
+        buf.append((now,) + values)
+        cutoff = now - HISTORY_S
+        while buf and buf[0][0] < cutoff:
+            buf.pop(0)
 
     def on_motors(self, msg):
         self.motor_text = 'Torque limits (Nm): ' + ', '.join(
@@ -484,6 +831,29 @@ class Dashboard:
         self.sim_time = value
 
     def on_joint_states(self, msg):
+        # Telemetry tab: all six joints (incl. wheels), independent of the
+        # 4-DOF pose-control validity check below - additive, does not
+        # affect self.measured_pose or any pose-control logic.
+        has_vel = len(msg.velocity) == len(msg.name)
+        has_eff = len(msg.effort) == len(msg.name)
+        by_name = {}
+        for i, name in enumerate(msg.name):
+            if name not in ALL_JOINTS:
+                continue
+            p = msg.position[i] if i < len(msg.position) else float('nan')
+            v = msg.velocity[i] if has_vel else float('nan')
+            e = msg.effort[i] if has_eff else float('nan')
+            by_name[name] = (p, v, e)
+        for name, (p, v, e) in by_name.items():
+            if math.isfinite(p):
+                self._append_history(self.joint_history[name], p,
+                                     v if math.isfinite(v) else 0., e if math.isfinite(e) else 0.)
+            if hasattr(self, 'jtree'):
+                self.jtree.item(name, values=(
+                    f'{p:+.4f}' if math.isfinite(p) else '-',
+                    f'{v:+.3f}' if math.isfinite(v) else '-',
+                    f'{e:+.3f}' if math.isfinite(e) else '-'))
+
         positions = dict(zip(msg.name, msg.position))
         valid = (len(msg.name) == len(msg.position) and len(set(msg.name)) == len(msg.name)
                  and all(name in positions and math.isfinite(positions[name]) for name in JOINTS))
@@ -570,6 +940,7 @@ class Dashboard:
         self.enabled = True
         self.feedback_grace_until = time.monotonic() + 2.
         self.boolean('enable', True)
+        self._log('enable')
 
     def disable(self):
         self.stop_deep()
@@ -578,16 +949,19 @@ class Dashboard:
         self.feedback_grace_until = 0.
         self.stop_drive()
         self.boolean('enable', False)
+        self._log('disable')
 
     def estop(self):
         self.estopped = True
         self.boolean('emergency_stop', True)
+        self._log('EMERGENCY STOP')
         self.disable()
 
     def clear_estop(self):
         self.disable()
         self.boolean('emergency_stop', False)
         self.estopped = False
+        self._log('clear e-stop')
 
     def reset(self):
         if self.jump_locked:
@@ -597,10 +971,12 @@ class Dashboard:
             self.disable()
             self.jump_reset_pending = True
             self.boolean('reset_controller', True)
+            self._log('reset controller (jump)')
             return
         self.disable()
         self.pose_commands_blocked = True
         self.boolean('reset_controller', True)
+        self._log('reset controller')
 
     def stand_up(self):
         if self.jump_locked or self.pose_commands_blocked:
@@ -615,6 +991,7 @@ class Dashboard:
             self.enabled = True
             self.feedback_grace_until = time.monotonic() + 2.
             self.boolean('stand_up', True)
+            self._log('stand-up requested')
 
     def start_drive(self, forward, yaw):
         if self.jump_locked:
@@ -640,6 +1017,129 @@ class Dashboard:
         if self.jump_locked:
             return
         self.pub['cmd_vel'].publish(Twist())
+
+    # ---------------- arrow-key drive (additive to the D-pad buttons) ----------------
+    def _bind_keys(self):
+        keymap = {'Up': (1., 0.), 'Down': (-1., 0.), 'Left': (0., 1.), 'Right': (0., -1.)}
+        for key, (forward, yaw) in keymap.items():
+            self.root.bind(f'<KeyPress-{key}>',
+                           lambda _e, f=forward, y=yaw: self._key_drive(f, y))
+            self.root.bind(f'<KeyRelease-{key}>', lambda _e: self._key_release())
+        self.root.bind('<space>', lambda _e: self.stop_drive())
+
+    def _key_drive(self, forward, yaw):
+        if self._key_release_job is not None:
+            self.root.after_cancel(self._key_release_job)
+            self._key_release_job = None
+        self.start_drive(forward, yaw)
+
+    def _key_release(self):
+        # A held key auto-repeats press/release; delay the actual stop so a
+        # normal inter-repeat gap doesn't chatter-stop the drive command.
+        if self._key_release_job is not None:
+            self.root.after_cancel(self._key_release_job)
+        self._key_release_job = self.root.after(150, self.stop_drive)
+
+    # ---------------- shove (simulation-only disturbance test) ----------------
+    def _shove(self, fx, fy):
+        if self.sim_process is None or self.sim_process.poll() is not None:
+            self._log('shove ignored: sim not running')
+            return
+        impulse = float(self.push_mag.get())
+        force = impulse / .001
+        direction = {(1, 0): 'fwd', (-1, 0): 'back', (0, 1): 'left', (0, -1): 'right'}
+        self._log(f'shove {direction.get((int(fx), int(fy)), "?")}  {impulse:.2f} N s')
+        threading.Thread(target=self._shove_thread, args=(fx * force, fy * force),
+                         daemon=True).start()
+
+    def _shove_thread(self, force_x, force_y):
+        try:
+            gz_world.wrench('tap_robot', force_x, force_y)
+        except Exception as exc:  # noqa: BLE001 - subprocess/CLI failure, reported not raised
+            self.root.after(0, lambda: self._log(f'shove failed: {exc}'))
+
+    # ---------------- Log tab ----------------
+    def _log(self, message):
+        if not hasattr(self, 'logbox'):
+            return
+        self.logbox.configure(state='normal')
+        self.logbox.insert('end', f'{time.strftime("%H:%M:%S")}  {message}\n')
+        self.logbox.see('end')
+        self.logbox.configure(state='disabled')
+
+    def toggle_record(self):
+        if self.recording.get():
+            self.recording.set(False)
+            if self.csv_file is not None:
+                self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+            self.rec_btn.configure(text='● Record')
+            self.rec_lbl.configure(text='')
+            self._log('CSV recording stopped')
+            return
+        path = self.csv_var.get()
+        try:
+            self.csv_file = open(path, 'w', newline='')
+        except OSError as exc:
+            self._log(f'CSV open failed: {exc}')
+            return
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(['wall_time', 'mode', 'pitch', 'pitch_rate',
+                                  'cmd_v', 'cmd_w', 'wheel_vel', 'contact', 'fresh'])
+        self.recording.set(True)
+        self.rec_btn.configure(text='■ Stop')
+        self.rec_lbl.configure(text=f'recording -> {path}')
+        self._log(f'CSV recording started: {path}')
+
+    # ---------------- Telemetry tab plots ----------------
+    def _redraw_plots(self):
+        # Only draw what is actually on screen - a matplotlib canvas redraw
+        # is the single most expensive thing this GUI does (see wheel_leg's
+        # own _redraw_plots, the pattern this mirrors).
+        try:
+            if HAVE_MPL and self.nb.tab(self.nb.select(), 'text') == 'Telemetry':
+                self._draw_pitch_plot()
+                self._draw_joint_plots()
+        except Exception:  # noqa: BLE001 - a plot glitch must not kill the GUI loop
+            pass
+        self.root.after(100, self._redraw_plots)
+
+    def _draw_pitch_plot(self):
+        if not self.pitch_history:
+            return
+        ts = [row[0] for row in self.pitch_history]
+        t1 = ts[-1]
+        self.l_pitch.set_data([t - t1 for t in ts], [row[1] for row in self.pitch_history])
+        self.l_pitch_rate.set_data([t - t1 for t in ts], [row[2] for row in self.pitch_history])
+        self.ax_pitch.set_xlim(-HISTORY_S, 0)
+        values = [row[1] for row in self.pitch_history] + [row[2] for row in self.pitch_history]
+        if values:
+            lo, hi = min(values), max(values)
+            pad = max(.05, (hi - lo) * .1)
+            self.ax_pitch.set_ylim(lo - pad, hi + pad)
+        self.pitch_canvas.draw_idle()
+
+    def _draw_joint_plots(self):
+        any_data = False
+        for name in ALL_JOINTS:
+            rows = self.joint_history.get(name, [])
+            if not rows:
+                continue
+            any_data = True
+            t1 = rows[-1][0]
+            xs = [row[0] - t1 for row in rows]
+            self.jl_p[name].set_data(xs, [row[1] for row in rows])
+            self.jl_v[name].set_data(xs, [row[2] for row in rows])
+        if not any_data:
+            return
+        self.ax_joint_p.set_xlim(-HISTORY_S, 0)
+        self.ax_joint_v.set_xlim(-HISTORY_S, 0)
+        self.ax_joint_p.relim()
+        self.ax_joint_p.autoscale_view(scalex=False)
+        self.ax_joint_v.relim()
+        self.ax_joint_v.autoscale_view(scalex=False)
+        self.joint_canvas.draw_idle()
 
     def neutral(self):
         if self.jump_locked:
@@ -675,7 +1175,7 @@ class Dashboard:
             return
         selected = self.workflow.get()
         if self.deep_trajectory is not None:
-            self.return_deep(selected if selected != 'Deep squat' else 'Native joints')
+            self.return_deep(selected if selected not in ('Deep squat', 'Standup') else 'Native joints')
             return
         self.stop_deep()
         self.stop_show()
@@ -685,24 +1185,28 @@ class Dashboard:
         self.stop_drive()
         if not self.experimental.get():
             self.neutral()
-        elif selected == 'Deep squat':
+        elif selected in ('Deep squat', 'Standup'):
+            self.deep_mode = selected
             self.start_deep()
+
+    def _deep_profile(self):
+        return self.deep_curves if self.deep_mode == 'Deep squat' else self.stand_curves
 
     def stop_deep(self):
         if self.deep_trajectory is not None:
             self.deep_paused = True
             self.deep_tracking_since = None
-            self.deep_text = 'Deep squat held'
+            self.deep_text = f'{self.deep_mode} held'
 
     def return_deep(self, next_mode):
         self.stop_drive()
         self.deep_returning = True
         self.deep_next_mode = next_mode
-        self.workflow.set('Deep squat')
+        self.workflow.set(self.deep_mode)
         self.deep_paused = not self.deep_ready(time.monotonic())
         self.deep_last_sim_time = self.sim_time
         self.deep_tracking_since = None
-        self.deep_text = 'Deep squat held' if self.deep_paused else 'Deep squat returning'
+        self.deep_text = f'{self.deep_mode} held' if self.deep_paused else f'{self.deep_mode} returning'
 
     def manual_joint_change(self):
         if self.updating_controls:
@@ -719,6 +1223,9 @@ class Dashboard:
             return
         if self.deep_trajectory is not None:
             return
+        profile = self._deep_profile()
+        if profile is None:
+            return
         neutral = self.curves['rest_pose']
         def near(values, tolerance):
             return values is not None and len(values) == 4 and all(
@@ -726,18 +1233,42 @@ class Dashboard:
         if (not self.deep_ready(time.monotonic()) or not near(self.pose, .02)
                 or not near([v.get() for v in self.jvars], .02)
                 or not near(self.measured_pose, .08)):
-            self.deep_text = 'Deep squat blocked: neutral and profile required'
+            self.deep_text = f'{self.deep_mode} blocked: neutral and profile required'
             return
-        depth = max(-q[i] for q in self.deep_curves['table'] for i in (1, 3))
+        depth = max(abs(q[i]) for q in profile['table'] for i in (1, 3))
         minimum_time = (DEEP_SQUAT_FULL_DEPTH_MIN_TRANSITION_S
                         if depth >= DEEP_SQUAT_GEOMETRY_CEILING_RAD - 1e-9 else 0.)
         self.deep_trajectory = DeepSquatTrajectory(
-            self.deep_curves, joint_speed=.3, minimum_transition_s=minimum_time)
+            profile, joint_speed=.3, minimum_transition_s=minimum_time)
         self.deep_last_sim_time = self.sim_time
         self.deep_tracking_since = None
         self.deep_returning = False
         self.deep_paused = False
         self.deep_text = ''
+
+    def go_deep_squat(self):
+        """One-click: go straight to the full tested squat depth and hold -
+        no slider drag and no automatic return afterward (only an explicit
+        Neutral pose / workflow switch animates back)."""
+        if self.deep_curves is None or self.jump_locked or self.pose_commands_blocked:
+            return
+        self.experimental.set(True)
+        self.workflow.set('Deep squat')
+        self.deep_mode = 'Deep squat'
+        self.change_workflow()
+        self.depth.set(1.)
+
+    def go_stand_tall(self):
+        """One-click: go straight to the tallest tested standup extension
+        and hold - see go_deep_squat's docstring for the same no-auto-return
+        behavior, mirrored here for the opposite (extension) direction."""
+        if self.stand_curves is None or self.jump_locked or self.pose_commands_blocked:
+            return
+        self.experimental.set(True)
+        self.workflow.set('Standup')
+        self.deep_mode = 'Standup'
+        self.change_workflow()
+        self.depth.set(1.)
 
     def target(self, dt):
         mode = self.workflow.get()
@@ -757,7 +1288,7 @@ class Dashboard:
                     self.deep_tracking_since = self.sim_time
                 elif self.sim_time - self.deep_tracking_since >= .3 - 1e-9:
                     self.stop_deep()
-                    self.deep_text = 'Deep squat held: joint tracking'
+                    self.deep_text = f'{self.deep_mode} held: joint tracking'
                     return list(self.pose)
             else:
                 self.deep_tracking_since = None
@@ -776,9 +1307,9 @@ class Dashboard:
                 for var, angle in zip(self.jvars, self.pose):
                     var.set(angle)
                 self.workflow.set(self.deep_next_mode)
-                self.deep_text = 'Deep squat neutral'
+                self.deep_text = f'{self.deep_mode} neutral'
             return list(self.pose)
-        elif mode == 'Deep squat':
+        elif mode in ('Deep squat', 'Standup'):
             return list(self.pose)
         elif mode == 'Native joints':
             target = [v.get() for v in self.jvars]
@@ -793,15 +1324,25 @@ class Dashboard:
             if mode == 'Wiggle':
                 self.phase += dt * 2 * math.pi * .15
                 amount *= math.sin(self.phase)
-            curve = 'squat' if mode == 'Squat' else ('roll_left' if amount >= 0 else 'roll_right')
-            target = sample(self.curves, curve, abs(amount))
+            if mode == 'Squat' and self.deep_curves is not None:
+                # Reach the same tested full depth as the Deep squat button
+                # (docs/DEEP_SQUAT.md), not the shallow -0.8 rad 'squat'
+                # table other callers (Stationary Show, etc.) still use.
+                # Safe under the plain per-tick rate limiter below: it caps
+                # joint speed at the same 0.3 rad/s DEEP_SQUAT.md itself
+                # validated against for this exact depth range.
+                target = sample({'tables': {'deep': self.deep_curves['table']}}, 'deep', abs(amount))
+            else:
+                curve = 'squat' if mode == 'Squat' else ('roll_left' if amount >= 0 else 'roll_right')
+                target = sample(self.curves, curve, abs(amount))
         # Rate limiting also prevents discontinuities when changing workflows.
         step = .3 * dt
         self.pose = [p + max(-step, min(step, q - p)) for p, q in zip(self.pose, target)]
         return self.pose
 
     def deep_ready(self, now):
-        if (self.deep_curves is None or (not self.experimental.get() and not self.deep_returning)
+        profile = self._deep_profile()
+        if (profile is None or (not self.experimental.get() and not self.deep_returning)
                 or not self.enabled
                 or self.estopped or not self.controller_fresh or now - self.last_mode > 1.
                 or not self.station_ready or not self.deep_geometry_ready
@@ -811,10 +1352,10 @@ class Dashboard:
                 or now - self.measured_wall > 1. or self.sim_time is None
                 or now - self.clock_wall > 1.):
             return False
-        hip_max, knee_min = self.controller_pose_bounds
-        return all(q[0] <= hip_max and q[2] <= hip_max
-                   and q[1] >= knee_min and q[3] >= knee_min
-                   for q in self.deep_curves['table'])
+        hip_max, knee_min, hip_min, knee_max = self.controller_pose_bounds
+        return all(hip_min <= q[0] <= hip_max and hip_min <= q[2] <= hip_max
+                   and knee_min <= q[1] <= knee_max and knee_min <= q[3] <= knee_max
+                   for q in profile['table'])
 
     # ---------------- simulation lifecycle (Launch sim / Stop sim) ----------------
 
@@ -844,6 +1385,10 @@ class Dashboard:
         extra_args = ['auto_enable:=true']
         if self.sim_terrain.get() != 'none':
             extra_args.append(f'terrain:={self.sim_terrain.get()}')
+        profile_file = SIM_PROFILES.get(self.sim_profile.get())
+        if profile_file is not None:
+            config_path = Path(get_package_share_directory('tap_control')) / 'config' / profile_file
+            extra_args.append(f'controller_config:={config_path}')
         try:
             sx, sy, sz = self._read_spawn_position()
         except ValueError as exc:
@@ -858,6 +1403,7 @@ class Dashboard:
         self.sim_started = time.monotonic()
         self.sim_button.configure(text='Stop sim')
         self.sim_terrain_menu.configure(state='disabled')
+        self.sim_profile_menu.configure(state='disabled')
         self.sim_status.set('Starting Gazebo...')
 
     def stop_sim(self):
@@ -874,6 +1420,7 @@ class Dashboard:
             self.sim_log_path = None
             self.sim_button.configure(text='Launch sim')
             self.sim_terrain_menu.configure(state='readonly')
+            self.sim_profile_menu.configure(state='readonly')
 
     def _tick_sim(self, now):
         if self.sim_process is None:
@@ -886,6 +1433,7 @@ class Dashboard:
             self.sim_log_path = None
             self.sim_button.configure(text='Launch sim')
             self.sim_terrain_menu.configure(state='readonly')
+            self.sim_profile_menu.configure(state='readonly')
             return
         stage_text = sim_process.sim_stage(self.sim_log_path, now - self.sim_started)
         self.sim_status.set(stage_text)
@@ -1072,7 +1620,16 @@ class Dashboard:
                         + (' | Feedback stale' if age > 1 else ''))
         self.motors.set(self.motor_text)
         self.telemetry.set(self.telemetry_text)
-        self.show_status.set(self.deep_text if self.workflow.get() == 'Deep squat' else self.show_text)
+        self.show_status.set(self.deep_text if self.workflow.get() in ('Deep squat', 'Standup') else self.show_text)
+        if hasattr(self, 'mode_pill'):
+            cmap = {'Balance': GOOD, 'Drive': GOOD, 'PoseChange': WARN, 'Enabling': WARN,
+                   'Fallen': BAD, 'EmergencyStop': BAD, 'Disabled': MUTED}
+            running = age <= 1.
+            if not running:
+                self.mode_pill.configure(text=' offline ', bg='#333')
+            else:
+                self.mode_pill.configure(text=f' {self.mode_text} ',
+                                         bg=cmap.get(self.mode_text, '#333'))
         self.refresh_controls(now)
         self.root.after(20, self.tick)
 
@@ -1081,20 +1638,35 @@ class Dashboard:
             self.disable()
         if self.sim_process is not None:
             self.stop_sim()
+        if self.csv_file is not None:
+            self.csv_file.close()
         self.root.destroy()
 
 
 def parse_options(argv=None):
     parser = argparse.ArgumentParser(description='TAP robot dashboard')
-    parser.add_argument('--deep-squat-knee', type=float, default=None)
+    # Both generated by default (2026-09-16): Deep squat is DEEP_SQUAT.md's
+    # own fully tested/promoted candidate, not an unverified depth, so there
+    # is no more reason to gate it behind a flag than Standup already isn't.
+    # A one-click "Launch sim" + Deep squat/Standup workflow needs both
+    # present without the user having to remember a CLI flag.
+    parser.add_argument('--deep-squat-knee', type=float, default=DEEP_SQUAT_CANDIDATE_MAX_RAD)
+    parser.add_argument('--no-deep-squat', action='store_true',
+                        help='Disable the Deep squat button/mode entirely')
+    parser.add_argument('--stand-tall-knee', type=float, default=STAND_TALL_KNEE_RAD)
+    parser.add_argument('--no-stand-tall', action='store_true',
+                        help='Disable the Standup button/mode entirely')
     parser.add_argument('--experimental-jump', action='store_true')
     options, ros_args = parser.parse_known_args(argv)
-    if options.deep_squat_knee is not None and (
+    if not options.no_deep_squat and (
             not math.isfinite(options.deep_squat_knee)
             or not 0 < options.deep_squat_knee <= DEEP_SQUAT_CANDIDATE_MAX_RAD):
         parser.error('--deep-squat-knee must be finite and in '
                      f'(0, {DEEP_SQUAT_CANDIDATE_MAX_RAD:g}] native CAD radians; '
                      'larger depths are not supported by the current GUI candidate profile')
+    if not options.no_stand_tall and (
+            not math.isfinite(options.stand_tall_knee) or options.stand_tall_knee <= 0):
+        parser.error('--stand-tall-knee must be finite and positive')
     return options, ros_args
 
 
@@ -1108,13 +1680,19 @@ def main():
         description = Path(get_package_share_directory('tap_robot_description'))
         curves = generate(description / 'description/cad_robot/robot.urdf.xacro')
         deep_curves = None
-        if options.deep_squat_knee is not None:
+        if not options.no_deep_squat:
             deep_curves = generate_deep_squat(
                 description / 'description/cad_robot/robot.urdf.xacro',
                 knee_max=options.deep_squat_knee, hip_bounds=DEEP_SQUAT_GENERATION_HIP_BOUNDS)
+        stand_curves = None
+        if not options.no_stand_tall:
+            stand_curves = generate_stand_tall(
+                description / 'description/cad_robot/robot.urdf.xacro',
+                knee_max=options.stand_tall_knee, hip_bounds=DEEP_SQUAT_GENERATION_HIP_BOUNDS)
         rclpy.init(args=ros_args)
         node = Node('tap_dashboard')
-        Dashboard(root, node, curves, deep_curves=deep_curves, experimental_jump=options.experimental_jump)
+        Dashboard(root, node, curves, deep_curves=deep_curves, stand_curves=stand_curves,
+                 experimental_jump=options.experimental_jump)
         root.deiconify()
         try:
             root.mainloop()

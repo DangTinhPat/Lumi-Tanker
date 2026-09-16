@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     from owned_process import cleanup_group, start_owned_process
+    from tap_launch import sim_launch_command
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--duration', type=float, default=15.0)
     parser.add_argument('--exercise', action='store_true')
@@ -94,7 +95,7 @@ def main():
     binary = ROOT / 'install/tap_control/lib/tap_control/balance_controller_node'
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     try:
-        launch_args = [str(ROOT / 'run_sim.sh'), 'gui:=false', 'auto_enable:=true']
+        launch_args = sim_launch_command('gui:=false', 'auto_enable:=true')
         if args.controller_config:
             launch_args.append(f'controller_config:={args.controller_config}')
         process = start_owned_process(launch_args,

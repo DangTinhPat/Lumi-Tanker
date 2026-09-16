@@ -41,6 +41,7 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
     os.environ['GZ_PARTITION'] = f'tap_ledge_{trial_id}_{os.getpid()}_{time.time_ns()}'
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from owned_process import start_owned_process, cleanup_group
+    from tap_launch import sim_launch_command
     import rclpy
     from geometry_msgs.msg import Twist
     from rosgraph_msgs.msg import Clock
@@ -108,7 +109,7 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
         return state.get('mode') == mode
 
     try:
-        args = [str(ROOT / 'run_sim.sh'), 'gui:=false', 'auto_enable:=true', 'terrain:=rough']
+        args = sim_launch_command('gui:=false', 'auto_enable:=true', 'terrain:=rough')
         if controller_config:
             args.append(f'controller_config:={controller_config}')
         process = start_owned_process(args, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)

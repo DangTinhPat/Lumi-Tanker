@@ -78,5 +78,5 @@ From the workspace root in the ROS environment (with numpy, trimesh and PyYAML):
 python3 tools/estimate_inertials.py
 python3 -m unittest discover -s tests -v
 colcon build --symlink-install
-./run_preview.sh
+ros2 launch tap_robot_description cad_preview.launch.py
 ```

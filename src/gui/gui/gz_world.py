@@ -18,6 +18,26 @@ import subprocess
 _SERVICES = {'control': 'gz.msgs.WorldControl', 'set_pose': 'gz.msgs.Pose'}
 
 
+def wrench(name, fx, fy, timeout=6):
+    """Publish one EntityWrench (gz topic, not a service) to shove `name`.
+
+    Simulation-only disturbance-rejection test convenience, same framing as
+    the rest of this module. Mirrors the wheel_leg reference GUI's own
+    shove: a `gz topic` publish is a single message, not a held wrench, and
+    Gazebo applies it for one physics step (max_step_size 1 ms here, see
+    src/tap_sim/CONTRACT.md), so passing a *force* in newtons that already
+    equals impulse[N s] / 0.001 s gives a clean, repeatable impulse rather
+    than a duration-dependent push.
+    """
+    result = subprocess.run(
+        ['gz', 'topic', '-t', '/world/empty/wrench', '-m', 'gz.msgs.EntityWrench',
+         '-p', f'entity: {{name: "{name}" type: MODEL}} '
+               f'wrench: {{force: {{x: {fx:.3f} y: {fy:.3f}}}}}'],
+        capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f'wrench failed: {result.stdout} {result.stderr}')
+
+
 def _service(name, request, timeout=5):
     reqtype = _SERVICES[name]
     result = subprocess.run(

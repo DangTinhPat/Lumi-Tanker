@@ -32,15 +32,16 @@ future track — see the file for the full explanation).
 colcon build --symlink-install
 source install/setup.bash
 
-# Run
-./run_preview.sh                 # RViz kinematic preview only, no physics
-./run_sim.sh                     # Gazebo, starts paused, awaiting /enable
-ros2 run gui gui                 # Dashboard, separate terminal, same ROS domain
-./run_jump.sh [rated|manual-curve] [extra ros2 launch args]
-./run_sim.sh controller_config:="$PWD/src/tap_control/config/<profile>.yaml"  # alt profile
+# Run (no shell-script launchers anywhere in this repo; ros2 launch directly)
+ros2 launch tap_robot_description cad_preview.launch.py   # RViz kinematic preview only, no physics
+ros2 launch tap_sim sim.launch.py                # Gazebo, starts paused, awaiting /enable
+ros2 run gui gui                                 # Dashboard, separate terminal, same ROS domain -
+                                                  # its own Launch sim button does the above for you
+python3 tools/run_jump.py [rated|manual-curve] [extra ros2 launch args]
+ros2 launch tap_sim sim.launch.py controller_config:="$PWD/src/tap_control/config/<profile>.yaml"  # alt profile
 
 # Headless
-./run_sim.sh gui:=false auto_enable:=true
+ros2 launch tap_sim sim.launch.py gui:=false auto_enable:=true
 
 # Tests
 python3 -m unittest discover -s tests -v          # top-level Python tests (jump, geometry, ROS contracts)
@@ -115,9 +116,10 @@ Five colcon packages under `src/`:
   `~/bin/ros2` wrapper sources `/home/dvt/wheel_leg/install` first, which also
   has a `gui` package, so always source this workspace's own
   `install/setup.bash` yourself before running it) — `gui/dashboard.py`
-  (drive/pose Tk GUI, imports `tap_teleop`'s curves), `sim_process.py` (owned
-  `run_sim.sh` lifecycle via `tools/owned_process.py`, backs the Launch/Stop
-  sim button), `gz_world.py` (the `gz service` calls behind the sim-only
+  (drive/pose Tk GUI, imports `tap_teleop`'s curves), `sim_process.py` (owns
+  a `ros2 launch tap_sim sim.launch.py` subprocess directly via
+  `tools/owned_process.py`, backs the Launch/Stop sim button), `gz_world.py`
+  (the `gz service` calls behind the sim-only
   Reset standup test convenience — see `src/gui/README.md` for the exact
   sequence and its evidence caveat).
 
@@ -160,12 +162,19 @@ validated. `docs/UPSTREAM.md` documents source provenance.
 **Every number below predates 2026-09-15's `pitch_source` default change**
 (`sim_pose` → `imu`, per `docs/RULES.md` Rule 1 — see that file and
 `docs/LEDGE_DRIVEOFF_LIMIT.md`'s "Known regression" section). General
-balance (hold/squat/drive) is close to parity under the new IMU default;
-the 20 cm ledge drive-off specifically regressed from 70-88% to **0/10
-recovered** under IMU — a known, accepted, separately-tracked tradeoff, not
-a re-validation of the numbers below. Treat anything below as "what
-ground truth was capable of," not the active configuration's current
-behavior, until it is re-measured under `pitch_source: imu`.
+balance (hold/squat/drive) is close to parity under the new IMU default.
+The 20 cm ledge drive-off specifically regressed from 70-88% to 0/10 under
+IMU; this was **largely fixed on 2026-09-16** — root cause was a
+zero-authority-headroom bug in `MpcBalancer` (the balance-correction signal
+was clamped to the same ceiling as commanded cruise speed, leaving no room
+to exceed cruise and catch a lean), not the estimator. Fixing it
+(`mpc.max_ground_velocity` 0.6→2.0, `mpc.position_cost_scale` 1.5→3.0 to
+offset a small Hold-drift side effect) restored **48-60% recovered**
+(n=15-25, three independent batches) under the current `pitch_source: imu`
+default — see `docs/LEDGE_DRIVEOFF_LIMIT.md`'s "Velocity headroom" section.
+Treat everything else below as "what ground truth was capable of," not the
+active configuration's current behavior, until re-measured under
+`pitch_source: imu`.
 
 - ~67 s N20 sim trial passed hold/drive/moderate poses (25% squat, 20% roll
   only); roll caused up to 0.066 m translation and ~0.14 rad unintended yaw.
@@ -205,8 +214,8 @@ behavior, until it is re-measured under `pitch_source: imu`.
   evidence.
 - Jump is experimental and developed separately from the validated squat
   profile (`docs/JUMP*.md`); flight >10 cm and stable landing are **not**
-  validated. `run_jump.sh` opts into bounded actuators/measured contacts —
-  plain `run_sim.sh` is unaffected.
+  validated. `tools/run_jump.py` opts into bounded actuators/measured
+  contacts — plain `ros2 launch tap_sim sim.launch.py` is unaffected.
 - Embedded (`EmbeddedController`, ROS-free C++17) has host benchmarks only;
   ESP32-S3 timing and hardware integration are future work
   (`docs/EMBEDDED_PERFORMANCE.md`).

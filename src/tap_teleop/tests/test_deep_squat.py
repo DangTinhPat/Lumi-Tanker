@@ -7,7 +7,8 @@ import numpy as np
 
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE))
-from tap_teleop.deep_squat import DeepSquatTrajectory, _root, generate_deep_squat
+from tap_teleop.deep_squat import (DeepSquatTrajectory, _root, generate_deep_squat,
+                                    generate_stand_tall)
 from tap_teleop.pose_curves import RobotGeometry, sample
 
 XACRO = PACKAGE.parent / 'tap_robot_description/description/cad_robot/robot.urdf.xacro'
@@ -95,6 +96,48 @@ class DeepSquatTest(unittest.TestCase):
                 generate_deep_squat(XACRO, knee_max=.2, samples=samples)
         with self.assertRaises(ValueError):
             generate_deep_squat(XACRO, knee_max=2.2)
+
+    def test_stand_tall_geometry_bounded_symmetric_and_rising(self):
+        data = generate_stand_tall(XACRO, knee_max=.5, hip_bounds=(-.6, .6), samples=11)
+        robot = RobotGeometry(XACRO)
+        self.assertFalse(data['physical_gate_passed'])
+        self.assertEqual(data['knee_bounds'], [0., .5])
+        self.assertTrue(np.all(np.diff(data['com_height_m']) > 0))
+        self.assertGreater(data['rise_m'], 0)
+        for pose, height in zip(data['table'], data['com_height_m']):
+            self.assertEqual(pose[:2], pose[2:])
+            self.assertTrue(-.6 <= pose[0] <= .6)
+            self.assertTrue(0 <= pose[1] <= .5)
+            result = robot.evaluate(pose)
+            self.assertLess(abs(result['dx']), 1e-9)
+            self.assertAlmostEqual(result['height'], height)
+
+    def test_stand_tall_trajectory_reaches_and_holds_table_end(self):
+        profile = generate_stand_tall(XACRO, knee_max=.5, samples=21)
+        trajectory = DeepSquatTrajectory(profile, minimum_transition_s=11.)
+        trajectory.advance(1., 0.)
+        trajectory.advance(1., 20.)
+        np.testing.assert_allclose(trajectory.advance(1., 1.), profile['table'][-1], atol=1e-12)
+        # Holding (repeated requests at the same amplitude) does not drift.
+        held = trajectory.advance(1., 5.)
+        np.testing.assert_allclose(held, profile['table'][-1], atol=1e-12)
+
+    def test_stand_tall_rejects_past_the_geometric_height_peak(self):
+        with self.assertRaisesRegex(ValueError, 'continuously raise stand height'):
+            generate_stand_tall(XACRO, knee_max=.65, samples=51)
+
+    def test_stand_tall_invalid_requests(self):
+        for value in (0, -1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                generate_stand_tall(XACRO, knee_max=value)
+        for bounds in ((0, 0), (1, -1), (-2, 2), (float('nan'), .6)):
+            with self.assertRaises(ValueError):
+                generate_stand_tall(XACRO, knee_max=.2, hip_bounds=bounds)
+        for samples in (0, 1, 2.5, True):
+            with self.assertRaises(ValueError):
+                generate_stand_tall(XACRO, knee_max=.2, samples=samples)
+        with self.assertRaises(ValueError):
+            generate_stand_tall(XACRO, knee_max=2.2)
 
     def test_no_neutral_crossing_rejected(self):
         with self.assertRaisesRegex(ValueError, 'neutral crossing'):
