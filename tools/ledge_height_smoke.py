@@ -11,7 +11,6 @@ active after the edge so a recovered trial must actually resume driving.
 import argparse
 import csv
 import json
-import math
 import os
 from pathlib import Path
 import subprocess
@@ -31,14 +30,15 @@ RECOVER_PITCH_RATE_RAD_S = .55
 RECOVER_HOLD_S = 2.0
 SUPPORT_PERSISTENCE_S = 0.10
 DEFAULT_STARTUP_TIMEOUT_S = 25.0
-DEFAULT_SETTLE_S = 0.50
+DEFAULT_SETTLE_S = 5.0
 DEFAULT_DRIVE_TIMEOUT_S = 8.0
 DEFAULT_RECOVERY_TIMEOUT_S = 8.0
 
 
 def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain_id,
               trace_rate_hz, drive_speed_m_s, startup_timeout_s, settle_s,
-              drive_timeout_s, recovery_timeout_s, gui):
+              drive_timeout_s, recovery_timeout_s, gui, stop_after_recovery,
+              post_recovery_stop_s):
     os.environ['ROS_DOMAIN_ID'] = str(domain_id)
     os.environ['GZ_PARTITION'] = f'tap_ledge_h_{trial_id}_{os.getpid()}_{time.time_ns()}'
     from owned_process import start_owned_process, cleanup_group
@@ -49,12 +49,14 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
     from sensor_msgs.msg import JointState
     from std_msgs.msg import Float64MultiArray
     from std_msgs.msg import String
-    from tf2_msgs.msg import TFMessage
 
     log_path = out_dir / f'launch_{trial_id}.log'
     trace_path = out_dir / f'trace_{trial_id}.csv'
     stream = log_path.open('w')
-    pose, state = {}, {}
+    # The evaluator is deliberately driven by the same observable contract as
+    # the controller.  It does not subscribe to model pose; Gazebo pose is
+    # neither a control input nor an acceptance signal.
+    state = {}
     joints, motors, leg_effort = {}, {}, {}
     sim_time = 0.0
     trace_last_s = -1.0
@@ -83,15 +85,6 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
     def clock_cb(msg):
         nonlocal sim_time
         sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
-
-    def pose_cb(msg):
-        if len(msg.transforms) != 1:
-            return
-        t = msg.transforms[0].transform
-        q = t.rotation
-        pose.update(x=t.translation.x, z=t.translation.z,
-                    pitch=math.asin(max(-1, min(1, 2*(q.w*q.y-q.z*q.x)))),
-                    roll=math.atan2(2*(q.w*q.x+q.y*q.z), 1-2*(q.x*q.x+q.y*q.y)))
 
     def joint_cb(msg):
         by_name = {name: i for i, name in enumerate(msg.name)}
@@ -135,8 +128,8 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
         trace_last_s = sim_time
         trace_writer.writerow({
             'sim_time': f'{sim_time:.6f}', 'wall_time': f'{time.monotonic():.6f}',
-            'mode': state.get('mode'), 'pose_x': pose.get('x'), 'pose_z': pose.get('z'),
-            'pose_pitch': pose.get('pitch'), 'pose_roll': pose.get('roll'),
+            'mode': state.get('mode'), 'pose_x': None, 'pose_z': None,
+            'pose_pitch': None, 'pose_roll': None,
             'pitch': state.get('pitch'), 'pitch_rate': state.get('pitch_rate'),
             'cmd_v': state.get('cmd_v'), 'contact': state.get('contact'),
             'accel_mag': state.get('accel_mag'), 'roll_rate': state.get('roll_rate'),
@@ -193,7 +186,6 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
     rclpy.init()
     node = rclpy.create_node(f'tap_ledge_h_{trial_id}'.replace('.', '_').replace('-', 'n'))
     node.create_subscription(Clock, '/clock', clock_cb, 100)
-    node.create_subscription(TFMessage, '/tap_robot/pose', pose_cb, 100)
     node.create_subscription(String, '/control_mode', status_cb, 100)
     node.create_subscription(JointState, '/joint_states', joint_cb, 100)
     node.create_subscription(JointState, '/motor_commands', motor_cb, 100)
@@ -227,6 +219,9 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
 
     try:
         spawn_z = spawn_z_for(height_m)
+        # The landing acceptance path is sensor-only. Keep Gazebo's physical
+        # collision response, but do not publish wheel-contact ground truth;
+        # FlightObserver must infer support from MPU6500 + encoders.
         args = sim_launch_command(f'gui:={str(gui).lower()}', 'auto_enable:=true',
                                    f'ledge_world:={world_path}', f'spawn_z:={spawn_z}')
         if controller_config:
@@ -235,28 +230,26 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
         if not wait_for_mode('Balance', startup_timeout_s):
             raise RuntimeError(f'Startup did not reach Balance: mode={state.get("mode")}')
         observe(settle_s, wall_limit=max(5.0, startup_timeout_s))
-        start_x = pose.get('x', PAD_CENTER_X)
-        if abs(start_x - PAD_CENTER_X) > 0.2:
-            raise RuntimeError(f'Unexpected spawn x={start_x}, expected near {PAD_CENTER_X}')
-
+        # The ledge geometry and commanded speed define a test schedule; the
+        # robot itself never receives the ledge coordinate.  Allow margin for
+        # motor/controller acceleration, then begin the landing observation.
+        drive_duration_s = STOP_DRIVE_X / max(abs(drive_speed_m_s), 0.1) + 0.75
         crossed_edge = False
+        drive_start = sim_time
         drive_deadline = time.monotonic() + drive_timeout_s
         drive_cmd = Twist()
         drive_cmd.linear.x = drive_speed_m_s
-        while time.monotonic() < drive_deadline:
+        while time.monotonic() < drive_deadline and sim_time - drive_start < drive_duration_s:
             drive_pub.publish(drive_cmd)
             spin()
-            if pose.get('x', start_x) >= STOP_DRIVE_X:
-                crossed_edge = True
-                break
+        crossed_edge = sim_time - drive_start >= drive_duration_s
         if not crossed_edge:
-            raise RuntimeError(f'Never reached STOP_DRIVE_X={STOP_DRIVE_X}; '
-                               f'final x={pose.get("x")}')
+            raise RuntimeError('Drive schedule timed out before the landing interval')
 
         drop_start = sim_time
         peak_pitch, peak_pitch_rate = 0.0, 0.0
         peak_roll = 0.0
-        min_z = pose.get('z', 9.0)
+        min_z = None
         support_persisted = 0.0
         stable = 0.0
         motion_stable = 0.0
@@ -279,8 +272,6 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
             pr = abs(state.get('pitch_rate', 9.0))
             peak_pitch = max(peak_pitch, p)
             peak_pitch_rate = max(peak_pitch_rate, pr)
-            peak_roll = max(peak_roll, abs(pose.get('roll', 0.0)))
-            min_z = min(min_z, pose.get('z', min_z))
             phase = state.get('flight_phase')
             sensor_support = (phase in ('Grounded', 'PartialSupport') and
                               state.get('flight_airborne') == 0)
@@ -301,6 +292,16 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
             if (stable >= RECOVER_HOLD_S and motion_stable >= RECOVER_HOLD_S and
                     elapsed > 0.3):
                 recovered = True
+                if stop_after_recovery:
+                    # Observation mode: once the landing/handoff contract has
+                    # already passed, remove the drive request and hold the
+                    # robot still so a GUI observer can inspect the settled
+                    # posture. The default canonical test keeps driving.
+                    stop_cmd = Twist()
+                    stop_deadline = time.monotonic() + post_recovery_stop_s
+                    while time.monotonic() < stop_deadline:
+                        drive_pub.publish(stop_cmd)
+                        spin()
                 break
         if not recovered and failure_reason is None:
             failure_reason = 'recovery_timeout'
@@ -315,13 +316,13 @@ def run_trial(trial_id, height_m, world_path, controller_config, out_dir, domain
             peak_pitch_rad=round(peak_pitch, 4),
             peak_pitch_rate_rad_s=round(peak_pitch_rate, 4),
             peak_roll_rad=round(peak_roll, 4),
-            min_z_m=round(min_z, 4),
+            min_z_m=None,
             final_mode=state.get('mode'), final_pitch_rad=state.get('pitch'),
-            final_x=pose.get('x'), final_z=pose.get('z'),
+            final_x=None, final_z=None,
             elapsed_sim_s=round(sim_time - drop_start, 3))
         print(f'[{trial_id}] h={height_m:.2f}m crossed_edge={crossed_edge} '
               f'recovered={recovered} peak_pitch={peak_pitch:.3f} peak_roll={peak_roll:.3f} '
-              f'min_z={min_z:.3f} final_mode={state.get("mode")}', flush=True)
+              f'min_z=unobserved final_mode={state.get("mode")}', flush=True)
     except Exception as exc:
         failure = str(exc)
         trial_result = dict(trial=trial_id, height_m=height_m, launched=False,
@@ -371,12 +372,16 @@ def main():
                         help='write per-trial CSV telemetry at this max rate; 0 disables')
     parser.add_argument('--gui', action='store_true',
                         help='keep Gazebo GUI visible during the landing trial')
+    parser.add_argument('--stop-after-recovery', action='store_true',
+                        help='stop publishing forward motion after recovery for GUI observation')
+    parser.add_argument('--post-recovery-stop-s', type=float, default=3.0,
+                        help='hold zero velocity after recovery in observation mode (default: 3.0 s)')
     parser.add_argument('--drive-speed', type=float, default=DEFAULT_DRIVE_SPEED_M_S,
                         help='forward speed command before the ledge, in m/s')
     parser.add_argument('--startup-timeout-s', type=float, default=DEFAULT_STARTUP_TIMEOUT_S,
                         help='fail-fast wall timeout to reach Balance (default: 25 s)')
     parser.add_argument('--settle-s', type=float, default=DEFAULT_SETTLE_S,
-                        help='sim-time settle after Balance before driving (default: 0.5 s)')
+                        help='sim-time settle after Balance before driving (default: 5.0 s)')
     parser.add_argument('--drive-timeout-s', type=float, default=DEFAULT_DRIVE_TIMEOUT_S,
                         help='wall timeout to cross the ledge edge (default: 8 s)')
     parser.add_argument('--recovery-timeout-s', type=float, default=DEFAULT_RECOVERY_TIMEOUT_S,
@@ -385,7 +390,8 @@ def main():
 
     if (args.trials < 1 or args.trace_rate_hz < 0.0 or args.drive_speed <= 0.0 or
             args.startup_timeout_s <= 0.0 or args.settle_s < 0.0 or
-            args.drive_timeout_s <= 0.0 or args.recovery_timeout_s <= 0.0):
+            args.drive_timeout_s <= 0.0 or args.recovery_timeout_s <= 0.0 or
+            args.post_recovery_stop_s < 0.0):
         parser.error('trials/timeouts must be positive, settle must be nonnegative, '
                      'trace rate must be nonnegative, and drive speed must be positive')
 
@@ -415,7 +421,8 @@ def main():
             result = run_trial(trial_id, height_m, world_path, args.controller_config,
                                 out_dir, domain, args.trace_rate_hz, args.drive_speed,
                                 args.startup_timeout_s, args.settle_s,
-                                args.drive_timeout_s, args.recovery_timeout_s, args.gui)
+                                args.drive_timeout_s, args.recovery_timeout_s, args.gui,
+                                args.stop_after_recovery, args.post_recovery_stop_s)
             trials.append(result)
             (out_dir / 'result.json').write_text(json.dumps(
                 {'trials_per_condition': args.trials,

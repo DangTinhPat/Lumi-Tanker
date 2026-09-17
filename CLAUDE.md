@@ -25,9 +25,9 @@ in any report.
 control-path code — it holds every standing project rule, binding on every
 session. Rule 1 there is the strictest so far: no control decision may
 depend on simulator-internal state with no real-hardware equivalent. The
-deployable path is MPU6500 plus six encoders; `sim_pose` and Gazebo contact
-telemetry are diagnostic/simulation inputs only and must not silently become
-the hardware support or pose estimate.
+deployable path is MPU6500 plus six encoders; simulator model pose and Gazebo
+contact telemetry are not exported by the active simulation contract and
+cannot become the hardware support or pose estimate.
 
 `docs/RULES.md` and `architecture.md` are protected project-contract files.
 Do not modify either one without explicit user permission for that document

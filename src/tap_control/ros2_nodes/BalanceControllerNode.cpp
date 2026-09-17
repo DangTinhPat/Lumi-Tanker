@@ -18,8 +18,6 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
-#include <tf2_msgs/msg/tf_message.hpp>
-#include <ros_gz_interfaces/msg/contacts.hpp>
 #include <sstream>
 
 #include "robot_control/EmbeddedController.hpp"
@@ -54,33 +52,8 @@ float getOrDefault(const std::vector<double>& values, std::size_t index) {
   return static_cast<float>(values[index]);
 }
 
-float yawFromQuaternion(double w, double x, double y, double z) {
-  const double siny_cosp = 2.0 * (w * z + x * y);
-  const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
-  return static_cast<float>(std::atan2(siny_cosp, cosy_cosp));
-}
-
-// Sagittal tilt from world vertical in body coordinates, independent of yaw.
-// The planar model assumes small roll; atan2 also covers recovery beyond 90 deg.
-float basePitchFromQuaternion(double w, double x, double y, double z) {
-  const double base_z_in_world_x = 2.0 * (w * y - x * z);
-  const double base_z_in_world_z = 1.0 - 2.0 * (x * x + y * y);
-  return static_cast<float>(
-      std::atan2(base_z_in_world_x, base_z_in_world_z));
-}
-
 float clampf(float v, float lo, float hi) {
   return std::max(lo, std::min(v, hi));
-}
-
-float normalizeAngle(float angle_rad) {
-  while (angle_rad > static_cast<float>(M_PI)) {
-    angle_rad -= static_cast<float>(2.0 * M_PI);
-  }
-  while (angle_rad < -static_cast<float>(M_PI)) {
-    angle_rad += static_cast<float>(2.0 * M_PI);
-  }
-  return angle_rad;
 }
 
 }  // namespace
@@ -92,65 +65,7 @@ class BalanceControllerNode : public rclcpp::Node {
         control_period_s_(declare_parameter<double>("control_period_s", 0.005)),
         wheel_radius_m_(declare_parameter<double>("wheel_radius_m", 0.03)),
         pitch_offset_rad_(declare_parameter<double>("pitch_offset_rad", 0.0)),
-        // The production path is IMU-backed. sim_pose remains available only
-        // for legacy/offline experiments that explicitly opt into it; it must
-        // never be the implicit source for a landing claim.
         pitch_source_(declare_parameter<std::string>("pitch_source", "imu")),
-        sim_pose_child_frame_(declare_parameter<std::string>(
-            "sim_pose_child_frame", "tap_robot")),
-        sim_pose_index_(declare_parameter<int>("sim_pose_index", 0)),
-        sim_contact_min_base_z_m_(static_cast<float>(declare_parameter<double>(
-            "sim_contact_min_base_z_m", 0.10))),
-        sim_contact_max_pitch_rad_(static_cast<float>(declare_parameter<double>(
-            "sim_contact_max_pitch_rad", 0.75))),
-        // Ascento (arXiv 2005.11435): "ground contact is detected when the
-        // torques in the hip joints exceed a threshold" -- a direct physical
-        // measurement, immune to the sim_pose heuristic's latency/noise (see
-        // docs/LEDGE_DRIVEOFF_LIMIT.md). Off by default (false): only ever
-        // widens state_.floor_contact from false to true (never the other
-        // way), and only while sim_pose ALREADY reads airborne, so enabling
-        // it cannot change any already-grounded/normal-operation behavior.
-        torque_touchdown_enabled_(
-            declare_parameter<bool>("torque_touchdown_enabled", false)),
-        hip_touchdown_torque_nm_(static_cast<float>(declare_parameter<double>(
-            "hip_touchdown_torque_nm", 2.5))),
-        hip_touchdown_max_velocity_rad_s_(static_cast<float>(
-            declare_parameter<double>("hip_touchdown_max_velocity_rad_s", 1.0))),
-        // Free-fall/impact detection from the raw (unfiltered) IMU specific-
-        // force magnitude (see onImu). Same widen-only-while-airborne safety
-        // pattern as torque_touchdown_enabled_: off by default, can only make
-        // state_.floor_contact become true EARLIER than the pose heuristic,
-        // never later, and only while already reading airborne.
-        imu_touchdown_enabled_(
-            declare_parameter<bool>("imu_touchdown_enabled", false)),
-        imu_touchdown_accel_mps2_(static_cast<float>(declare_parameter<double>(
-            "imu_touchdown_accel_mps2", 20.0))),
-        // Fused hard-impact classifier: unlike the two detectors above (each
-        // widens floor_contact EARLIER on a single signal - both measured to
-        // hurt, see docs/LEDGE_DRIVEOFF_LIMIT.md), this one requires BOTH the
-        // raw accel spike AND a high measured pitch rate together (real
-        // fall-detection literature fuses multiple axes rather than
-        // thresholding one signal alone - e.g. combined acceleration +
-        // angular velocity + tilt features reach 100% accuracy in published
-        // pre-impact fall detectors) to flag a genuinely violent, chaotic
-        // impact, and on that fused signal it does the OPPOSITE: DELAYS
-        // floor_contact a bit further past whatever the pose heuristic would
-        // otherwise say, giving the chaotic rotation time to damp passively
-        // before the MPC resumes actively commanding wheel torque. This
-        // follows directly from the empirical pattern of the three earlier,
-        // single-signal, earlier-reaction attempts: reacting sooner during
-        // the chaotic snag consistently measured worse, not better, so this
-        // tests reacting LATER specifically for the flagged-severe case only
-        // (ordinary landings are untouched, since the fused condition should
-        // rarely if ever coincide with a benign touchdown).
-        hard_impact_delay_enabled_(
-            declare_parameter<bool>("hard_impact_delay_enabled", false)),
-        hard_impact_accel_mps2_(static_cast<float>(declare_parameter<double>(
-            "hard_impact_accel_mps2", 50.0))),
-        hard_impact_pitch_rate_rad_s_(static_cast<float>(declare_parameter<double>(
-            "hard_impact_pitch_rate_rad_s", 6.0))),
-        hard_impact_settle_s_(static_cast<float>(
-            declare_parameter<double>("hard_impact_settle_s", 0.15))),
         left_wheel_sign_(
             declare_parameter<bool>("left_wheeled", true) ? 1.0F : -1.0F),
         // Kalman filter process/measurement noise, the standard defaults
@@ -219,6 +134,10 @@ class BalanceControllerNode : public rclcpp::Node {
             "imu_noise.gyro_stddev_rad_s", 0.0)),
         imu_noise_rng_(static_cast<std::mt19937::result_type>(
             declare_parameter<int>("imu_noise.seed", 42))) {
+    if (pitch_source_ != "imu") {
+      throw std::invalid_argument(
+          "pitch_source must be imu: simulator pose/orientation is excluded by the hardware contract");
+    }
     // The MPC wheel balancer is the only balance strategy. Wheel geometry and
     // limits, then the model and QP cost weights.
     robot_control::EmbeddedController::Config config;
@@ -452,14 +371,6 @@ class BalanceControllerNode : public rclcpp::Node {
             "landing_controller.flight_pitch_rate_hip_offset_max_rad", 0.0));
     config.landing_controller.min_flight_before_impact_s = static_cast<float>(
         declare_parameter<double>("landing_controller.min_flight_before_impact_s", 0.03));
-    config.landing_controller.impact_accel_mps2 = static_cast<float>(
-        declare_parameter<double>("landing_controller.impact_accel_mps2", 35.0));
-    config.landing_controller.impact_pitch_rate_rad_s = static_cast<float>(
-        declare_parameter<double>("landing_controller.impact_pitch_rate_rad_s", 4.0));
-    config.landing_controller.imu_impact_debounce_s = static_cast<float>(
-        declare_parameter<double>("landing_controller.imu_impact_debounce_s", 0.02));
-    config.landing_controller.imu_impact_without_wheel_contact =
-        declare_parameter<bool>("landing_controller.imu_impact_without_wheel_contact", false);
     config.landing_controller.height_kp_n_m = static_cast<float>(
         declare_parameter<double>("landing_controller.height_kp_n_m", 0.0));
     config.landing_controller.height_kd_n_s_m = static_cast<float>(
@@ -482,6 +393,8 @@ class BalanceControllerNode : public rclcpp::Node {
         declare_parameter<double>("landing_controller.max_impact_s", 0.35));
     config.landing_controller.recovery_blend_s = static_cast<float>(
         declare_parameter<double>("landing_controller.recovery_blend_s", 0.25));
+    config.landing_controller.recovery_drive_ramp_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.recovery_drive_ramp_s", 0.0));
     config.landing_controller.recovery_pitch_rate_rad_s = static_cast<float>(
         declare_parameter<double>("landing_controller.recovery_pitch_rate_rad_s", 1.2));
     config.landing_controller.recovery_joint_speed_rad_s = static_cast<float>(
@@ -694,28 +607,10 @@ class BalanceControllerNode : public rclcpp::Node {
           "jump.wheel_torque_limit_nm=0.13; lower or higher budgets are not "
           "supported by the fixed-cap Gazebo actuator plugin");
     }
-    jump_contact_timeout_s_ = declare_parameter<double>("jump.contact_timeout_s", .05);
-    jump_contact_topics_[0] = declare_parameter<std::string>("jump.left_contacts_topic", "left_wheel_contacts");
-    jump_contact_topics_[1] = declare_parameter<std::string>("jump.right_contacts_topic", "right_wheel_contacts");
-    jump_ground_collision_ = declare_parameter<std::string>("jump.ground_collision", "ground_plane");
-    contact_support_surface_tokens_ = declare_parameter<std::vector<std::string>>(
-        "contact.support_surface_tokens",
-        std::vector<std::string>{"ground_plane", "ledge_pad",
-                                 "rough_arena_spawn_pad",
-                                 "parabolic_uneven_arena", "step_band_"});
-    contact_reject_surface_tokens_ = declare_parameter<std::vector<std::string>>(
-        "contact.reject_surface_tokens", std::vector<std::string>{"fillet"});
-    contact_min_support_normal_z_ = static_cast<float>(declare_parameter<double>(
-        "contact.min_support_normal_z", 0.5));
-    if (!std::isfinite(contact_min_support_normal_z_) ||
-        contact_min_support_normal_z_ < 0.0F ||
-        contact_min_support_normal_z_ > 1.0F) {
+    if (jump_config_.enabled) {
       throw std::invalid_argument(
-          "contact.min_support_normal_z must be finite and in [0,1]");
+          "jump.enabled is disabled: the hardware contract has no contact or world-pose sensor");
     }
-    if (!std::isfinite(jump_contact_timeout_s_) || jump_contact_timeout_s_ <= 0 ||
-        (jump_config_.enabled && pitch_source_ != "sim_pose"))
-      throw std::invalid_argument("Jump requires sim_pose and positive contact timeout");
     jump_ = std::make_unique<robot_control::JumpController>(jump_config_);
     if (jump_config_.enabled) {
       if((jump_config_.landing_world_frame||jump_config_.smooth_phase_transitions||
@@ -740,56 +635,11 @@ class BalanceControllerNode : public rclcpp::Node {
           if(msg->data && !jump_request_level_) jump_request_pending_=true;
           jump_request_level_=msg->data;
         });
-    for(std::size_t side=0;side<2;++side) {
-    jump_contact_subs_[side] = create_subscription<ros_gz_interfaces::msg::Contacts>(jump_contact_topics_[side],
-        rclcpp::SensorDataQoS(), [this,side](ros_gz_interfaces::msg::Contacts::ConstSharedPtr msg) {
-          const double stamp=stampToSeconds(msg->header.stamp);
-          if(stamp<=0 || !std::isfinite(stamp) || stamp<=jump_contact_last_seen_[side] ||
-             stamp>now().seconds()+kJumpContactClockToleranceS) {
-            // Ignore transport replay/skew; it must not refresh OR erase a
-            // valid observation. Sustained bad timestamps still age out.
-            return;
-          }
-          jump_contact_last_seen_[side]=stamp;
-          any_wheel_contact_stamps_[side]=stamp;
-          // A contact sensor publishes a heartbeat even when its contact list
-          // is empty. Keep that heartbeat fresh, but derive support only from
-          // a validated wheel/support-surface pair. In particular, a wheel
-          // touching the departure fillet, body, or another obstacle is not a
-          // floor contact and must not terminate Flight.
-          bool support_touching=false;
-          bool jump_ground_touching=false;
-          for(const auto& c:msg->contacts) {
-            support_touching = support_touching ||
-                               isValidatedWheelSupportContact(c, side);
-            jump_ground_touching = jump_ground_touching ||
-                                   isJumpGroundContact(c, side);
-          }
-          any_wheel_contact_[side]=support_touching;
-          // Jump keeps its stricter, single-ground-surface contract. A
-          // non-ground contact still counts as a live sensor heartbeat, but
-          // never as jump touchdown.
-          jump_contact_stamps_[side]=stamp;
-          if(side==0) jump_left_contact_=jump_ground_touching;
-          else jump_right_contact_=jump_ground_touching;
-        });
-    }
     station_enabled_ = declare_parameter<bool>("station_keeper.enabled", false);
-    // Station-keeping's own x/y/yaw feedback (StationKeeper::Input, below)
-    // reads last_sim_pose_x_m_/_y_m_ and state_.imu.yaw_rad directly and is
-    // gated on have_sim_pose_ at every update() call - it has no dependency
-    // on pitch_source_ at all (StationKeeper never reads pitch). This used
-    // to hard-require pitch_source=="sim_pose" too, which was never a real
-    // technical dependency, just historical coupling from when sim_pose was
-    // the only pitch source that existed. That stale guard crashed
-    // deep_squat.yaml and stationary_show.yaml at startup (std::invalid_
-    // argument, exit -6) the moment pitch_source's default became imu
-    // (2026-09-15) - found 2026-09-16 while re-running Deep Squat under the
-    // new default, exactly the kind of stale-config trap already seen once
-    // with the ledge landing test. World x/y/yaw position still has no
-    // sensor-backed estimate (a separate, still-open Rule 1 gap - see
-    // docs/RULES.md), but that gap is orthogonal to pitch and must not
-    // force pitch back to ground truth too.
+    if (station_enabled_) {
+      throw std::invalid_argument(
+          "station_keeper.enabled is disabled: MPU6500 plus encoders cannot observe world x/y pose");
+    }
     robot_control::StationKeeper::Config station_config;
     station_config.position_gain_hz = declare_parameter<double>("station_keeper.position_gain_hz", 0.8);
     station_config.acquire_dwell_s = declare_parameter<double>("station_keeper.acquire_dwell_s", 0.0);
@@ -809,11 +659,6 @@ class BalanceControllerNode : public rclcpp::Node {
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
         "imu", rclcpp::SensorDataQoS(),
         [this](const sensor_msgs::msg::Imu::SharedPtr msg) { onImu(*msg); });
-    sim_pose_sub_ = create_subscription<tf2_msgs::msg::TFMessage>(
-        declare_parameter<std::string>("sim_pose_topic", "/tap_robot/pose"), rclcpp::SensorDataQoS(),
-        [this](const tf2_msgs::msg::TFMessage::SharedPtr msg) {
-          onSimPose(*msg);
-        });
     joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
         "joint_states", rclcpp::SensorDataQoS(),
         [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
@@ -913,94 +758,10 @@ class BalanceControllerNode : public rclcpp::Node {
   }
 
  private:
-  bool containsWheelCollision(const std::string& name,
-                              std::size_t side) const {
-    const char* leaf = side == 0 ? "cad_left_wheel_link_collision"
-                                 : "cad_right_wheel_link_collision";
-    if (name == leaf) return true;
-    const std::string suffix = std::string("::") + leaf;
-    if (name.size() > suffix.size() &&
-        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-      return true;
-    }
-    // Gazebo Sim expands an URDF collision named
-    // `cad_*_wheel_link_collision` to the scoped entity name
-    // `...::cad_*_wheel_link_collision_collision`.  The extra suffix is
-    // version/description-format specific, so accept it explicitly while
-    // keeping the side-specific collision check strict.
-    const std::string sdf_suffix = suffix + "_collision";
-    return name.size() > sdf_suffix.size() &&
-           name.compare(name.size() - sdf_suffix.size(), sdf_suffix.size(),
-                        sdf_suffix) == 0;
-  }
-
-  bool isConfiguredSupportSurface(const std::string& name) const {
-    if (name.empty()) return false;
-    for (const auto& token : contact_reject_surface_tokens_) {
-      if (!token.empty() && name.find(token) != std::string::npos) {
-        return false;
-      }
-    }
-    for (const auto& token : contact_support_surface_tokens_) {
-      if (!token.empty() && name.find(token) != std::string::npos) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  bool hasSupportNormal(const ros_gz_interfaces::msg::Contact& contact) const {
-    // Some ros_gz_bridge versions omit normals in the ROS conversion. In that
-    // case the explicit support-surface name is the only available physical
-    // classifier; never infer support from a merely nonempty contact list.
-    if (contact.normals.empty()) return true;
-    for (const auto& normal : contact.normals) {
-      const double nx = normal.x;
-      const double ny = normal.y;
-      const double nz = normal.z;
-      const double norm = std::sqrt(nx * nx + ny * ny + nz * nz);
-      if (std::isfinite(norm) && norm > 1.0e-9 &&
-          std::isfinite(nz) &&
-          std::abs(nz) / norm >= contact_min_support_normal_z_) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  bool isValidatedWheelSupportContact(
-      const ros_gz_interfaces::msg::Contact& contact, std::size_t side) const {
-    const auto& first = contact.collision1.name;
-    const auto& second = contact.collision2.name;
-    const bool first_wheel = containsWheelCollision(first, side);
-    const bool second_wheel = containsWheelCollision(second, side);
-    // Exactly one member of the pair must be this side's wheel. This rejects
-    // wheel-wheel and wrong-side/body contacts even if they contain a known
-    // terrain token elsewhere in their fully-qualified names.
-    if (first_wheel == second_wheel) return false;
-    const auto& support = first_wheel ? second : first;
-    return isConfiguredSupportSurface(support) && hasSupportNormal(contact);
-  }
-
-  bool isJumpGroundContact(const ros_gz_interfaces::msg::Contact& contact,
-                           std::size_t side) const {
-    const auto& first = contact.collision1.name;
-    const auto& second = contact.collision2.name;
-    const bool first_wheel = containsWheelCollision(first, side);
-    const bool second_wheel = containsWheelCollision(second, side);
-    if (first_wheel == second_wheel || jump_ground_collision_.empty()) {
-      return false;
-    }
-    const auto& support = first_wheel ? second : first;
-    return support.find(jump_ground_collision_) != std::string::npos;
-  }
-
   void onImu(const sensor_msgs::msg::Imu& msg) {
-    const auto& q = msg.orientation;
     if (!std::isfinite(msg.angular_velocity.y) || !std::isfinite(msg.angular_velocity.z) ||
         !std::isfinite(msg.linear_acceleration.x) || !std::isfinite(msg.linear_acceleration.y) ||
-        !std::isfinite(msg.linear_acceleration.z) || !std::isfinite(q.w) ||
-        !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) {
+        !std::isfinite(msg.linear_acceleration.z)) {
       return;
     }
     const float pitch_rate_rad_s = static_cast<float>(msg.angular_velocity.y);
@@ -1026,12 +787,11 @@ class BalanceControllerNode : public rclcpp::Node {
     if (std::isfinite(msg.angular_velocity.x)) {
       raw_imu_roll_rate_rad_s_ = static_cast<float>(msg.angular_velocity.x);
     }
-    // Always updated regardless of pitch_source, mirroring
+    // Always updated alongside the pitch estimator, mirroring
     // accel_magnitude_m_s2 below - see Types.hpp's ImuState::roll_rate_rad_s.
     state_.imu.roll_rate_rad_s = raw_imu_roll_rate_rad_s_;
-    raw_imu_yaw_rad_ = yawFromQuaternion(q.w, q.x, q.y, q.z);
-    // Raw (unfiltered) specific-force magnitude, independent of pitch_source_
-    // and of the separate low-passed accel_*_lp_ gravity estimate below (that
+    // Raw (unfiltered) specific-force magnitude, independent of the separate
+    // low-passed accel_*_lp_ gravity estimate below (that
     // one is deliberately smoothed to reject exactly the fast transients this
     // one exists to catch). In free fall this reads ~0 (proper acceleration
     // cancels gravity in the specific-force measurement); on impact it spikes
@@ -1039,13 +799,12 @@ class BalanceControllerNode : public rclcpp::Node {
     // free-fall/impact detection principle (the same one behind phone drop
     // sensors), applied here per the user's request to get more out of the
     // IMU specifically, and is a materially different, lower-latency signal
-    // than either the sim_pose height/pitch heuristic or the hip-torque
-    // threshold already tried (see docs/LEDGE_DRIVEOFF_LIMIT.md).
+    // than any absolute-pose heuristic or actuator-command threshold.
     last_accel_magnitude_m_s2_ = std::sqrt(
         static_cast<float>(msg.linear_acceleration.x) * static_cast<float>(msg.linear_acceleration.x) +
         static_cast<float>(msg.linear_acceleration.y) * static_cast<float>(msg.linear_acceleration.y) +
         static_cast<float>(msg.linear_acceleration.z) * static_cast<float>(msg.linear_acceleration.z));
-    // Real, always-updated regardless of pitch_source - see Types.hpp's
+    // Real, always-updated alongside the estimator - see Types.hpp's
     // ImuState::accel_magnitude_m_s2 (LandingImpedance's hard-impact gate).
     state_.imu.accel_magnitude_m_s2 = last_accel_magnitude_m_s2_;
     // Preserve a short fused acceleration/gyro event across the asynchronous
@@ -1068,10 +827,6 @@ class BalanceControllerNode : public rclcpp::Node {
     // watchdog fail-closed instead of replacing an invalid stamp with now().
     last_imu_stamp_s_ = stamp_s > 0.0 ? stamp_s : 0.0;
     have_imu_ = true;
-
-    if (pitch_source_ == "sim_pose") {
-      return;
-    }
 
     // Plain accel+gyro complementary filter for a bare 6-axis IMU (no
     // onboard AHRS/fusion chip - real target hardware is an MPU6500,
@@ -1276,94 +1031,15 @@ class BalanceControllerNode : public rclcpp::Node {
           sampleNoise(static_cast<float>(imu_gyro_noise_stddev_rad_s_));
     }
     state_.imu.pitch_rad = pitch_rad;
-    state_.imu.yaw_rad = raw_imu_yaw_rad_;
+    // MPU6500 has no absolute yaw observability.  Keep yaw as a neutral local
+    // value and use only the measured yaw rate where the controller needs it;
+    // never consume sensor_msgs/Imu.orientation, which may be simulator AHRS
+    // ground truth and is absent on the target hardware.
+    state_.imu.yaw_rad = 0.0F;
     state_.imu.pitch_rate_rad_s = pitch_rate_out;
     state_.imu.yaw_rate_rad_s = raw_imu_yaw_rate_rad_s_;
-    last_orientation_stamp_s_ = last_imu_stamp_s_;
-    have_orientation_ = true;
-  }
-
-  void onSimPose(const tf2_msgs::msg::TFMessage& msg) {
-    if (pitch_source_ != "sim_pose") {
-      return;
-    }
-
-    last_sim_pose_count_ = msg.transforms.size();
-    for (std::size_t i = 0; i < msg.transforms.size(); ++i) {
-      const auto& transform = msg.transforms[i];
-      const bool frame_matches =
-          !transform.child_frame_id.empty() &&
-          transform.child_frame_id == sim_pose_child_frame_;
-      const bool index_matches =
-          msg.transforms.size() == 1 && transform.child_frame_id.empty() &&
-          static_cast<int>(i) == sim_pose_index_;
-      if (!frame_matches && !index_matches) {
-        continue;
-      }
-
-      const auto& q = transform.transform.rotation;
-      const double qnorm = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z;
-      if (!std::isfinite(qnorm) || std::abs(qnorm - 1.0) > 0.01 ||
-          !std::isfinite(transform.transform.translation.x) ||
-          !std::isfinite(transform.transform.translation.y) ||
-          !std::isfinite(transform.transform.translation.z)) {
-        continue;
-      }
-      float pitch_rad = basePitchFromQuaternion(q.w, q.x, q.y, q.z) -
-                        static_cast<float>(pitch_offset_rad_);
-      pitch_rad = normalizeAngle(pitch_rad);
-
-      double stamp_s =
-          static_cast<double>(transform.header.stamp.sec) +
-          1.0e-9 * static_cast<double>(transform.header.stamp.nanosec);
-      // ros_gz_bridge emits zero stamps for Pose_V transforms on this setup.
-      // Unlike a stale sensor replay, the callback itself is the only
-      // available freshness signal, so use the receipt time for this one
-      // documented bridge exception.
-      if (stamp_s <= 0.0) {
-        stamp_s = now().seconds();
-      }
-      // Pitch RATE comes from the gyro, not from differencing this pose. The
-      // imu link is fixed to the base with zero relative rotation (torso.xacro:
-      // imu_fix rpy="0 0 0"), so /imu angular_velocity.y already is the clean
-      // sagittal pitch rate, at the full 500 Hz IMU rate with no differencing
-      // lag. dynamic_pose/info is slower and irregular, and a finite-difference
-      // derivative off it adds ~30 ms of phase lag - enough to turn the
-      // upstream gains into a growing oscillation at the ~1 s pendulum period.
-      // (Only the pose *orientation* is unreliable on this bridge, not the
-      // body rates.) A finite difference is the fallback until the IMU is up.
-      float pitch_rate_rad_s = raw_imu_pitch_rate_rad_s_;
-      if (!have_imu_ && have_sim_pose_ && stamp_s > last_sim_pose_stamp_s_) {
-        const float dt_s =
-            static_cast<float>(stamp_s - last_sim_pose_stamp_s_);
-        pitch_rate_rad_s =
-            normalizeAngle(pitch_rad - last_sim_pose_pitch_rad_) /
-            std::max(dt_s, 1.0e-6F);
-      }
-
-      if (imu_noise_enabled_) {
-        pitch_rad +=
-            sampleNoise(static_cast<float>(imu_pitch_noise_stddev_rad_));
-        pitch_rate_rad_s +=
-            sampleNoise(static_cast<float>(imu_gyro_noise_stddev_rad_s_));
-      }
-
-      state_.imu.pitch_rad = pitch_rad;
-      state_.imu.pitch_rate_rad_s = pitch_rate_rad_s;
-      state_.imu.yaw_rad = yawFromQuaternion(q.w, q.x, q.y, q.z);
-      state_.imu.yaw_rate_rad_s = raw_imu_yaw_rate_rad_s_;
-
-      last_sim_pose_stamp_s_ = stamp_s;
-      last_sim_pose_pitch_rad_ = pitch_rad;
-      last_sim_pose_index_ = static_cast<int>(i);
-      last_sim_pose_z_m_ = transform.transform.translation.z;
-      last_sim_pose_x_m_ = transform.transform.translation.x;
-      last_sim_pose_y_m_ = transform.transform.translation.y;
-      last_orientation_stamp_s_ = stamp_s;
-      have_sim_pose_ = true;
-      have_orientation_ = true;
-      return;
-    }
+    last_pitch_estimate_stamp_s_ = last_imu_stamp_s_;
+    have_pitch_estimate_ = true;
   }
 
   float sampleNoise(float stddev) {
@@ -1455,20 +1131,9 @@ class BalanceControllerNode : public rclcpp::Node {
       }
     }
 
-    if (!have_imu_ || !have_orientation_ || !have_joint_state_) {
+    if (!have_imu_ || !have_pitch_estimate_ || !have_joint_state_) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "Waiting for imu, orientation source and joint_states");
-      publishMode(robot_control::MotorCommand{});
-      publishWheelCommand(robot_control::MotorCommand{});
-      publishLegCommand(robot_control::MotorCommand{});
-      return;
-    }
-
-    // Do not let the core interpret the absence of the first contact sample as
-    // a real liftoff. Hold actuators off until both per-wheel streams have
-    // produced at least one timestamped sample; later, a stale/empty sample is
-    // handled as genuine no-contact by the fail-closed state below.
-    if (pitch_source_ != "sim_pose" && !wheelContactObservationReady()) {
+                           "Waiting for MPU6500 estimate and joint_states");
       publishMode(robot_control::MotorCommand{});
       publishWheelCommand(robot_control::MotorCommand{});
       publishLegCommand(robot_control::MotorCommand{});
@@ -1484,95 +1149,12 @@ class BalanceControllerNode : public rclcpp::Node {
       pending_imu_impact_event_ = false;
     }
 
-    // Real per-wheel contact sensing (docs/RULES.md Rule 1 / Track B.1):
-    // when not using sim_pose ground truth, floor_contact comes from actual
-    // Gazebo contact sensor data (requires measure_contacts:=true at launch,
-    // see sim.launch.py; defaults on for this reason), never from a
-    // simulator-omniscient pose heuristic. Missing/stale contacts must not
-    // imply grounded balance -- fail closed (not-fresh means not-grounded),
-    // matching jumpContactFresh()'s own fail-closed idiom below.
-    const bool left_contact_fresh = wheelContactFresh(0);
-    const bool right_contact_fresh = wheelContactFresh(1);
-    state_.floor_contact = pitch_source_ == "sim_pose"
-        ? true
-        : ((left_contact_fresh && any_wheel_contact_[0]) ||
-           (right_contact_fresh && any_wheel_contact_[1]));
-    // Per-side (ROLL differential impedance): sim_pose's global height/pitch
-    // heuristic has no per-wheel granularity, so both sides mirror the
-    // combined value there; the real per-wheel contact path already has it.
-    state_.left_floor_contact = pitch_source_ == "sim_pose"
-        ? state_.floor_contact : (left_contact_fresh && any_wheel_contact_[0]);
-    state_.right_floor_contact = pitch_source_ == "sim_pose"
-        ? state_.floor_contact : (right_contact_fresh && any_wheel_contact_[1]);
-    if (pitch_source_ == "sim_pose" && have_sim_pose_) {
-      state_.floor_contact =
-          last_sim_pose_z_m_ >= sim_contact_min_base_z_m_ &&
-          std::abs(state_.imu.pitch_rad) <= sim_contact_max_pitch_rad_;
-      // Ascento-style torque-threshold contact confirmation (see the
-      // torque_touchdown_enabled_ declaration above for the citation and
-      // rationale). Only ever widens false->true, and only while sim_pose
-      // ALREADY reads airborne, so this cannot change grounded/normal-
-      // operation behavior even when enabled; disabled by default, a no-op.
-      if (torque_touchdown_enabled_ && !state_.floor_contact) {
-        const float hip_l_nm = std::abs(state_.joints.effort_nm[kLeftHip]);
-        const float hip_r_nm = std::abs(state_.joints.effort_nm[kRightHip]);
-        const float hip_l_vel = std::abs(state_.joints.velocity_rad_s[kLeftHip]);
-        const float hip_r_vel = std::abs(state_.joints.velocity_rad_s[kRightHip]);
-        // Require a stall signature (high commanded torque AND low actual
-        // velocity), not just high torque alone -- a deliberate fast pose
-        // change also saturates torque (kp=40, cap=3 Nm saturates past just
-        // 0.075 rad of error) while genuinely moving, which must not be
-        // mistaken for hitting an obstruction.
-        if (std::max(hip_l_nm, hip_r_nm) >= hip_touchdown_torque_nm_ &&
-            std::max(hip_l_vel, hip_r_vel) <= hip_touchdown_max_velocity_rad_s_) {
-          state_.floor_contact = true;
-        }
-      }
-      // Raw-accelerometer free-fall/impact confirmation (see
-      // last_accel_magnitude_m_s2_ / onImu for the citation and rationale).
-      // Same widen-only-while-airborne safety pattern; off by default.
-      if (imu_touchdown_enabled_ && !state_.floor_contact &&
-          last_accel_magnitude_m_s2_ >= imu_touchdown_accel_mps2_) {
-        state_.floor_contact = true;
-      }
-      state_.left_floor_contact = state_.floor_contact;
-      state_.right_floor_contact = state_.floor_contact;
-    }
-    if(jump_config_.enabled) {
-      // Missing contacts may hold posture, but never imply grounded balance.
-      state_.floor_contact=jumpContactFresh()&&(jump_left_contact_||jump_right_contact_);
-      state_.left_floor_contact=jumpContactFresh()&&jump_left_contact_;
-      state_.right_floor_contact=jumpContactFresh()&&jump_right_contact_;
-    }
-    // Fused hard-impact settle delay (see hard_impact_delay_enabled_
-    // declaration above for the citation and rationale). It is allowed to
-    // start only from a validated wheel/support contact in the real-sensor
-    // path. An accelerometer/gyro shock while airborne is therefore telemetry,
-    // not permission to manufacture an airborne/grounded transition. The
-    // override keeps per-side contact consistent with the combined contract.
-    if (hard_impact_delay_enabled_) {
-      const bool hard_impact_now =
-          last_accel_magnitude_m_s2_ >= hard_impact_accel_mps2_ &&
-          std::abs(state_.imu.pitch_rate_rad_s) >= hard_impact_pitch_rate_rad_s_;
-      const bool validated_support_contact = pitch_source_ != "sim_pose" &&
-                                             state_.floor_contact;
-      if (validated_support_contact && hard_impact_now) {
-        hard_impact_settle_remaining_s_ = hard_impact_settle_s_;
-      } else if (validated_support_contact &&
-                 hard_impact_settle_remaining_s_ > 0.0F) {
-        hard_impact_settle_remaining_s_ =
-            std::max(0.0F, hard_impact_settle_remaining_s_ - state_.dt_s);
-      } else if (!validated_support_contact) {
-        // A shock after leaving the ledge must not leave a stale delay armed
-        // until the next unrelated touchdown.
-        hard_impact_settle_remaining_s_ = 0.0F;
-      }
-      if (hard_impact_settle_remaining_s_ > 0.0F) {
-        state_.floor_contact = false;
-        state_.left_floor_contact = false;
-        state_.right_floor_contact = false;
-      }
-    }
+    // Landing support is intentionally not assembled here. Gazebo contacts,
+    // simulated pose/height, torque heuristics and jump contact topics are
+    // excluded from the landing contract. EmbeddedController owns the
+    // sensor-only support hypothesis from MPU6500 specific force plus wheel
+    // encoder evidence. The node-side contact subscriptions remain telemetry
+    // for legacy jump diagnostics only and never enter this landing path.
 
     if(jump_config_.enabled && jump_wheel_frame_compensation_) {
       wheel_frame_=robot_control::WheelFrame::observe(state_.joints,state_.imu.pitch_rad,
@@ -1594,8 +1176,8 @@ class BalanceControllerNode : public rclcpp::Node {
       else { command_.request_enable=false;command_.request_disable=true; }
     }
 
-    // Sensor-freshness watchdog with debounce. A single late /imu, /dynamic_pose
-    // or /joint_states message (common when the Gazebo GUI or the dashboard
+    // Sensor-freshness watchdog with debounce. A single late /imu or
+    // /joint_states message (common when the Gazebo GUI or dashboard
     // steals CPU) must NOT kill a balancing run: keep driving the loop off the
     // last known state for up to `sensor_stale_grace_cycles_` control cycles.
     // Only a sustained loss latches the safe-stop.
@@ -1611,11 +1193,11 @@ class BalanceControllerNode : public rclcpp::Node {
       station_output_ = {};
       RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 2000,
-          "Sensor data stale for %d cycles: imu=%.1f ms, orientation=%.1f ms, "
+          "Sensor data stale for %d cycles: imu=%.1f ms, pitch=%.1f ms, "
           "joint_states=%.1f ms",
           stale_cycle_count_,
           1000.0 * (now().seconds() - last_imu_stamp_s_),
-          1000.0 * (now().seconds() - last_orientation_stamp_s_),
+          1000.0 * (now().seconds() - last_pitch_estimate_stamp_s_),
           1000.0 * (now().seconds() - last_joint_state_stamp_s_));
       // Latch the safe state. A local stop command would leave the real
       // request_enable flag set and could re-enable the robot automatically
@@ -1648,6 +1230,11 @@ class BalanceControllerNode : public rclcpp::Node {
       imu_seeded_ = false;  // re-seed the pitch filter from a fresh, validated sample
       seed_window_count_ = 0;
       seed_accum_x_ = seed_accum_y_ = seed_accum_z_ = 0.0F;
+      // The estimator is intentionally unavailable during the seed window;
+      // do not let the watchdog treat the pre-reset pitch timestamp as a
+      // fresh attitude source and latch EmergencyStop while reset settles.
+      have_pitch_estimate_ = false;
+      last_pitch_estimate_stamp_s_ = 0.0;
       pending_imu_impact_event_ = false;
       pending_imu_impact_expiry_s_ = 0.0;
       state_.imu.hard_impact_event = false;
@@ -1669,7 +1256,8 @@ class BalanceControllerNode : public rclcpp::Node {
         commanded_leg_pose_={jump_output_.position_rad[0],jump_output_.position_rad[1],
                              jump_output_.position_rad[3],jump_output_.position_rad[4]};
       }
-      if(jump_->active()) state_.floor_contact=jump_left_contact_||jump_right_contact_;
+      // Jump is a separate, explicitly simulation-only feature. Its contact
+      // state is not fed into the landing controller.
     } else jump_request_pending_=false;
     robot_control::ControlCommand effective_command = command_;
     if(jump_output_.owns_pose) {
@@ -1678,46 +1266,12 @@ class BalanceControllerNode : public rclcpp::Node {
       effective_command.target_forward_velocity_m_s=0;
       effective_command.target_yaw_rate_rad_s=0;
     }
-    robot_control::StationKeeper::Input station_input;
-    station_input.x = last_sim_pose_x_m_;
-    station_input.y = last_sim_pose_y_m_;
-    station_input.yaw = state_.imu.yaw_rad;
-    station_input.dt = state_.dt_s;
-    station_input.ready_to_acquire=std::abs(state_.imu.pitch_rad-controller_->balancePitchRef())<.05F &&
-        std::abs(state_.imu.pitch_rate_rad_s)<.3F;
-    for(auto j:{kLeftHip,kLeftKnee,kRightHip,kRightKnee})
-      station_input.ready_to_acquire=station_input.ready_to_acquire&&std::abs(state_.joints.velocity_rad_s[j])<.3F;
-    const auto previous_mode = controller_->mode();
-    station_input.active = station_enabled_ && have_sim_pose_ &&
-        state_.floor_contact &&
-        !state_.emergency_stop && !command_.request_disable && !command_.request_stand_up &&
-        (previous_mode == robot_control::ControlMode::Balance ||
-         previous_mode == robot_control::ControlMode::Drive ||
-         previous_mode == robot_control::ControlMode::PoseChange);
-    station_input.operator_driving = std::abs(command_.target_forward_velocity_m_s) > 1e-4F ||
-                                     std::abs(command_.target_yaw_rate_rad_s) > 1e-4F;
-    if (jump_output_.owns_pose && (!state_.floor_contact || jump_output_.station_blend<=0.F)) {
-      // Freeze the existing world anchor across takeoff and landing.
-      station_output_={};
-    } else if (!station_input.active) {
-      station_output_ = station_keeper_->update(station_input);
-      station_recapture_pending_ = false;
-    } else if (!sensorDataFresh(now().seconds())) {
-      // During watchdog grace, suppress correction without forgetting the
-      // anchor. Driving through that gap must instead capture a fresh pose.
-      station_output_ = {};
-      station_recapture_pending_ = station_recapture_pending_ || station_input.operator_driving;
-    } else {
-      if (station_recapture_pending_) station_keeper_->reset();
-      station_recapture_pending_ = false;
-      station_output_ = station_keeper_->update(station_input);
-    }
-    if(jump_output_.owns_pose) {
-      station_output_.forward_correction_m_s*=jump_output_.station_blend;
-      station_output_.yaw_correction_rad_s*=jump_output_.station_blend;
-    }
-    effective_command.target_forward_velocity_m_s += station_output_.forward_correction_m_s;
-    effective_command.target_yaw_rate_rad_s += station_output_.yaw_correction_rad_s;
+    // World-frame station keeping is intentionally absent.  MPU6500 + wheel
+    // encoders provide no absolute x/y pose, so no simulated pose may create
+    // a hidden correction command.  The stationary controller remains a
+    // compiled research component, but its ROS runtime entrypoint is rejected
+    // above when station_keeper.enabled is requested.
+    station_output_ = {};
     robot_control::MotorCommand motors =
         controller_->update(state_, effective_command);
     motion_started_=motion_started_||motors.enable_motors;
@@ -1816,7 +1370,9 @@ class BalanceControllerNode : public rclcpp::Node {
     in.pitch_rad=state_.imu.pitch_rad;in.pitch_rate_rad_s=state_.imu.pitch_rate_rad_s;
     in.position_rad=state_.joints.position_rad;in.velocity_rad_s=state_.joints.velocity_rad_s;
     in.com_z_m=jumpEstimatedComZ();
-    in.body_x_m=last_sim_pose_x_m_;in.body_z_m=last_sim_pose_z_m_;
+    // Absolute body position is unobservable and therefore intentionally not
+    // supplied to the experimental sequencer.
+    in.body_x_m=0.0F;in.body_z_m=0.0F;
     in.ground_speed_m_s=state_.wheel.velocity_m_s;
     return in;
   }
@@ -1834,7 +1390,7 @@ class BalanceControllerNode : public rclcpp::Node {
     }
     if (jump_->phase() == robot_control::JumpController::Phase::Fault ||
         state_.emergency_stop || command_.request_disable ||
-        (have_imu_ && have_orientation_ && have_joint_state_ &&
+        (have_imu_ && have_pitch_estimate_ && have_joint_state_ &&
          (!finite || !sensorDataFresh(now().seconds())))) {
       command_.request_enable = false;
       command_.request_disable = true;
@@ -1887,43 +1443,14 @@ class BalanceControllerNode : public rclcpp::Node {
       return true;
     }
     return stampFresh(last_imu_stamp_s_, now_s) &&
-           stampFresh(last_orientation_stamp_s_, now_s) &&
+           stampFresh(last_pitch_estimate_stamp_s_, now_s) &&
            stampFresh(last_joint_state_stamp_s_, now_s);
   }
 
-  bool jumpContactFresh() const {
-    for(double stamp:jump_contact_stamps_) {
-      const double age=now().seconds()-stamp;
-      if(!(stamp>0 && age>=-kJumpContactClockToleranceS && age<=jump_contact_timeout_s_)) return false;
-    }
-    return true;
-  }
-
-  bool anyWheelContactFresh() const {
-    return wheelContactFresh(0) || wheelContactFresh(1);
-  }
-
-  bool wheelContactFresh(std::size_t side) const {
-    if (side >= any_wheel_contact_stamps_.size()) return false;
-    const double stamp = any_wheel_contact_stamps_[side];
-    const double age = now().seconds() - stamp;
-    return stamp > 0.0 && age >= -kJumpContactClockToleranceS &&
-           age <= jump_contact_timeout_s_;
-  }
-
-  bool wheelContactObservationReady() const {
-    // Both streams must initialize before enabling. Once initialized, contact
-    // is deliberately an OR: the wheel that touches first is a valid
-    // touchdown event, while its per-side freshness remains independently
-    // visible to the landing controller.
-    return any_wheel_contact_stamps_[0] > 0.0 &&
-           any_wheel_contact_stamps_[1] > 0.0;
-  }
+  bool jumpContactFresh() const { return false; }
 
   void resetJumpContacts() {
-    jump_contact_stamps_.fill(0);jump_contact_last_seen_.fill(0);
     jump_left_contact_=jump_right_contact_=false;
-    any_wheel_contact_.fill(false);any_wheel_contact_stamps_.fill(0);
   }
 
   double jumpEstimatedComZ() const {
@@ -1940,10 +1467,11 @@ class BalanceControllerNode : public rclcpp::Node {
       az+=(hip.z-std::sin(h)*knee.x+std::cos(h)*knee.z-
            std::sin(h+k)*wheel.x+std::cos(h+k)*wheel.z)/2;
     }
-    // Sagittal telemetry estimate only; harness owns full world COM validation.
-    const double pitch=state_.imu.pitch_rad;
-    return last_sim_pose_z_m_-std::sin(pitch)*(ax+wb.com_offset_x_m)+
-        std::cos(pitch)*(az+wb.com_above_axle_m);
+    // Relative kinematic COM height only.  No world pose is available under
+    // the hardware contract, so keep this helper local to the robot frame.
+    (void)ax;
+    (void)az;
+    return wb.com_height_m;
   }
 
   void stopJump(const char* reason) {
@@ -2075,8 +1603,8 @@ class BalanceControllerNode : public rclcpp::Node {
     publishJumpStatus();
     const auto mode = controller_->mode();
     const double now_s = now().seconds();
-    const double orientation_age_ms =
-        last_orientation_stamp_s_ > 0.0 ? 1000.0 * (now_s - last_orientation_stamp_s_)
+    const double pitch_age_ms =
+        last_pitch_estimate_stamp_s_ > 0.0 ? 1000.0 * (now_s - last_pitch_estimate_stamp_s_)
                                         : -1.0;
     const double imu_age_ms =
         last_imu_stamp_s_ > 0.0 ? 1000.0 * (now_s - last_imu_stamp_s_) : -1.0;
@@ -2111,9 +1639,9 @@ class BalanceControllerNode : public rclcpp::Node {
     const int written = std::snprintf(
         buffer, sizeof(buffer),
         "%s|pitch=%.3f|pitch_rate=%.3f|cmd_v=%.2f|cmd_w=%.2f|enable=%d|estop=%d|imu=%d|joints=%d"
-        "|dt_ms=%.2f|jitter_ms=%.2f|imu_age_ms=%.1f|ori_age_ms=%.1f|js_age_ms=%.1f"
-        "|fresh=%d|stale_n=%d|timeout_ms=%.0f|pose_idx=%d|pose_n=%zu|pose_z=%.3f"
-        "|contact=%d|left_contact=%d|right_contact=%d|contact_fresh=%d|impact_event=%d"
+        "|dt_ms=%.2f|jitter_ms=%.2f|imu_age_ms=%.1f|pitch_age_ms=%.1f|js_age_ms=%.1f"
+        "|fresh=%d|stale_n=%d|timeout_ms=%.0f"
+        "|contact=%d|left_contact=%d|right_contact=%d|impact_event=%d"
         "|accel_mag=%.2f|accel_tilt_valid=%d|roll_rate=%.4f"
         "|wheel_pos=%.3f|wheel_vel=%.3f|l_qd=%.2f|r_qd=%.2f"
         "|l_qd_meas=%.2f|r_qd_meas=%.2f|l_qd_cmd=%.2f|r_qd_cmd=%.2f"
@@ -2135,13 +1663,11 @@ class BalanceControllerNode : public rclcpp::Node {
         command_.request_enable ? 1 : 0, state_.emergency_stop ? 1 : 0,
         have_imu_ ? 1 : 0, have_joint_state_ ? 1 : 0,
         1000.0 * measured_control_dt_s_, 1000.0 * control_jitter_s_,
-        imu_age_ms, orientation_age_ms, joint_age_ms,
+        imu_age_ms, pitch_age_ms, joint_age_ms,
         fresh ? 1 : 0, stale_cycle_count_, 1000.0 * sensor_timeout_s_,
-        last_sim_pose_index_,
-        last_sim_pose_count_, last_sim_pose_z_m_, state_.floor_contact ? 1 : 0,
-        state_.left_floor_contact ? 1 : 0,
-        state_.right_floor_contact ? 1 : 0,
-        anyWheelContactFresh() ? 1 : 0,
+        flight.support_contact ? 1 : 0,
+        flight.left_support_contact ? 1 : 0,
+        flight.right_support_contact ? 1 : 0,
         state_.imu.hard_impact_event ? 1 : 0,
         static_cast<double>(last_accel_magnitude_m_s2_),
         accel_tilt_measurement_valid_ ? 1 : 0,
@@ -2219,20 +1745,6 @@ class BalanceControllerNode : public rclcpp::Node {
   double last_cmd_vel_stamp_s_ = 0.0;
   double pitch_offset_rad_;
   std::string pitch_source_;
-  std::string sim_pose_child_frame_;
-  int sim_pose_index_;
-  float sim_contact_min_base_z_m_;
-  float sim_contact_max_pitch_rad_;
-  bool torque_touchdown_enabled_;
-  float hip_touchdown_torque_nm_;
-  float hip_touchdown_max_velocity_rad_s_;
-  bool imu_touchdown_enabled_;
-  float imu_touchdown_accel_mps2_;
-  bool hard_impact_delay_enabled_;
-  float hard_impact_accel_mps2_;
-  float hard_impact_pitch_rate_rad_s_;
-  float hard_impact_settle_s_;
-  float hard_impact_settle_remaining_s_ = 0.0F;
   float left_wheel_sign_;
   float kalman_q_angle_;
   float kalman_q_bias_;
@@ -2273,13 +1785,7 @@ class BalanceControllerNode : public rclcpp::Node {
   // (which is degenerate near pitch = pi, see docs/LEDGE_DRIVEOFF_LIMIT.md's
   // own note on peak_roll_rad measurement artifacts).
   float raw_imu_roll_rate_rad_s_ = 0.0F;
-  float raw_imu_yaw_rad_ = 0.0F;
-  float last_sim_pose_pitch_rad_ = 0.0F;
-  double last_sim_pose_stamp_s_ = 0.0;
-  double last_sim_pose_z_m_ = 0.0;
-  double last_sim_pose_x_m_ = 0.0;
-  double last_sim_pose_y_m_ = 0.0;
-  double last_orientation_stamp_s_ = 0.0;
+  double last_pitch_estimate_stamp_s_ = 0.0;
   double last_imu_stamp_s_ = 0.0;
   double last_joint_state_stamp_s_ = 0.0;
   double last_timer_stamp_s_ = 0.0;
@@ -2287,8 +1793,6 @@ class BalanceControllerNode : public rclcpp::Node {
   double jump_control_dt_s_ = 0.0;
   double control_jitter_s_ = 0.0;
   std::array<double, 2> last_wheel_command_rad_s_{0.0, 0.0};
-  int last_sim_pose_index_ = -1;
-  std::size_t last_sim_pose_count_ = 0;
   bool auto_enable_;
   bool allow_motion_commands_;
   bool imu_noise_enabled_;
@@ -2296,8 +1800,7 @@ class BalanceControllerNode : public rclcpp::Node {
   double imu_gyro_noise_stddev_rad_s_;
   std::mt19937 imu_noise_rng_;
   bool have_imu_ = false;
-  bool have_sim_pose_ = false;
-  bool have_orientation_ = false;
+  bool have_pitch_estimate_ = false;
   bool have_joint_state_ = false;
   bool reset_requested_ = false;
   std::array<float, 4> commanded_leg_pose_{0.0F, 0.0F, 0.0F, 0.0F};
@@ -2314,6 +1817,7 @@ class BalanceControllerNode : public rclcpp::Node {
   bool station_enabled_ = false;
   robot_control::JumpController::Config jump_config_;
   std::unique_ptr<robot_control::JumpPlan> jump_plan_;
+  std::string jump_profile_;
   bool jump_wheel_frame_compensation_=false;
   robot_control::WheelFrame::Result wheel_frame_;
   std::unique_ptr<robot_control::JumpController> jump_;
@@ -2321,26 +1825,10 @@ class BalanceControllerNode : public rclcpp::Node {
   bool jump_request_level_=false,jump_request_pending_=false;
   bool motion_started_=false;
   bool jump_left_contact_=false,jump_right_contact_=false;
-  double jump_contact_timeout_s_=.05;
-  // Contact and /clock arrive independently (250 Hz contact, 1 kHz physics).
-  static constexpr double kJumpContactClockToleranceS=0.010;
-  std::array<double,2> jump_contact_stamps_{};
-  std::array<double,2> jump_contact_last_seen_{};
-  // Validated per-wheel support signal. It is deliberately narrower than
-  // "touching anything": edge fillets/body collisions are not support for
-  // the wheel MPC or landing phase machine.
-  std::array<bool,2> any_wheel_contact_{};
-  std::array<double,2> any_wheel_contact_stamps_{};
-  std::array<std::string,2> jump_contact_topics_;
-  std::string jump_profile_,jump_ground_collision_;
-  std::vector<std::string> contact_support_surface_tokens_;
-  std::vector<std::string> contact_reject_surface_tokens_;
-  float contact_min_support_normal_z_ = 0.5F;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr jump_status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr actuator_enable_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr leg_velocity_reference_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr jump_request_sub_;
-  std::array<rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr,2> jump_contact_subs_;
   bool station_recapture_pending_ = false;
   std::unique_ptr<robot_control::StationKeeper> station_keeper_;
   robot_control::StationKeeper::Output station_output_{};
@@ -2348,7 +1836,6 @@ class BalanceControllerNode : public rclcpp::Node {
       robot_control::ControlMode::Disabled;
 
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
-  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sim_pose_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;

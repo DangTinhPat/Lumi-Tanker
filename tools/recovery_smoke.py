@@ -12,7 +12,6 @@ import time
 import rclpy
 from rosgraph_msgs.msg import Clock
 from std_msgs.msg import Bool, Float64MultiArray, String
-from tf2_msgs.msg import TFMessage
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,7 +23,7 @@ def main():
     os.environ['GZ_PARTITION'] = f'tap_recovery_{os.getpid()}_{time.time_ns()}'
     out = ROOT / 'log' / f'recovery_{int(time.time())}'
     out.mkdir(parents=True)
-    rows, pose, state = [], {}, {}
+    rows, state = [], {}
     stage = 'startup'
     sim_time = 0.0
     failure = None
@@ -35,15 +34,6 @@ def main():
     def clock(msg):
         nonlocal sim_time
         sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
-
-    def position(msg):
-        if len(msg.transforms) != 1:
-            return
-        t = msg.transforms[0].transform
-        q = t.rotation
-        pose.update(z=t.translation.z,
-                    actual_pitch=math.asin(max(-1, min(1, 2*(q.w*q.y-q.z*q.x)))),
-                    actual_roll=math.atan2(2*(q.w*q.x+q.y*q.z), 1-2*(q.x*q.x+q.y*q.y)))
 
     def status(msg):
         fields = msg.data.split('|')
@@ -56,7 +46,7 @@ def main():
                     state[key] = float(value)
                 except ValueError:
                     state[key] = value
-        rows.append(dict(state, **pose, stage=stage, sim_time=sim_time))
+        rows.append(dict(state, stage=stage, sim_time=sim_time))
 
     def motors(name, msg):
         motor_commands[name] = list(msg.data)
@@ -67,13 +57,12 @@ def main():
     metadata = {'domain': 109, 'partition': os.environ['GZ_PARTITION'],
                 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
                 'contact_note': 'contact is controller-inferred, not a contact-force sensor',
-                'setup': 'estop, pose pitch=1.2 z=0.25, gravity settle; no later pose resets'}
+                'setup': 'estop, simulator-only initial pitch disturbance; no later state resets'}
     process = None
     cleanup_result = None
     rclpy.init()
     node = rclpy.create_node('tap_recovery_smoke')
     node.create_subscription(Clock, '/clock', clock, 100)
-    node.create_subscription(TFMessage, '/tap_robot/pose', position, 100)
     node.create_subscription(String, '/control_mode', status, 100)
     node.create_subscription(Float64MultiArray, '/wheel_effort_controller/commands',
                              lambda msg: motors('wheels', msg), 100)
@@ -122,8 +111,8 @@ def main():
             raise RuntimeError('Fallen setup failed: ' + result.stdout + result.stderr)
         stage = 'fallen_settle'
         observe(3)
-        metadata['settled_fallen'] = dict(state, **pose)
-        if abs(pose.get('actual_pitch', 0)) < .7 and abs(pose.get('actual_roll', 0)) < .7:
+        metadata['settled_fallen'] = dict(state)
+        if abs(state.get('pitch', 0)) < .7:
             raise RuntimeError('Setup did not produce a fallen robot')
         stage = 'clear_and_reset'
         send('emergency_stop', False)
@@ -148,8 +137,7 @@ def main():
             spin()
             dt = max(0, sim_time - previous)
             previous = sim_time
-            upright = (state.get('mode') == 'Balance' and abs(pose.get('actual_pitch', 9)) < .2
-                       and abs(pose.get('actual_roll', 9)) < .2 and pose.get('z', 0) > .20
+            upright = (state.get('mode') == 'Balance' and abs(state.get('pitch', 9)) < .2
                        and abs(state.get('pitch_rate', 9)) < .5 and state.get('contact') == 1)
             stable = stable + dt if upright else 0
             if stable >= 2:
@@ -167,14 +155,13 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         log.close()
-        metadata.update(failure=failure, cleanup=cleanup_result, stable_upright_s=stable, final=dict(state, **pose), stages={})
+        metadata.update(failure=failure, cleanup=cleanup_result, stable_upright_s=stable, final=dict(state), stages={})
         for name in dict.fromkeys(r['stage'] for r in rows):
             subset = [r for r in rows if r['stage'] == name]
             metadata['stages'][name] = {
                 'sim_duration': subset[-1]['sim_time'] - subset[0]['sim_time'],
                 'modes': sorted({r['mode'] for r in subset}),
-                'pitch_range': [min(r.get('actual_pitch', 0) for r in subset), max(r.get('actual_pitch', 0) for r in subset)],
-                'height_range': [min(r.get('z', 0) for r in subset), max(r.get('z', 0) for r in subset)],
+                'pitch_range': [min(r.get('pitch', 0) for r in subset), max(r.get('pitch', 0) for r in subset)],
                 'inferred_contact_values': sorted({r.get('contact', -1) for r in subset})}
         (out / 'samples.json').write_text(json.dumps(rows, indent=2))
         (out / 'summary.json').write_text(json.dumps(metadata, indent=2))

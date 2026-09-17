@@ -80,6 +80,14 @@ class SimDescriptionTests(unittest.TestCase):
         self.assertEqual(world.find('gravity').text, '0 0 -9.81')
         self.assertEqual(float(world.find('physics/max_step_size').text), .001)
 
+    def test_simulation_exports_only_deployable_sensor_topics(self):
+        launch = (SIM / 'launch' / 'sim.launch.py').read_text()
+        self.assertNotIn('model_pose', launch)
+        self.assertNotIn('wheel_contacts', launch)
+        self.assertNotIn('dynamic_pose', launch)
+        self.assertIsNone(self.robot.find(".//plugin[@name='gz::sim::systems::PosePublisher']"))
+        self.assertEqual(len(self.robot.findall(".//sensor[@type='contact']")), 0)
+
     def test_bringup_never_resets_or_changes_gravity(self):
         script = (SIM / 'scripts/activate_controllers').read_text()
         self.assertNotIn('set_pose', script)

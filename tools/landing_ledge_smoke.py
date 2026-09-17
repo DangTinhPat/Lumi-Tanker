@@ -69,25 +69,15 @@ def run_trial(trial_id, controller_config, height, out_dir, domain_id):
     import rclpy
     from rosgraph_msgs.msg import Clock
     from std_msgs.msg import String
-    from tf2_msgs.msg import TFMessage
 
     log_path = out_dir / f'launch_{trial_id}.log'
     stream = log_path.open('w')
-    pose, state = {}, {}
+    state = {}
     sim_time = 0.0
 
     def clock_cb(msg):
         nonlocal sim_time
         sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
-
-    def pose_cb(msg):
-        if len(msg.transforms) != 1:
-            return
-        t = msg.transforms[0].transform
-        q = t.rotation
-        pose.update(z=t.translation.z,
-                    pitch=math.asin(max(-1, min(1, 2*(q.w*q.y-q.z*q.x)))),
-                    roll=math.atan2(2*(q.w*q.x+q.y*q.z), 1-2*(q.x*q.x+q.y*q.y)))
 
     def status_cb(msg):
         fields = msg.data.split('|')
@@ -104,7 +94,6 @@ def run_trial(trial_id, controller_config, height, out_dir, domain_id):
     rclpy.init()
     node = rclpy.create_node(f'tap_landing_smoke_{trial_id}'.replace('.', '_'))
     node.create_subscription(Clock, '/clock', clock_cb, 100)
-    node.create_subscription(TFMessage, '/tap_robot/pose', pose_cb, 100)
     node.create_subscription(String, '/control_mode', status_cb, 100)
 
     process = None
@@ -156,7 +145,7 @@ def run_trial(trial_id, controller_config, height, out_dir, domain_id):
             peak_pitch_rate = max(peak_pitch_rate, pr)
             upright = (state.get('mode') in ('Balance', 'Drive') and
                        p < RECOVER_PITCH_RAD and pr < RECOVER_PITCH_RATE_RAD_S and
-                       pose.get('z', 0.0) > STAND_Z - .05)
+                       state.get('contact', 0) > 0.5)
             stable = stable + dt if upright else 0.0
             elapsed = sim_time - drop_start
             if stable >= RECOVER_HOLD_S and elapsed > 0.3:
@@ -169,7 +158,7 @@ def run_trial(trial_id, controller_config, height, out_dir, domain_id):
             peak_pitch_rad=round(peak_pitch, 4),
             peak_pitch_rate_rad_s=round(peak_pitch_rate, 4),
             final_mode=state.get('mode'), final_pitch_rad=state.get('pitch'),
-            final_contact=state.get('contact'),
+            final_contact_hypothesis=state.get('contact'),
             elapsed_sim_s=round(sim_time - drop_start, 3))
         print(f'[{trial_id}] recovered={recovered} peak_pitch={peak_pitch:.3f} '
               f'final_mode={state.get("mode")}', flush=True)

@@ -13,7 +13,6 @@ from rclpy.qos import qos_profile_sensor_data
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool
-from tf2_msgs.msg import TFMessage
 
 CONTROLLERS = ('joint_state_broadcaster', 'wheel_effort_controller', 'leg_effort_controller')
 JOINTS = {f'cad_{side}_{joint}' for side in ('left', 'right') for joint in ('hip', 'knee', 'wheel')}
@@ -34,14 +33,12 @@ class Bringup(Node):
         self.clock = None
         self.imu_ready = False
         self.joints_ready = False
-        self.pose_ready = False
         self.steps = 0
         self.ready = False
         self.enable_requested = False
         self.create_subscription(Clock, '/clock', self.on_clock, qos_profile_sensor_data)
         self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
         self.create_subscription(JointState, '/joint_states', self.on_joints, qos_profile_sensor_data)
-        self.create_subscription(TFMessage, '/tap_robot/pose', self.on_pose, qos_profile_sensor_data)
         self.enable = self.create_publisher(Bool, '/enable', 10)
         self.create_subscription(Bool, '/enable', self.on_enable, 10)
         self._controller_clients = {name: self.create_client(kind, '/controller_manager/' + name)
@@ -58,25 +55,14 @@ class Bringup(Node):
         self.enable_requested = self.ready and msg.data
 
     def on_imu(self, msg):
-        q = msg.orientation
-        self.imu_ready = all(math.isfinite(v) for v in (q.x, q.y, q.z, q.w)) and abs(
-            q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1) < 0.01
+        values = (msg.angular_velocity.x, msg.angular_velocity.y,
+                  msg.angular_velocity.z, msg.linear_acceleration.x,
+                  msg.linear_acceleration.y, msg.linear_acceleration.z)
+        self.imu_ready = all(math.isfinite(v) for v in values)
 
     def on_joints(self, msg):
         self.joints_ready = JOINTS.issubset(msg.name) and len(msg.position) == len(msg.name) and all(
             math.isfinite(v) for v in msg.position)
-
-    def on_pose(self, msg):
-        self.pose_ready = False
-        if len(msg.transforms) != 1:
-            return
-        transform = msg.transforms[0]
-        name = transform.child_frame_id
-        if name and name.split('::')[-1].split('/')[-1] != 'tap_robot':
-            return
-        p, q = transform.transform.translation, transform.transform.rotation
-        self.pose_ready = all(math.isfinite(v) for v in (p.x, p.y, p.z, q.x, q.y, q.z, q.w)) and abs(
-            q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w - 1) < 0.01
 
     def wait(self, predicate, timeout=10):
         deadline = time.monotonic() + timeout
@@ -131,7 +117,7 @@ class Bringup(Node):
             self.step()
         if not future.result().ok:
             raise RuntimeError('Controller switch failed')
-        while not (self.imu_ready and self.joints_ready) or not self.pose_ready:
+        while not (self.imu_ready and self.joints_ready):
             self.step()
         states = {c.name: c.state for c in self.call('list_controllers', ListControllers.Request()).controller}
         if not all(states.get(name) == 'active' for name in CONTROLLERS):

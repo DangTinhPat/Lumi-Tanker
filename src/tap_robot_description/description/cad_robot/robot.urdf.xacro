@@ -5,13 +5,8 @@
   <xacro:arg name="jump_model" default="false"/>
   <xacro:arg name="jump_leg_speed" default="12.566370614359172"/>
   <xacro:arg name="jump_leg_velocity_damping" default="0.0"/>
-  <!-- Wheel contact sensors only, decoupled from jump_model's actuator-bound
-       swap (BoundedGazeboSystem, lower effort/velocity limits) below. Opt-in
-       and additive: leaves every non-jump default behavior unchanged. -->
-  <xacro:arg name="measure_contacts" default="false"/>
   <xacro:property name="jump_leg_speed" value="${float('$(arg jump_leg_speed)')}"/>
   <xacro:property name="jump_model" value="${'$(arg jump_model)' == 'true' and '$(arg simulation)' == 'true'}"/>
-  <xacro:property name="measure_contacts" value="${'$(arg measure_contacts)' == 'true' and '$(arg simulation)' == 'true'}"/>
   <xacro:property name="simulation" value="${'$(arg simulation)' == 'true'}"/>
   <xacro:property name="mesh_root" value="package://tap_robot_description/description/cad_robot/meshes"/>
   <xacro:property name="masses" value="${xacro.load_yaml('masses.yaml')}"/>

@@ -22,10 +22,10 @@ balance_controller_node:
     landing_fallen_recovery.hold_s: 0.20
     landing_controller.enabled: true
     trajectory_observer.min_confidence: 0.50
-    landing_controller.flight_extension_delay_s: 0.09
+    landing_controller.flight_extension_delay_s: 0.12
     landing_controller.flight_extension_max_m: 0.025
     landing_controller.flight_hip_offset_max_rad: 0.025
-    landing_controller.flight_knee_offset_max_rad: 0.18
+    landing_controller.flight_knee_offset_max_rad: 0.12
     landing_controller.flight_target_slew_rate_rad_s: 1.4
     # Keep posture authority during free fall. 0.20 left the leg target
     # effectively open-loop once the wheels lost support; the bounded active
@@ -35,15 +35,11 @@ balance_controller_node:
     landing_controller.flight_kd_scale: 1.0
     landing_controller.flight_pitch_rate_hip_gain_rad_per_rad_s: 0.0
     landing_controller.flight_pitch_rate_hip_offset_max_rad: 0.0
-    landing_controller.impact_accel_mps2: 18.0
-    landing_controller.impact_pitch_rate_rad_s: 3.0
-    landing_controller.imu_impact_debounce_s: 0.015
     # Raw IMU impact signatures in the 50 cm trace last only 1-2 samples;
     # retain the event long enough for the 1 kHz control timer to consume it.
     landing_controller.imu_impact_latch_s: 0.06
-    # IMU shock is supplementary telemetry/gain cue only. It cannot create
-    # touchdown without a validated wheel/support contact.
-    landing_controller.imu_impact_without_wheel_contact: false
+    # IMU shock is supplementary telemetry/gain cue only. The phase observer
+    # validates touchdown from its own IMU support hypothesis.
     # Do not multiply two independent soft-Kp schedules into near-zero
     # authority. LandingImpedance owns the knee compliance; the phase
     # controller keeps nominal posture authority for hips and the catch path.
@@ -56,14 +52,27 @@ balance_controller_node:
     landing_controller.min_impact_s: 0.05
     landing_controller.max_impact_s: 0.30
     landing_controller.recovery_blend_s: 0.25
+    # Prevent the pre-edge drive command from re-entering at full scale while
+    # the touchdown pitch impulse is still settling; restore it over 0.60 s.
+    landing_controller.recovery_drive_ramp_s: 0.60
+    # Sensor-only touchdown timing: after FlightObserver has already
+    # confirmed free-fall, the MPU6500 impact spike is the touchdown cue.
+    # Keep only a short debounce so the controller does not wait ~35 ms
+    # (20 ms collision hold + 15 ms touchdown hold) before absorbing impact.
+    flight_observer.collision_hold_s: 0.005
+    flight_observer.touchdown_debounce_s: 0.005
+    # A wheel unloading at the ledge edge can briefly produce low specific
+    # force while the other wheel is still supported. Require a sustained
+    # near-zero-g interval before declaring the whole body ballistic.
+    flight_observer.free_fall_debounce_s: 0.060
     landing_reflex.airborne_knee_crouch_rad: 0.0
     # Enable the bounded pre-touchdown extension.  The flight controller's
     # separate Cartesian extension remains capped at 25 mm; this reflex adds
     # only the encoder/IMU-timed extension allowed by its own joint-space cap.
     landing_reflex.active_extension_gravity_m_s2: 9.81
-    landing_reflex.active_extension_max_rad: 0.18
+    landing_reflex.active_extension_max_rad: 0.08
     landing_reflex.active_extension_max_hip_rad: 0.035
-    landing_reflex.active_extension_delay_s: 0.09
+    landing_reflex.active_extension_delay_s: 0.12
     # Pre-arm from real IMU unloading/free-fall before wheel contact becomes
     # a reliable false edge. This remains sensor-only: no Gazebo pose/state.
     landing_reflex.unloading_accel_mps2: 4.0

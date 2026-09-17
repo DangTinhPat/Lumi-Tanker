@@ -8,8 +8,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(tf2_msgs REQUIRED)
-find_package(ros_gz_interfaces REQUIRED)
 
 add_subdirectory(core)
 
@@ -20,7 +18,7 @@ foreach(demo balance_demo mpc_demo)
 endforeach()
 add_executable(balance_controller_node ros2_nodes/BalanceControllerNode.cpp)
 target_link_libraries(balance_controller_node tap_control_core)
-ament_target_dependencies(balance_controller_node geometry_msgs rclcpp sensor_msgs std_msgs tf2_msgs ros_gz_interfaces)
+ament_target_dependencies(balance_controller_node geometry_msgs rclcpp sensor_msgs std_msgs)
 install(TARGETS tap_control_core balance_demo mpc_demo balance_controller_node
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY core/include/ DESTINATION include)

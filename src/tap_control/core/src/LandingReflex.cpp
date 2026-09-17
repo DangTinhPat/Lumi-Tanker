@@ -124,8 +124,8 @@ JointArray LandingReflex::update(bool floor_contact, float pitch_rate_rad_s,
     if (!armed_by_unloading_) {
       airborne_elapsed_s_ += dt_s;
     }
-    // Level check, not edge-triggered: a spuriously-true contact reading
-    // this soon after liftoff (sim_pose heuristic noise, see
+    // Level check, not edge-triggered: a spuriously-true support hypothesis
+    // this soon after liftoff (estimator transient, see
     // min_airborne_before_touchdown_s above) must not consume the one
     // false->true edge and get stuck Airborne forever once rejected - retry
     // every tick floor_contact reads true until either the debounce elapses

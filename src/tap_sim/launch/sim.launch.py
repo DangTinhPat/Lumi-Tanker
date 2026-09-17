@@ -1,7 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, RegisterEventHandler, SetEnvironmentVariable
 from launch.events import Shutdown
-from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution, PythonExpression
@@ -15,7 +14,6 @@ def generate_launch_description():
     description = FindPackageShare('tap_robot_description')
     gui = LaunchConfiguration('gui')
     jump_model = LaunchConfiguration('jump_model')
-    measure_contacts = LaunchConfiguration('measure_contacts')
     terrain = LaunchConfiguration('terrain')
     ledge_world = LaunchConfiguration('ledge_world')
     # jump_model takes priority: rough_training.sdf/ledge_test.sdf have no jump
@@ -42,7 +40,6 @@ def generate_launch_description():
     state = Node(package='robot_state_publisher', executable='robot_state_publisher',
                  parameters=[{'use_sim_time': True, 'robot_description': ParameterValue(
                      Command(['xacro ', xacro, ' jump_model:=', jump_model,
-                             ' measure_contacts:=', measure_contacts,
                              ' jump_leg_speed:=', LaunchConfiguration('jump_leg_speed'),
                              ' jump_leg_velocity_damping:=', LaunchConfiguration('jump_leg_velocity_damping')]), value_type=str)}], output='screen')
     spawn = Node(package='ros_gz_sim', executable='create', output='screen',
@@ -70,18 +67,6 @@ def generate_launch_description():
         DeclareLaunchArgument('gui', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('auto_enable', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('jump_model', default_value='false', choices=['true', 'false']),
-        DeclareLaunchArgument('measure_contacts', default_value='true', choices=['true', 'false'],
-                              description='Wheel contact sensors. Defaults on as of 2026-09-15 '
-                                          '(docs/RULES.md Rule 1): the default pitch_source is now '
-                                          'IMU-based, not sim_pose ground truth, and floor_contact for '
-                                          'that path is derived from this real contact data (see '
-                                          'BalanceControllerNode - anyWheelContactFresh()), not a pose '
-                                          'heuristic. Also still published as observational telemetry '
-                                          '(contact_l=/contact_r= on /jump_status) independent of that. '
-                                          'Decoupled from jump_model so it does not also swap in '
-                                          'BoundedGazeboSystem/lower actuator limits. All three worlds '
-                                          '(empty.sdf, rough_training.sdf, ledge_test.sdf) now load the '
-                                          'required gz-sim-contact-system plugin.'),
         DeclareLaunchArgument('ledge_world', default_value='',
                               description='Absolute path to a generated world sdf (see '
                                           'tools/generate_ledge_world.py), overriding terrain/'
@@ -124,27 +109,7 @@ def generate_launch_description():
         Node(package='ros_gz_bridge', executable='parameter_bridge',
              arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'], output='screen'),
         Node(package='ros_gz_bridge', executable='parameter_bridge',
-             arguments=['/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
-                        '/model/tap_robot/pose@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
-                        '/world/empty/dynamic_pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V'],
-             remappings=[('/model/tap_robot/pose', '/tap_robot/pose')],
-             output='screen'),
-        # Bridges the sensor's own _raw gz topic (populated directly by
-        # gz-sim-contact-system) rather than the tap_sim::ContactSnapshot
-        # re-publish (libtap_contact_snapshot.so has been observed to
-        # intermittently fail to load in this environment - "undefined
-        # symbol: removexattrat" from a libsystemd version mismatch,
-        # unrelated to this plugin's own code). Remapped to the plain
-        # left_wheel_contacts/right_wheel_contacts names so
-        # BalanceControllerNode's existing subscription (jump.left_contacts_topic
-        # default) needs no change.
-        Node(package='ros_gz_bridge', executable='parameter_bridge',
-             condition=IfCondition(PythonExpression([
-                 "'", jump_model, "' == 'true' or '", measure_contacts, "' == 'true'"])),
-             arguments=['/left_wheel_contacts_raw@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts',
-                        '/right_wheel_contacts_raw@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts'],
-             remappings=[('/left_wheel_contacts_raw', '/left_wheel_contacts'),
-                         ('/right_wheel_contacts_raw', '/right_wheel_contacts')],
+             arguments=['/imu@sensor_msgs/msg/Imu[gz.msgs.IMU'],
              output='screen'),
         spawn,
     ])

@@ -3,8 +3,8 @@
 # jump_leg_velocity_damping:=0.6. Jumping itself is NOT validated by pose tests.
 balance_controller_node:
   ros__parameters:
-    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
-    jump.enabled: true
+    pitch_source: imu
+    jump.enabled: false  # disabled: no contact/world-pose sensor in hardware contract
     jump.profile: rated_120rpm
     jump.wheel_frame_compensation: true
     jump.leg_torque_limit_nm: 5.0

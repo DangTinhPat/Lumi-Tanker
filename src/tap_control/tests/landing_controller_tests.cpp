@@ -28,6 +28,27 @@ RobotState baseState() {
   return state;
 }
 
+// Explicitly model the observer output in this unit fixture. Production code
+// never uses RobotState contact fields; LandingController receives the
+// sensor-derived FlightObserver output from EmbeddedController.
+FlightObserver::Output fixtureFlight(const RobotState& state) {
+  FlightObserver::Output out;
+  out.support_contact = state.floor_contact;
+  out.left_support_contact = state.left_floor_contact;
+  out.right_support_contact = state.right_floor_contact;
+  out.airborne = !out.support_contact;
+  out.phase = out.support_contact ? FlightObserver::Phase::Grounded
+                                  : FlightObserver::Phase::BallisticFlight;
+  return out;
+}
+
+LandingController::Output sensorUpdate(LandingController& ctrl,
+                                       const RobotState& state,
+                                       const JointArray& target) {
+  auto flight = fixtureFlight(state);
+  return ctrl.update(state, target, &flight);
+}
+
 void outputDefaultsAreNeutral() {
   LandingController::Output out;
   bool ok = true;
@@ -43,7 +64,7 @@ void disabledControllerIsNoOp() {
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
   state.floor_contact = false;
-  const auto out = ctrl.update(state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   bool ok = !out.active && out.phase == LandingController::Phase::Grounded;
   for (std::size_t i = 0; i < kJointCount; ++i) {
     ok = ok && out.kp_scale[i] == 1.0F && out.kd_scale[i] == 1.0F &&
@@ -64,15 +85,15 @@ void flightDelaysAndBoundsLegExtension() {
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
-  auto early = ctrl.update(state, target);
+  auto early = sensorUpdate(ctrl, state, target);
   check(early.active && early.suspend_wheel_balance &&
             near(early.position_offset_rad[static_cast<std::size_t>(JointId::LeftKnee)], 0.0F),
         "LandingController: Flight starts but extension waits for edge-clear delay");
 
   for (int i = 0; i < 20; ++i) {
-    early = ctrl.update(state, target);
+    early = sensorUpdate(ctrl, state, target);
   }
   const float hip = early.position_offset_rad[static_cast<std::size_t>(JointId::LeftHip)];
   const float knee = early.position_offset_rad[static_cast<std::size_t>(JointId::LeftKnee)];
@@ -92,12 +113,12 @@ void flightPitchRateShapesHipPlacement() {
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   state.left_floor_contact = false;
   state.right_floor_contact = false;
   state.imu.pitch_rate_rad_s = 10.0F;
-  const auto out = ctrl.update(state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   const float hip =
       out.position_offset_rad[static_cast<std::size_t>(JointId::LeftHip)];
   check(out.phase == LandingController::Phase::Flight && hip < 0.0F &&
@@ -109,8 +130,6 @@ void impactProducesCartesianFeedforwardAndRecovery() {
   LandingController::Config cfg;
   cfg.enabled = true;
   cfg.min_flight_before_impact_s = 0.02F;
-  cfg.impact_accel_mps2 = 20.0F;
-  cfg.impact_pitch_rate_rad_s = 1.0F;
   cfg.height_kd_n_s_m = 20.0F;
   cfg.max_virtual_force_n = 10.0F;
   cfg.max_feedforward_torque_nm = 0.5F;
@@ -122,17 +141,17 @@ void impactProducesCartesianFeedforwardAndRecovery() {
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   for (int i = 0; i < 4; ++i) {
-    (void)ctrl.update(state, target);
+    (void)sensorUpdate(ctrl, state, target);
   }
   state.floor_contact = true;
   state.imu.accel_magnitude_m_s2 = 30.0F;
   state.imu.pitch_rate_rad_s = 2.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -4.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -4.0F;
-  const auto impact = ctrl.update(state, target);
+  const auto impact = sensorUpdate(ctrl, state, target);
   bool has_tau = false;
   for (float tau : impact.feedforward_nm) {
     has_tau = has_tau || std::abs(tau) > 1.0e-5F;
@@ -150,7 +169,7 @@ void impactProducesCartesianFeedforwardAndRecovery() {
   state.joints.velocity_rad_s.fill(0.0F);
   LandingController::Output out;
   for (int i = 0; i < 20; ++i) {
-    out = ctrl.update(state, target);
+    out = sensorUpdate(ctrl, state, target);
   }
   check(out.phase == LandingController::Phase::Grounded && !out.active,
         "LandingController: Impact/Recovery returns to Grounded");
@@ -160,24 +179,21 @@ void hardImuSpikeWithoutContactDoesNotEnterImpact() {
   LandingController::Config cfg;
   cfg.enabled = true;
   cfg.min_flight_before_impact_s = 0.02F;
-  cfg.impact_accel_mps2 = 20.0F;
-  cfg.impact_pitch_rate_rad_s = 1.0F;
-  cfg.imu_impact_debounce_s = 0.02F;
   cfg.height_kd_n_s_m = 20.0F;
   LandingController ctrl(cfg);
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   state.left_floor_contact = false;
   state.right_floor_contact = false;
   for (int i = 0; i < 4; ++i) {
-    (void)ctrl.update(state, target);
+    (void)sensorUpdate(ctrl, state, target);
   }
   state.imu.accel_magnitude_m_s2 = 100.0F;
   state.imu.pitch_rate_rad_s = 8.0F;
-  const auto out = ctrl.update(state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   check(out.phase == LandingController::Phase::Flight &&
             out.suspend_wheel_balance,
         "LandingController: single-tick IMU spike without contact stays Flight");
@@ -187,28 +203,25 @@ void repeatedHardImuShockWithoutWheelContactStaysFlight() {
   LandingController::Config cfg;
   cfg.enabled = true;
   cfg.min_flight_before_impact_s = 0.02F;
-  cfg.impact_accel_mps2 = 20.0F;
-  cfg.impact_pitch_rate_rad_s = 1.0F;
-  cfg.imu_impact_debounce_s = 0.02F;
   cfg.height_kd_n_s_m = 20.0F;
   cfg.max_feedforward_torque_nm = 0.5F;
   LandingController ctrl(cfg);
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   state.left_floor_contact = false;
   state.right_floor_contact = false;
   for (int i = 0; i < 4; ++i) {
-    (void)ctrl.update(state, target);
+    (void)sensorUpdate(ctrl, state, target);
   }
   state.imu.accel_magnitude_m_s2 = 100.0F;
   state.imu.pitch_rate_rad_s = 8.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -4.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -4.0F;
-  (void)ctrl.update(state, target);
-  const auto out = ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   check(out.phase == LandingController::Phase::Flight && out.suspend_wheel_balance &&
             out.feedforward_nm[static_cast<std::size_t>(JointId::LeftKnee)] == 0.0F &&
             out.feedforward_nm[static_cast<std::size_t>(JointId::RightKnee)] == 0.0F,
@@ -221,7 +234,7 @@ void observerNoSupportTimeoutIsNotGroundContact() {
   LandingController ctrl(cfg);
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
 
   state.floor_contact = false;
   state.left_floor_contact = false;
@@ -245,7 +258,7 @@ void touchdownCandidateWaitsForStableSupport() {
   LandingController ctrl(cfg);
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
 
   state.floor_contact = false;
   state.left_floor_contact = false;
@@ -277,29 +290,27 @@ void hardImuShockFollowedByContactEntersImpact() {
   LandingController::Config cfg;
   cfg.enabled = true;
   cfg.min_flight_before_impact_s = 0.02F;
-  cfg.impact_accel_mps2 = 20.0F;
-  cfg.impact_pitch_rate_rad_s = 1.0F;
   cfg.height_kd_n_s_m = 20.0F;
   cfg.max_feedforward_torque_nm = 0.5F;
   LandingController ctrl(cfg);
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   state.left_floor_contact = false;
   state.right_floor_contact = false;
   for (int i = 0; i < 5; ++i) {
     state.imu.accel_magnitude_m_s2 = 100.0F;
     state.imu.pitch_rate_rad_s = 8.0F;
-    (void)ctrl.update(state, target);
+    (void)sensorUpdate(ctrl, state, target);
   }
 
   state.floor_contact = true;
   state.left_floor_contact = true;
   state.right_floor_contact = true;
   state.imu.hard_impact_event = true;
-  const auto out = ctrl.update(state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   check(out.phase == LandingController::Phase::Impact &&
             !out.suspend_wheel_balance,
         "LandingController: a later validated contact creates Impact after an IMU shock");
@@ -315,24 +326,63 @@ void impactFeedforwardOnlyOnContactedSide() {
   RobotState state = baseState();
   JointArray target = state.joints.position_rad;
 
-  (void)ctrl.update(state, target);
+  (void)sensorUpdate(ctrl, state, target);
   state.floor_contact = false;
   state.left_floor_contact = false;
   state.right_floor_contact = false;
   for (int i = 0; i < 4; ++i) {
-    (void)ctrl.update(state, target);
+    (void)sensorUpdate(ctrl, state, target);
   }
   state.floor_contact = true;
   state.left_floor_contact = true;
   state.right_floor_contact = false;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -4.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -4.0F;
-  const auto out = ctrl.update(state, target);
+  const auto out = sensorUpdate(ctrl, state, target);
   check(out.phase == LandingController::Phase::Impact &&
             std::abs(out.feedforward_nm[static_cast<std::size_t>(JointId::LeftKnee)]) > 1.0e-5F &&
             out.feedforward_nm[static_cast<std::size_t>(JointId::RightHip)] == 0.0F &&
             out.feedforward_nm[static_cast<std::size_t>(JointId::RightKnee)] == 0.0F,
         "LandingController: Impact feedforward applies only to contacted side");
+}
+
+void recoveryDriveHandoffIsBoundedAndRamps() {
+  LandingController::Config cfg;
+  cfg.enabled = true;
+  cfg.min_flight_before_impact_s = 0.01F;
+  cfg.min_impact_s = 0.01F;
+  cfg.max_impact_s = 0.02F;
+  cfg.recovery_blend_s = 0.01F;
+  cfg.recovery_drive_ramp_s = 0.10F;
+  LandingController ctrl(cfg);
+  RobotState state = baseState();
+  JointArray target = state.joints.position_rad;
+  (void)sensorUpdate(ctrl, state, target);
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  (void)sensorUpdate(ctrl, state, target);
+  state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = true;
+  auto out = sensorUpdate(ctrl, state, target);
+  check(out.drive_velocity_scale == 0.0F,
+        "LandingController: drive handoff blocks command during Impact");
+
+  state.imu.pitch_rate_rad_s = 0.0F;
+  state.joints.velocity_rad_s.fill(0.0F);
+  for (int i = 0; i < 2; ++i) {
+    out = sensorUpdate(ctrl, state, target);
+  }
+  check(out.phase == LandingController::Phase::Grounded &&
+            out.drive_velocity_scale > 0.0F &&
+            out.drive_velocity_scale < 1.0F,
+        "LandingController: drive handoff ramps after Grounded");
+  for (int i = 0; i < 20; ++i) {
+    out = sensorUpdate(ctrl, state, target);
+  }
+  check(out.drive_velocity_scale == 1.0F,
+        "LandingController: drive handoff returns full command");
 }
 
 void embeddedControllerDefaultLandingControllerIsNoOp() {
@@ -376,6 +426,7 @@ int main() {
   touchdownCandidateWaitsForStableSupport();
   hardImuShockFollowedByContactEntersImpact();
   impactFeedforwardOnlyOnContactedSide();
+  recoveryDriveHandoffIsBoundedAndRamps();
   embeddedControllerDefaultLandingControllerIsNoOp();
   std::cout << (failures == 0 ? "ALL PASS\n" : "FAILURES PRESENT\n");
   return failures == 0 ? 0 : 1;

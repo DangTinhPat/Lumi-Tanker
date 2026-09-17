@@ -2,8 +2,8 @@
 # Matched log/jump_1789205832822611013: 6.83 cm COM rise, failed landing.
 balance_controller_node:
   ros__parameters:
-    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
-    jump.enabled: true
+    pitch_source: imu
+    jump.enabled: false  # disabled: no contact/world-pose sensor in hardware contract
     jump.wheel_frame_compensation: true
     jump.profile: manual_curve_experimental
     jump.crouch_knee_rad: -1.6
@@ -22,10 +22,8 @@ balance_controller_node:
     jump.leg_torque_limit_nm: 5.0
     jump.wheel_torque_limit_nm: 0.13
     jump.contact_timeout_s: 0.05
-    jump.left_contacts_topic: left_wheel_contacts
-    jump.right_contacts_topic: right_wheel_contacts
     jump.ground_collision: ground_plane
-    station_keeper.enabled: true
+    station_keeper.enabled: false  # disabled: no absolute x/y/yaw sensor
     mpc.min_pendulum_length: 0.125
     mpc.max_ground_accel: 2.0
     mpc.max_ground_velocity: 0.35

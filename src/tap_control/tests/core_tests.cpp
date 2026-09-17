@@ -481,14 +481,11 @@ void landingReflexStillRunsWhenFallenTests() {
   command.request_enable = false;
   (void)controller.update(state, command);
 
-  state.floor_contact = false;
-  state.left_floor_contact = false;
-  state.right_floor_contact = false;
   state.imu.accel_magnitude_m_s2 = 0.2F;
   // Give the observer enough real samples to confirm support loss before
   // applying a large pitch disturbance. A one-tick contact gap is deliberately
   // not a landing event anymore.
-  for (int i = 0; i < 20; ++i) (void)controller.update(state, command);
+  for (int i = 0; i < 40; ++i) (void)controller.update(state, command);
   state.imu.pitch_rad = config.mpc.fall_pitch_rad + .05F;
   const auto out = controller.update(state, command);
   constexpr auto lk = static_cast<std::size_t>(JointId::LeftKnee);
@@ -572,9 +569,8 @@ void trajectoryObserverFeedsLandingCaptureTests() {
 
   state.wheel.left_position_m = 0.010F;
   state.wheel.right_position_m = 0.010F;
-  state.floor_contact = false;
-  state.left_floor_contact = false;
-  state.right_floor_contact = false;
+  state.imu.accel_magnitude_m_s2 = 0.2F;
+  for (int i = 0; i < 20; ++i) (void)controller.update(state, command);
   const auto out = controller.update(state, command);
   constexpr auto lh = static_cast<std::size_t>(JointId::LeftHip);
   constexpr auto rh = static_cast<std::size_t>(JointId::RightHip);
@@ -619,14 +615,12 @@ void trajectoryObserverLatchesSupportedVelocityAtLiftoffTests() {
 
   // The first airborne encoder sample is unloaded and reports zero.  The
   // landing input must remain the last supported +0.7 m/s, not collapse to 0.
-  state.floor_contact = false;
-  state.left_floor_contact = false;
-  state.right_floor_contact = false;
   state.wheel.left_position_m = 0.007F;
   state.wheel.right_position_m = 0.007F;
   state.wheel.left_velocity_m_s = 0.0F;
   state.wheel.right_velocity_m_s = 0.0F;
-  (void)controller.update(state, command);
+  state.imu.accel_magnitude_m_s2 = 0.2F;
+  for (int i = 0; i < 20; ++i) (void)controller.update(state, command);
   check(controller.landingUsesTrajectoryObserver() &&
             near(controller.landingForwardVelocity(), 0.7F, 1.0e-4F),
         "liftoff latch keeps the last supported velocity when encoders unload");

@@ -26,10 +26,9 @@ namespace robot_control {
 // "Real-time Optimal Landing Control of the MIT Mini Cheetah" (arXiv
 // 2110.02799) adapted to this robot's one real remaining degree of freedom.
 //
-// The airborne signal reused here (`floor_contact` false) is the SAME
-// pitch/height-based simulation contact inference already gating
-// MpcBalancer's landing_window (see BalanceControllerNode's sim_pose contact
-// check) - no new sensor, no ROS dependency added to this class.
+// The airborne signal reused here (`floor_contact` false) is the same
+// sensor-derived support hypothesis produced by FlightObserver from MPU6500
+// specific force and encoder evidence; no simulator pose/contact API is used.
 //
 // All gains default to 0 (crouch 0, hip gain 0, roll gain 0): `update()` then
 // always returns an all-zero offset for any floor_contact/pitch_rate/dt
@@ -85,7 +84,7 @@ class LandingReflex {
     float active_extension_delay_s = 0.0F;
     // Optional IMU specific-force pre-arm. Contact loss can arrive late or
     // flicker on the ledge; a real IMU reads low specific force during
-    // unloading/free fall before a reliable wheel-contact edge. 0 disables.
+    // unloading/free fall before a reliable support-hypothesis edge. 0 disables.
     float unloading_accel_mps2 = 0.0F;
     // Limit how fast the reflex target may move once active. 0 disables the
     // slew limiter and preserves the historical instantaneous offset.
@@ -98,8 +97,8 @@ class LandingReflex {
     // Debounce: a touchdown_edge is only honored once at least this much time
     // has elapsed since the liftoff_edge that opened the current Airborne
     // phase. Measured directly against a real 20 cm/1.0 m/s ledge drive-off
-    // (see docs/LEDGE_DRIVEOFF_LIMIT.md): the sim_pose floor_contact heuristic
-    // (BalanceControllerNode's z/pitch thresholds) can read a single spurious
+    // (see docs/LEDGE_DRIVEOFF_LIMIT.md): a transient support hypothesis can
+    // read a single spurious
     // "grounded" tick within ~10-50 ms of actually leaving the pad, well
     // before the robot has fallen any meaningful distance -- without this
     // guard that single tick fires touchdown_edge immediately, collapsing the

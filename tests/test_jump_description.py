@@ -1,4 +1,4 @@
-"""Opt-in actuator/contact contracts without launching Gazebo."""
+"""Opt-in actuator contracts without launching Gazebo or exporting truth."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -36,17 +36,12 @@ class JumpDescriptionTests(unittest.TestCase):
             self.assertEqual(float(joint.find('limit').get('effort')), .13 if wheel else 5)
             self.assertEqual(float(joint.find('limit').get('velocity')), 1000)
             self.assertEqual(float(joint.find('dynamics').get('damping')), .001 if wheel else .02)
-        for side in ('left', 'right'):
-            sensor = jump.find(f"gazebo[@reference='cad_{side}_wheel_link']/sensor")
-            # Friction and sensor are separate gazebo elements, so search all references.
-            sensors = [s for g in jump.findall(f"gazebo[@reference='cad_{side}_wheel_link']") for s in g.findall('sensor')]
-            self.assertEqual(len(sensors), 1)
-            self.assertEqual(sensors[0].find('topic').text, f'/{side}_wheel_contacts')
-            self.assertEqual(sensors[0].find('contact/collision').text, f'cad_{side}_wheel_link_collision_collision')
-            self.assertEqual(sensors[0].find('contact/topic').text, f'/{side}_wheel_contacts_raw')
-        snapshot = jump.find(".//plugin[@name='tap_sim::ContactSnapshot']")
-        self.assertIsNotNone(snapshot)
-        self.assertIsNone(normal.find(".//plugin[@name='tap_sim::ContactSnapshot']"))
+        # Contact and model-pose telemetry are permanently excluded. Landing
+        # phase is inferred by the controller from MPU6500 data and encoders.
+        self.assertEqual(len(jump.findall(".//sensor[@type='contact']")), 0)
+        self.assertEqual(len(normal.findall(".//sensor[@type='contact']")), 0)
+        self.assertIsNone(jump.find(".//plugin[@name='tap_sim::ContactSnapshot']"))
+        self.assertIsNone(jump.find(".//plugin[@name='gz::sim::systems::PosePublisher']"))
         self.assertEqual(len(normal.findall(".//sensor[@type='contact']")), 0)
 
     def test_experimental_speed_is_explicit(self):
@@ -58,7 +53,7 @@ class JumpDescriptionTests(unittest.TestCase):
         self.assertEqual(float(robot.find("ros2_control/hardware/param[@name='leg_velocity_damping']").text), .2)
 
     @unittest.skipUnless(shutil.which('gz'), 'Gazebo SDF CLI unavailable')
-    def test_converted_sdf_contact_references_exist(self):
+    def test_converted_sdf_has_no_truth_sensor(self):
         xml = xacro.process_file(str(MODEL), mappings={'jump_model': 'true'}).toxml()
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / 'robot.urdf'
@@ -70,10 +65,7 @@ class JumpDescriptionTests(unittest.TestCase):
         self.assertEqual(len(joints), 6)
         for joint in joints:
             self.assertEqual(float(joint.find('axis/limit/velocity').text), 1000)
-        for side in ('left', 'right'):
-            link = sdf.find(f"model/link[@name='cad_{side}_wheel_link']")
-            reference = link.find('sensor/contact/collision').text
-            self.assertIsNotNone(link.find(f"collision[@name='{reference}']"))
+        self.assertEqual(len(sdf.findall(".//sensor[@type='contact']")), 0)
 
 
 if __name__ == '__main__':

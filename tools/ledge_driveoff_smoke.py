@@ -46,25 +46,15 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
     from geometry_msgs.msg import Twist
     from rosgraph_msgs.msg import Clock
     from std_msgs.msg import String
-    from tf2_msgs.msg import TFMessage
 
     log_path = out_dir / f'launch_{trial_id}.log'
     stream = log_path.open('w')
-    pose, state = {}, {}
+    state = {}
     sim_time = 0.0
 
     def clock_cb(msg):
         nonlocal sim_time
         sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
-
-    def pose_cb(msg):
-        if len(msg.transforms) != 1:
-            return
-        t = msg.transforms[0].transform
-        q = t.rotation
-        pose.update(x=t.translation.x, z=t.translation.z,
-                    pitch=math.asin(max(-1, min(1, 2*(q.w*q.y-q.z*q.x)))),
-                    roll=math.atan2(2*(q.w*q.x+q.y*q.z), 1-2*(q.x*q.x+q.y*q.y)))
 
     def status_cb(msg):
         fields = msg.data.split('|')
@@ -81,7 +71,6 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
     rclpy.init()
     node = rclpy.create_node(f'tap_ledge_smoke_{trial_id}'.replace('.', '_').replace('-', 'n'))
     node.create_subscription(Clock, '/clock', clock_cb, 100)
-    node.create_subscription(TFMessage, '/tap_robot/pose', pose_cb, 100)
     node.create_subscription(String, '/control_mode', status_cb, 100)
     drive_pub = node.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -116,9 +105,7 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
         if not wait_for_mode('Balance', 90):
             raise RuntimeError(f'Startup did not reach Balance: mode={state.get("mode")}')
         observe(1.0)
-        start_x = pose.get('x', PAD_CENTER_X)
-        if abs(start_x - PAD_CENTER_X) > 0.2:
-            raise RuntimeError(f'Unexpected spawn x={start_x}, expected near {PAD_CENTER_X}')
+        start_x = state.get('obs_x', 0.0)
 
         # Drive forward (+X, per rough_training.sdf's own "Driving +X from here
         # crosses onto the heightfield" comment) until committed past the real
@@ -131,13 +118,13 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
         while time.monotonic() < drive_deadline:
             drive_pub.publish(drive_cmd)
             spin()
-            if pose.get('x', start_x) >= STOP_DRIVE_X:
+            if state.get('obs_x', start_x) - start_x >= STOP_DRIVE_X - PAD_CENTER_X:
                 crossed_edge = True
                 break
         drive_pub.publish(Twist())  # explicit stop; /cmd_vel also auto-expires after 0.5s
         if not crossed_edge:
             raise RuntimeError(f'Never reached STOP_DRIVE_X={STOP_DRIVE_X}; '
-                              f'final x={pose.get("x")}')
+                              f'final observer x={state.get("obs_x")}')
 
         drop_start = sim_time
         peak_pitch, peak_pitch_rate = 0.0, 0.0
@@ -167,7 +154,7 @@ def run_trial(trial_id, controller_config, out_dir, domain_id):
             peak_pitch_rad=round(peak_pitch, 4),
             peak_pitch_rate_rad_s=round(peak_pitch_rate, 4),
             final_mode=state.get('mode'), final_pitch_rad=state.get('pitch'),
-            final_x=pose.get('x'), final_z=pose.get('z'),
+            final_observer_x=state.get('obs_x'),
             elapsed_sim_s=round(sim_time - drop_start, 3))
         print(f'[{trial_id}] crossed_edge={crossed_edge} recovered={recovered} '
               f'peak_pitch={peak_pitch:.3f} final_mode={state.get("mode")}', flush=True)

@@ -4,11 +4,11 @@
 # jump_leg_velocity_damping:=0.6. Default profiles remain unchanged.
 balance_controller_node:
   ros__parameters:
-    pitch_source: sim_pose  # jump/station_keeper world-frame tracking needs real position, not just IMU pitch -- see docs/RULES.md Rule 1
+    pitch_source: imu
     jump.plan_preparation_wait_s: 8.0
     jump.crouch_duration_s: 11.0
     jump.crouch_knee_rad: -1.6
-    jump.enabled: true
+    jump.enabled: false  # disabled: no contact/world-pose sensor in hardware contract
     jump.extension_knee_rad: 0.0
     jump.landing_knee_rad: -0.6
     jump.leg_torque_limit_nm: 5.0
@@ -10485,7 +10485,7 @@ balance_controller_node:
     pose_knee_max_rad: 0.2
     pose_knee_min_rad: -1.6
     station_keeper.acquire_dwell_s: 0.5
-    station_keeper.enabled: true
+    station_keeper.enabled: false  # disabled: no absolute x/y/yaw sensor
     station_keeper.max_forward_m_s: 0.08
     station_keeper.max_yaw_rad_s: 0.25
     station_keeper.position_gain_hz: 3.0

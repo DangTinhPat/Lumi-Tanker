@@ -28,23 +28,25 @@ void shortStepDoesNotBecomeFlight() {
   auto state = baseState();
   observer.reset(state);
   for (int i = 0; i < 5; ++i) {
-    state.floor_contact = false;
+    // There is no contact switch in the hardware contract. A brief
+    // non-ballistic interval is therefore only a normal supported sample.
+    state.imu.accel_magnitude_m_s2 = 9.81F;
     const auto out = observer.update(state);
     check(!out.support_lost && !out.airborne,
-          "short contact gap remains transient unloading");
+          "non-ballistic interval remains grounded");
   }
-  state.floor_contact = true;
   const auto out = observer.update(state);
   check(out.phase == FlightObserver::Phase::Grounded,
-        "short step returns directly to grounded");
+        "supported IMU samples remain grounded");
 }
 
 void BallisticFlightRequiresDebouncedLoss() {
   FlightObserver observer;
   auto state = baseState();
   observer.reset(state);
-  for (int i = 0; i < 20; ++i) {
-    state.floor_contact = false;
+  // Support loss has two sequential debounce windows: free-fall detection
+  // followed by support-loss confirmation.
+  for (int i = 0; i < 40; ++i) {
     state.imu.accel_magnitude_m_s2 = 0.2F;
     (void)observer.update(state);
   }
@@ -59,46 +61,26 @@ void EdgeShockIsNotTouchdown() {
   FlightObserver observer;
   auto state = baseState();
   observer.reset(state);
-  state.floor_contact = false;
-  state.imu.accel_magnitude_m_s2 = 40.0F;
-  for (int i = 0; i < 40; ++i) {
-    const auto out = observer.update(state);
-    if (i == 30) {
-      check(out.collision_candidate,
-            "airborne shock is collision candidate");
-    }
-  }
-  state.floor_contact = true;
-  state.left_floor_contact = true;
-  state.right_floor_contact = true;
-  auto out = observer.update(state);
-  check(out.touchdown_candidate && out.airborne,
-        "first re-contact remains touchdown candidate");
-  out = observer.update(state);
-  check(out.touchdown_candidate && out.airborne,
-        "touchdown candidate persists during contact debounce");
-  for (int i = 0; i < 20; ++i) out = observer.update(state);
-  check(out.phase == FlightObserver::Phase::Grounded,
-        "persistent re-contact validates touchdown");
-}
-
-void PartialSupportIsNotFlight() {
-  FlightObserver observer;
-  auto state = baseState();
-  state.right_floor_contact = false;
-  observer.reset(state);
-  const auto out = observer.update(state);
-  check(out.phase == FlightObserver::Phase::PartialSupport &&
-            !out.airborne && out.support_settling,
-        "one-sided support is partial support");
-
-  for (int i = 0; i < 120; ++i) {
+  for (int i = 0; i < 20; ++i) {
+    state.imu.accel_magnitude_m_s2 = 0.2F;
     (void)observer.update(state);
   }
-  const auto settled = observer.update(state);
-  check(settled.phase == FlightObserver::Phase::PartialSupport &&
-            !settled.airborne && !settled.support_settling,
-        "partial support settling expires after the support contract dwell");
+  bool saw_collision = false;
+  for (int i = 0; i < 40; ++i) {
+    state.imu.accel_magnitude_m_s2 = 40.0F;
+    state.imu.hard_impact_event = true;
+    const auto out = observer.update(state);
+    saw_collision = saw_collision || out.collision_candidate;
+  }
+  check(saw_collision, "IMU shock becomes collision candidate");
+  state.imu.hard_impact_event = false;
+  state.imu.accel_magnitude_m_s2 = 9.81F;
+  auto out = observer.update(state);
+  check(out.touchdown_candidate && out.airborne,
+        "impact recovery starts as touchdown candidate");
+  for (int i = 0; i < 20; ++i) out = observer.update(state);
+  check(out.phase == FlightObserver::Phase::Grounded,
+        "persistent IMU support validates touchdown");
 }
 }  // namespace
 
@@ -106,6 +88,5 @@ int main() {
   shortStepDoesNotBecomeFlight();
   BallisticFlightRequiresDebouncedLoss();
   EdgeShockIsNotTouchdown();
-  PartialSupportIsNotFlight();
   return failures == 0 ? 0 : 1;
 }

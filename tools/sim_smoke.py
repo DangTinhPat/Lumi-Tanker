@@ -15,7 +15,6 @@ import rclpy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64MultiArray, String
-from tf2_msgs.msg import TFMessage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,20 +41,8 @@ def main():
     out = ROOT / 'log' / f'smoke_{int(time.time())}'
     out.mkdir(parents=True, exist_ok=True)
     samples, wheels, legs = [], [], []
-    actual_pose = {}
     actual_joints = {}
     stage = 'startup'
-
-    def model_pose(msg):
-        if len(msg.transforms) != 1:
-            return
-        transform = msg.transforms[0].transform
-        p, q = transform.translation, transform.rotation
-        actual_pose.update(base_x=p.x, base_y=p.y, base_z=p.z,
-                           roll=math.atan2(2 * (q.w*q.x + q.y*q.z),
-                                           1 - 2 * (q.x*q.x + q.y*q.y)),
-                           yaw=math.atan2(2 * (q.w*q.z + q.x*q.y),
-                                          1 - 2 * (q.y*q.y + q.z*q.z)))
 
     def joint_state(msg):
         actual_joints.update(zip(msg.name, msg.position))
@@ -63,7 +50,6 @@ def main():
     def status(msg):
         fields = msg.data.split('|')
         row = {'mode': fields[0], 'stage': stage, 'wall': time.monotonic()}
-        row.update(actual_pose)
         row['joint_positions'] = dict(actual_joints)
         for field in fields[1:]:
             if '=' in field:
@@ -79,8 +65,7 @@ def main():
     cleanup_result = None
     rclpy.init()
     node = rclpy.create_node('tap_smoke')
-    subscriptions = [node.create_subscription(TFMessage, '/tap_robot/pose', model_pose, 100),
-                     node.create_subscription(JointState, '/joint_states', joint_state, 100),
+    subscriptions = [node.create_subscription(JointState, '/joint_states', joint_state, 100),
                      node.create_subscription(String, '/control_mode', status, 100),
                      node.create_subscription(Float64MultiArray, '/wheel_effort_controller/commands',
                                               lambda m: wheels.append(list(m.data)), 10),
@@ -153,10 +138,10 @@ def main():
             if elapsed < duration:
                 raise RuntimeError(f'{stage}: insufficient simulated observation ({elapsed:.2f}s)')
             rows = [row for row in samples if row['stage'] == stage]
-            if not all('base_x' in row for row in rows):
-                raise RuntimeError(f'{stage}: missing independent model pose')
-            dx = rows[-1]['base_x'] - rows[0]['base_x']
-            dy = rows[-1]['base_y'] - rows[0]['base_y']
+            if not all('obs_x' in row and 'obs_y' in row for row in rows):
+                raise RuntimeError(f'{stage}: missing encoder trajectory observer')
+            dx = rows[-1]['obs_x'] - rows[0]['obs_x']
+            dy = rows[-1]['obs_y'] - rows[0]['obs_y']
             if stage == 'hold' and math.hypot(dx, dy) > .10:
                 raise RuntimeError(f'Hold drift exceeds 0.10 m: {math.hypot(dx, dy):.3f}')
             if stage in ('forward', 'stop_after_forward', 'backward',
@@ -220,15 +205,13 @@ def main():
                 'max_pitch_error_rad': max(abs(r.get('pitch', 0) - r.get('pitch_ref', 0)) for r in rows),
                 'wheel_displacement_m': rows[-1].get('wheel_pos', 0) - rows[0].get('wheel_pos', 0),
                 'modes': sorted({r['mode'] for r in rows}),
-                'base_dx_m': rows[-1].get('base_x', 0) - rows[0].get('base_x', 0),
-                'base_dy_m': rows[-1].get('base_y', 0) - rows[0].get('base_y', 0),
+                'observer_dx_m': rows[-1].get('obs_x', 0) - rows[0].get('obs_x', 0),
+                'observer_dy_m': rows[-1].get('obs_y', 0) - rows[0].get('obs_y', 0),
                 'yaw_change_rad': math.remainder(rows[-1].get('yaw', 0) - rows[0].get('yaw', 0),
                                                 2 * math.pi),
                 'final_wheel_velocity_m_s': rows[-1].get('wheel_vel'),
                 'final_joint_positions': rows[-1].get('joint_positions'),
                 'roll_change_rad': rows[-1].get('roll', 0) - rows[0].get('roll', 0),
-                'observer_dx_m': rows[-1].get('obs_x', 0) - rows[0].get('obs_x', 0),
-                'observer_dy_m': rows[-1].get('obs_y', 0) - rows[0].get('obs_y', 0),
                 'observer_final_velocity_m_s': rows[-1].get('obs_v'),
                 'observer_confidence': rows[-1].get('obs_conf'),
             }

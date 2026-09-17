@@ -18,11 +18,8 @@ balance_controller_node:
     # (b) an initial covariance P=1.0 that contradicted the reference's own
     # documented design (P=0 - fully trust the seeded angle) (fixed).
     # kalman_r_measure raised from the reference's stock 0.03 to 0.1,
-    # measured to clear the "hold" stage cleanly. jump.enabled and
-    # station_keeper.enabled still hard-require sim_pose (world-frame
-    # position has no sensor-backed estimate here yet - a different,
-    # unsolved problem from pitch) and pin it explicitly in their own
-    # config files.
+    # measured to clear the "hold" stage cleanly.  The only accepted pitch
+    # source is the MPU6500 accelerometer/gyro estimator below.
     pitch_source: imu
     kalman_r_measure: 0.1
     # Distrust the accelerometer-derived pitch measurement (raise its
@@ -34,11 +31,6 @@ balance_controller_node:
     # the 0.4 m/s^2 deadband, did regress Hold - see that comment for the
     # full history). 0.0 disables this entirely (pre-2026-09-15 behavior).
     kalman_accel_trust_gain: 40.0
-    sim_pose_topic: /tap_robot/pose
-    sim_pose_child_frame: tap_robot
-    sim_pose_index: 0
-    sim_contact_min_base_z_m: 0.10
-    sim_contact_max_pitch_rad: 0.8
     sensor_timeout_s: 0.15
     sensor_stale_grace_cycles: 8
     pitch_offset_rad: 0.0
@@ -90,9 +82,9 @@ balance_controller_node:
       # at amount=.25, a ~6.3% height drop, a real, visible partial crouch.
       # A near-identical knee bend (-0.2 rad, half this depth) was tried and
       # reverted earlier this session because it dropped the 20cm ledge
-      # drive-off stock baseline from 45-70% to 10% under the THEN-active
-      # sim_pose (ground truth) pitch default. That specific comparison is
-      # no longer measurable: the ledge baseline has since collapsed to
+      # drive-off stock baseline from 45-70% to 10% under the obsolete
+      # simulator-pose pitch path. That comparison is not a valid sensor-only
+      # baseline and is no longer used: the ledge baseline has since collapsed to
       # 0/10 under the pitch_source:imu default (see
       # docs/LEDGE_DRIVEOFF_LIMIT.md's "Known regression" section) for
       # reasons unrelated to stance - there is no non-zero baseline left for

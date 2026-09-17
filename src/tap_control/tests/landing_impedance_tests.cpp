@@ -298,23 +298,21 @@ void embeddedControllerAppliesScaleToKneeOnlyNotHip() {
   controller.reset(state);
   MotorCommand out{};
   for (int i = 0; i < 200; ++i) {
-    state.floor_contact = true;
-    state.left_floor_contact = true;
-    state.right_floor_contact = true;
+    state.imu.accel_magnitude_m_s2 = 9.81F;
     out = controller.update(state, command);
   }
   for (int i = 0; i < 20; ++i) {
-    state.floor_contact = false;
-    state.left_floor_contact = false;
-    state.right_floor_contact = false;
+    state.imu.accel_magnitude_m_s2 = 0.2F;
     out = controller.update(state, command);
   }
   // Touchdown with a real compression velocity on the knee, both sides.
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -2.0F;
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -2.0F;
-  state.floor_contact = true;
-  state.left_floor_contact = true;
-  state.right_floor_contact = true;
+  state.imu.accel_magnitude_m_s2 = 40.0F;
+  state.imu.hard_impact_event = true;
+  for (int i = 0; i < 10; ++i) out = controller.update(state, command);
+  state.imu.hard_impact_event = false;
+  state.imu.accel_magnitude_m_s2 = 9.81F;
   out = controller.update(state, command);
 
   constexpr auto lh = static_cast<std::size_t>(JointId::LeftHip);
@@ -355,33 +353,32 @@ void embeddedControllerAsymmetricLandingOnlySoftensOneKnee() {
   controller.reset(state);
   MotorCommand out{};
   for (int i = 0; i < 200; ++i) {
-    state.floor_contact = true;
-    state.left_floor_contact = true;
-    state.right_floor_contact = true;
+    state.imu.accel_magnitude_m_s2 = 9.81F;
     out = controller.update(state, command);
   }
   for (int i = 0; i < 20; ++i) {
-    state.floor_contact = false;
-    state.left_floor_contact = false;
-    state.right_floor_contact = false;
+    state.imu.accel_magnitude_m_s2 = 0.2F;
     out = controller.update(state, command);
   }
-  // Only the LEFT wheel touches down hard; right is still airborne - the
-  // ROLL case this whole rewrite exists for.
+  // With the actual hardware contract the IMU cannot identify which wheel
+  // touched first. The controller must therefore apply the bilateral support
+  // hypothesis symmetrically, rather than smuggling in per-side contact GT.
   state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::LeftKnee)] = -2.0F;
-  state.floor_contact = true;
-  state.left_floor_contact = true;
-  state.right_floor_contact = false;
+  state.joints.velocity_rad_s[static_cast<std::size_t>(JointId::RightKnee)] = -2.0F;
+  state.imu.accel_magnitude_m_s2 = 40.0F;
+  state.imu.hard_impact_event = true;
+  for (int i = 0; i < 10; ++i) out = controller.update(state, command);
+  state.imu.hard_impact_event = false;
+  state.imu.accel_magnitude_m_s2 = 9.81F;
   out = controller.update(state, command);
 
   constexpr auto lk = static_cast<std::size_t>(JointId::LeftKnee);
   constexpr auto rk = static_cast<std::size_t>(JointId::RightKnee);
   check(out.kp_scale[lk] < 0.9F && out.kd_scale[lk] > 1.1F,
-        "EmbeddedController: an asymmetric landing softens/damps the knee "
-        "that actually touched down (left)");
-  check(out.kp_scale[rk] == 1.0F && out.kd_scale[rk] == 1.0F,
-        "EmbeddedController: ... and leaves the still-airborne knee (right) "
-        "at normal stiffness, unlike the old combined-both-sides version");
+        "EmbeddedController: sensor-only touchdown softens/damps left knee");
+  check(out.kp_scale[rk] < 0.9F && out.kd_scale[rk] > 1.1F,
+        "EmbeddedController: sensor-only touchdown uses bilateral support "
+        "when per-side contact is unobservable");
 }
 }  // namespace
 

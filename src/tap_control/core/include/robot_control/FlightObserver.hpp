@@ -5,9 +5,10 @@
 namespace robot_control {
 
 // Sensor-backed support/flight observer for wheel-legged motion. It does not
-// estimate absolute terrain height: with IMU + encoders that quantity is not
-// observable during flight. Its job is to separate brief unloading over a
-// short step, true loss of support, edge collision, and re-contact.
+// consume RobotState::floor_contact as an input: that field may be simulator
+// telemetry at a ROS boundary. Support is hypothesized from MPU6500
+// specific-force/gyro events; absolute terrain height is unobservable with
+// MPU6500 + encoders.
 class FlightObserver {
  public:
   enum class Phase {
@@ -49,6 +50,11 @@ class FlightObserver {
     bool ballistic = false;
     bool collision_candidate = false;
     bool touchdown_candidate = false;
+    // Sensor-only support hypothesis consumed by EmbeddedController. This is
+    // not a measured contact flag or Gazebo ground truth.
+    bool support_contact = true;
+    bool left_support_contact = true;
+    bool right_support_contact = true;
     float support_loss_elapsed_s = 0.0F;
     float flight_time_s = 0.0F;
     // Positive means downward. This is a ballistic estimate initialized from
@@ -71,6 +77,7 @@ class FlightObserver {
  private:
   [[nodiscard]] Output makeOutput(bool partial_support) const;
   [[nodiscard]] bool finiteInput(const RobotState& state) const noexcept;
+  void updateSupportHypothesis(const RobotState& state, float dt) noexcept;
 
   Config config_;
   Phase phase_ = Phase::Grounded;
@@ -83,6 +90,11 @@ class FlightObserver {
   float support_settle_elapsed_s_ = 0.0F;
   bool support_settle_active_ = false;
   float downward_velocity_m_s_ = 0.0F;
+  bool support_contact_ = true;
+  bool sensor_touchdown_candidate_ = false;
+  float sensor_free_fall_elapsed_s_ = 0.0F;
+  float sensor_collision_elapsed_s_ = 0.0F;
+  float sensor_touchdown_elapsed_s_ = 0.0F;
 };
 
 [[nodiscard]] const char* toString(FlightObserver::Phase phase) noexcept;

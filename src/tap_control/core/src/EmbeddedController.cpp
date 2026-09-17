@@ -169,7 +169,12 @@ MpcBalancer::DebugState EmbeddedController::mpcDebugState() const noexcept {
 }
 
 void EmbeddedController::reset(const RobotState& state) {
-  resetBalance(state.wheel.position_m, state.floor_contact);
+  // Reset is called at a sensor-stream boundary where a ROS adapter may still
+  // contain simulator telemetry in the legacy contact fields.  Do not seed
+  // any controller state from those fields.  The reset contract is a neutral
+  // startup assumption; the first update() immediately replaces the local
+  // contact hypothesis from FlightObserver's MPU6500 signals.
+  resetBalance(state.wheel.position_m, true);
   setBalanceFallPitch(config_.mpc.fall_pitch_rad);
   joint_motion_.reset(state.joints.position_rad);
   state_machine_.reset();
@@ -179,10 +184,9 @@ void EmbeddedController::reset(const RobotState& state) {
   station_dwell_s_ = 0.0F;
   landing_recovery_hold_elapsed_s_ = 0.0F;
   last_whole_body_ = WholeBodyModel::Result{};
-  landing_reflex_.reset(state.floor_contact);
-  landing_impedance_.reset(state.left_floor_contact, state.right_floor_contact);
-  landing_controller_.reset(state.floor_contact, state.left_floor_contact,
-                             state.right_floor_contact);
+  landing_reflex_.reset(true);
+  landing_impedance_.reset(true, true);
+  landing_controller_.reset();
   flight_observer_.reset(state);
   trajectory_observer_.reset(state);
   last_landing_output_ = LandingController::Output{};
@@ -202,18 +206,22 @@ bool EmbeddedController::standingUp() const noexcept {
   return stand_up_stage_ != StandUpStage::Idle;
 }
 
-MotorCommand EmbeddedController::update(const RobotState& state,
+MotorCommand EmbeddedController::update(const RobotState& input_state,
                                         const ControlCommand& input) {
-  if (!validInput(state, input)) {
-    RobotState invalid = state;
+  if (!validInput(input_state, input)) {
+    RobotState invalid = input_state;
     invalid.emergency_stop = true;
     (void)state_machine_.update(invalid, {}, false, false);
-    finishStandUp(state);
-    joint_motion_.reset(state.joints.position_rad);
+    finishStandUp(input_state);
+    joint_motion_.reset(input_state.joints.position_rad);
     MotorCommand safe;
-    writeSafeStop(safe, state);
+    writeSafeStop(safe, input_state);
     return safe;
   }
+  // Contact fields arriving from a ROS adapter are not trusted. The flight
+  // observer derives a support hypothesis from MPU6500 signals; all landing,
+  // state-machine and MPC decisions below use this local sensor-derived copy.
+  RobotState state = input_state;
   ControlCommand command = input;
   command.target_joint_position_rad = standUpPose(input.target_joint_position_rad);
   if (command.request_pose_change && !joint_motion_.active() &&
@@ -226,6 +234,9 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   const ControlMode previous_mode = state_machine_.mode();
   last_trajectory_estimate_ = trajectory_observer_.update(state);
   last_flight_estimate_ = flight_observer_.update(state);
+  state.floor_contact = last_flight_estimate_.support_contact;
+  state.left_floor_contact = last_flight_estimate_.left_support_contact;
+  state.right_floor_contact = last_flight_estimate_.right_support_contact;
   const ControlMode mode = state_machine_.update(
       state, command, joint_motion_.active(), standingUp(),
       last_flight_estimate_.airborne || last_flight_estimate_.support_settling);
@@ -237,8 +248,7 @@ MotorCommand EmbeddedController::update(const RobotState& state,
     // before the mode left balancing.
     landing_reflex_.reset(state.floor_contact);
     landing_impedance_.reset(state.left_floor_contact, state.right_floor_contact);
-    landing_controller_.reset(state.floor_contact, state.left_floor_contact,
-                               state.right_floor_contact);
+    landing_controller_.reset();
     flight_observer_.reset(state);
     trajectory_observer_.reset(state);
     last_flight_estimate_ = FlightObserver::Output{};
@@ -337,6 +347,17 @@ MotorCommand EmbeddedController::update(const RobotState& state,
     landing_recovery_hold_elapsed_s_ = 0.0F;
   }
   ControlCommand balance_command = command;
+  // A drive-off command can remain valid through flight, but applying it at
+  // full scale on the first support tick injects a second pitch transient
+  // while the landing impulse is still being absorbed. LandingController's
+  // bounded handoff keeps the wheel balance loop alive and only scales the
+  // requested motion; it does not use simulator pose/contact.
+  if (landing_output.drive_velocity_scale < 1.0F) {
+    balance_command.target_forward_velocity_m_s *=
+        landing_output.drive_velocity_scale;
+    balance_command.target_yaw_rate_rad_s *=
+        landing_output.drive_velocity_scale;
+  }
   if (landing_fallen_recovery) {
     balance_command.target_forward_velocity_m_s = 0.0F;
     balance_command.target_yaw_rate_rad_s = 0.0F;
@@ -377,6 +398,10 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   // earlier above). All-zero config makes this an exact no-op every cycle.
   const bool reflex_floor_contact = !last_flight_estimate_.airborne &&
                                     state.floor_contact;
+  const float previous_landing_forward_velocity_m_s =
+      last_landing_forward_velocity_m_s_;
+  const bool previous_landing_uses_trajectory_observer =
+      last_landing_uses_trajectory_observer_;
   last_landing_forward_velocity_m_s_ = state.wheel.velocity_m_s;
   last_landing_uses_trajectory_observer_ = false;
   const float min_trajectory_confidence = std::clamp(
@@ -385,19 +410,38 @@ MotorCommand EmbeddedController::update(const RobotState& state,
       last_trajectory_estimate_.valid &&
       last_trajectory_estimate_.confidence >= min_trajectory_confidence &&
       std::isfinite(last_trajectory_estimate_.forward_velocity_m_s);
-  const bool unloading = config_.landing_reflex.unloading_accel_mps2 > 0.0F &&
+  const bool unloading =
+      (config_.landing_reflex.unloading_accel_mps2 > 0.0F &&
+       state.imu.accel_magnitude_m_s2 <=
+           config_.landing_reflex.unloading_accel_mps2) ||
+      // Protect the supported-velocity latch from the first unloaded encoder
+      // sample even when the optional reflex pre-arm is disabled. The
+      // FlightObserver deliberately debounces this same MPU6500 free-fall
+      // signature, so its phase can still read Grounded for one or two ticks.
       state.imu.accel_magnitude_m_s2 <=
-          config_.landing_reflex.unloading_accel_mps2;
+          config_.flight_observer.free_fall_accel_threshold_m_s2;
   // Preserve the last supported estimate before selecting the landing input.
   // Do not overwrite it on an unloading sample: that sample is exactly where
   // an unloaded wheel encoder can report zero despite the robot's real
   // horizontal launch velocity still being nonzero.
-  if (state.floor_contact && !unloading && trajectory_sample_valid) {
+  if (!last_flight_estimate_.airborne && !unloading &&
+      trajectory_sample_valid) {
     last_supported_forward_velocity_m_s_ =
         last_trajectory_estimate_.forward_velocity_m_s;
     last_supported_trajectory_velocity_valid_ = true;
   }
   const bool support_lost_for_landing = !state.floor_contact || unloading;
+  // If the first low-specific-force sample coincides with the balance-mode
+  // handoff, the preceding trajectory output may have been cleared as part
+  // of the observer reset. Preserve the last landing input in that narrow
+  // event instead of allowing an unloaded encoder zero to erase it.
+  if (support_lost_for_landing && !last_supported_trajectory_velocity_valid_ &&
+      previous_landing_uses_trajectory_observer &&
+      std::isfinite(previous_landing_forward_velocity_m_s)) {
+    last_supported_forward_velocity_m_s_ =
+        previous_landing_forward_velocity_m_s;
+    last_supported_trajectory_velocity_valid_ = true;
+  }
   if (support_lost_for_landing &&
       last_supported_trajectory_velocity_valid_) {
     // This is the pre-liftoff latch.  LandingReflex itself latches this value

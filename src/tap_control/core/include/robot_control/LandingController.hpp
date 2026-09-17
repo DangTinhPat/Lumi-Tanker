@@ -8,8 +8,9 @@ namespace robot_control {
 // Phase-structured landing controller for the ledge/fall interval.
 //
 // This is intentionally sensor-backed only: phase transitions use wheel
-// contact, IMU acceleration magnitude, IMU pitch rate, joint encoders and
-// wheel odometry. No simulator pose/velocity is accepted here.
+// sensor-derived support hypothesis, IMU acceleration magnitude, IMU pitch
+// rate, joint encoders and wheel odometry. No simulator pose/velocity or raw
+// simulator contact is accepted here.
 class LandingController {
  public:
   enum class Phase { Grounded, Flight, Impact, Recovery };
@@ -35,20 +36,13 @@ class LandingController {
     float flight_pitch_rate_hip_gain_rad_per_rad_s = 0.0F;
     float flight_pitch_rate_hip_offset_max_rad = 0.0F;
 
-    // Impact detection. A validated wheel-support contact is the condition
-    // that creates the Impact phase. The IMU shock signal is intentionally not
-    // sufficient by itself: a body/edge strike is not a wheel touchdown and
-    // must not make the controller suspend wheel authority or apply a ground
-    // reference while the robot is unsupported. The shock event remains
-    // available to the contact-gated impedance component.
+    // Impact detection is gated by the FlightObserver's IMU-derived support
+    // hypothesis. A shock by itself is not enough: a body/edge strike must
+    // not make the controller apply a ground reference while unsupported.
     float min_flight_before_impact_s = 0.03F;
     float impact_accel_mps2 = 35.0F;
     float impact_pitch_rate_rad_s = 4.0F;
     float imu_impact_debounce_s = 0.02F;
-    // Deprecated compatibility parameter. Kept so older profiles still load;
-    // it no longer permits an IMU-only transition into Impact.
-    bool imu_impact_without_wheel_contact = false;
-
     // Cartesian impedance in sagittal leg coordinates during impact:
     // F = K(x_ref - x) + D(v_ref - v), tau = J^T F.
     // Height is the dominant shock axis; x is optional and should stay small
@@ -67,6 +61,11 @@ class LandingController {
     float min_impact_s = 0.04F;
     float max_impact_s = 0.35F;
     float recovery_blend_s = 0.25F;
+    // After validated touchdown, ramp the requested drive velocity back in
+    // instead of handing the pre-edge command to the wheels in one tick.
+    // Zero preserves the historical behavior. This is a command handoff
+    // guard, not an extra sensor or a simulator-state shortcut.
+    float recovery_drive_ramp_s = 0.0F;
     float recovery_pitch_rate_rad_s = 1.2F;
     float recovery_joint_speed_rad_s = 1.5F;
   };
@@ -78,11 +77,15 @@ class LandingController {
     }
     Phase phase = Phase::Grounded;
     bool active = false;
-    // True only while unsupported in Flight. Once a validated wheel contact
+    // True only while unsupported in Flight. Once the IMU-derived support
     // exists, wheel MPC is allowed to catch the body concurrently with the
     // leg's impact damping; leaving it disabled for the whole Impact window
     // would remove the primary pitch actuator exactly at touchdown.
     bool suspend_wheel_balance = false;
+    // [0, 1] scale for forward/yaw commands during the post-touchdown drive
+    // handoff. It is 1.0 when this feature is disabled or no landing is in
+    // progress.
+    float drive_velocity_scale = 1.0F;
     JointArray position_offset_rad{};
     JointArray kp_scale{};
     JointArray kd_scale{};
@@ -93,9 +96,6 @@ class LandingController {
   explicit LandingController(Config config) : config_(config) {}
 
   void reset();
-  // Seed phase edge detectors from the first validated contact snapshot.
-  void reset(bool floor_contact, bool left_floor_contact,
-             bool right_floor_contact);
 
   [[nodiscard]] Output update(const RobotState& state,
                               const JointArray& nominal_target_rad,
@@ -124,6 +124,8 @@ class LandingController {
   float phase_elapsed_s_ = 0.0F;
   float airborne_elapsed_s_ = 0.0F;
   float recovery_elapsed_s_ = 0.0F;
+  float drive_handoff_elapsed_s_ = 0.0F;
+  bool drive_handoff_active_ = false;
   float flight_hip_offset_rad_ = 0.0F;
   float flight_knee_offset_rad_ = 0.0F;
   SideRef left_ref_{};

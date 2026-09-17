@@ -39,11 +39,9 @@ def main():
         executable_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
         import rclpy
         from rclpy.node import Node
-        from rclpy.qos import qos_profile_sensor_data
-        from geometry_msgs.msg import TransformStamped, Twist
+        from geometry_msgs.msg import Twist
         from sensor_msgs.msg import Imu, JointState
         from std_msgs.msg import Bool, Float64MultiArray, String
-        from tf2_msgs.msg import TFMessage
     except (ImportError, RuntimeError) as exc:
         print(f"UNAVAILABLE: {exc}", file=sys.stderr)
         return 2
@@ -89,7 +87,7 @@ def main():
             rclpy.init()
             node = Node("driver", namespace=namespace)
             pubs = {}
-            for topic, kind in (("imu", Imu), ("model_pose", TFMessage),
+            for topic, kind in (("imu", Imu),
                                 ("joint_states", JointState), ("cmd_vel", Twist),
                                 ("enable", Bool), ("emergency_stop", Bool),
                                 ("stand_up", Bool), ("reset_controller", Bool),
@@ -114,8 +112,7 @@ def main():
 
             args = [str(executable), "--ros-args", "-r", f"__ns:={namespace}"]
             for parameter in ("use_sim_time:=false", "auto_enable:=false",
-                              "pitch_source:=sim_pose", "whole_body.enabled:=false",
-                              f"sim_pose_topic:={namespace}/model_pose",
+                              "pitch_source:=imu", "whole_body.enabled:=false",
                               "sensor_timeout_s:=0.15", "sensor_stale_grace_cycles:=2",
                               "cmd_vel_timeout_s:=0.25", "pose_slew_rate_rad_s:=10.0",
                               "pose_hip_min_rad:=-0.6", "pose_hip_max_rad:=0.6",
@@ -128,7 +125,6 @@ def main():
             position = [0.0] * 6
             velocity = [0.0] * 6
             pitch = 0.0
-            pose_packet = "named"
             missing = False
             invalid = False
             sensors = True
@@ -147,19 +143,10 @@ def main():
                         imu = Imu()
                         imu.header.stamp = stamp
                         imu.orientation.w = 1.0
-                        imu.linear_acceleration.z = 9.81
+                        imu.linear_acceleration.x = -9.81 * math.sin(pitch)
+                        imu.linear_acceleration.z = 9.81 * math.cos(pitch)
                         imu.angular_velocity.y = 0.02
                         pubs["imu"].publish(imu)
-                        pose = TransformStamped()
-                        pose.header.stamp = stamp
-                        pose.child_frame_id = "tap_robot" if pose_packet == "named" else ""
-                        pose.transform.translation.z = 0.25
-                        pose.transform.rotation.y = math.sin(pitch / 2)
-                        pose.transform.rotation.w = math.cos(pitch / 2)
-                        transforms = [pose]
-                        if pose_packet == "unnamed_multi":
-                            transforms.append(TransformStamped())
-                        pubs["model_pose"].publish(TFMessage(transforms=transforms))
                         joints = JointState()
                         joints.header.stamp = stamp
                         order = [5, 0, 3, 2, 1, 4]
@@ -208,23 +195,14 @@ def main():
             run("shuffled native odometry and pitch", lambda: check(
                 abs(float(status()["wheel_pos"]) - .09) < .002 and
                 abs(float(status()["wheel_vel"]) - .06) < .002 and
-                abs(float(status()["pitch"]) - .1) < .002 and
+                abs(float(status()["pitch"]) - .1) < .01 and
                 abs(float(status()["pitch_rate"]) - .02) < .002,
                 f"bad native observation: {status()}"))
-            pose_packet = "unnamed_multi"
             pitch = .3
             pump(.4)
-            run("unnamed multi-pose rejected", lambda: check(
-                abs(float(status()["pitch"]) - .1) < .002 and
-                float(status()["ori_age_ms"]) > 150 and stopped(),
-                "ambiguous pose updated orientation or kept watchdog fresh"))
-            pose_packet = "unnamed_single"
-            pitch = .12
-            pump(.2)
-            run("unnamed single-pose accepted", lambda: check(
-                abs(float(status()["pitch"]) - .12) < .002 and status()["fresh"] == "1",
-                "single model pose not accepted"))
-            pose_packet = "named"
+            run("IMU pitch remains the only attitude source", lambda: check(
+                abs(float(status()["pitch"]) - .3) < .02 and status()["fresh"] == "1",
+                "accelerometer pitch was not consumed"))
             position[:] = [0.0] * 6
             velocity[:] = [0.0] * 6
             pitch = 0.0

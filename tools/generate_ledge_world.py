@@ -31,12 +31,9 @@ TEMPLATE = """<?xml version="1.0"?>
          static ledge_pad + departure fillet, nothing else nearby. -->
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
-    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster">
-      <dynamic_pose_hertz>250</dynamic_pose_hertz>
-    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
     <plugin filename="gz-sim-apply-link-wrench-system" name="gz::sim::systems::ApplyLinkWrench"/>
-    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
     <gravity>0 0 -9.81</gravity>
     <physics name="default_physics" type="ignored">
       <max_step_size>0.001</max_step_size><real_time_factor>1.0</real_time_factor>

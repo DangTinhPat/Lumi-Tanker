@@ -25,10 +25,12 @@ bool finiteArray(const JointArray& a) {
   return true;
 }
 
-bool confirmedSupport(const FlightObserver::Output* flight,
-                      const RobotState& state) {
+bool confirmedSupport(const FlightObserver::Output* flight) {
   if (flight == nullptr) {
-    return state.floor_contact;
+    // A missing observer output cannot prove support.  In particular, never
+    // fall back to RobotState::floor_contact: a ROS/simulator boundary may
+    // populate that legacy field from ground truth.
+    return false;
   }
 
   // `airborne == false` is not equivalent to support.  In particular,
@@ -77,18 +79,15 @@ void addSideTorque(JointArray& tau, std::size_t hip, std::size_t knee,
 LandingController::LandingController() : LandingController(Config{}) {}
 
 void LandingController::reset() {
-  reset(true, true, true);
-}
-
-void LandingController::reset(bool floor_contact, bool left_floor_contact,
-                               bool right_floor_contact) {
-  phase_ = floor_contact ? Phase::Grounded : Phase::Flight;
-  prev_floor_contact_ = floor_contact;
-  prev_left_contact_ = left_floor_contact;
-  prev_right_contact_ = right_floor_contact;
+  phase_ = Phase::Grounded;
+  prev_floor_contact_ = true;
+  prev_left_contact_ = true;
+  prev_right_contact_ = true;
   phase_elapsed_s_ = 0.0F;
   airborne_elapsed_s_ = 0.0F;
   recovery_elapsed_s_ = 0.0F;
+  drive_handoff_elapsed_s_ = 0.0F;
+  drive_handoff_active_ = false;
   flight_hip_offset_rad_ = 0.0F;
   flight_knee_offset_rad_ = 0.0F;
   left_ref_ = SideRef{};
@@ -104,13 +103,15 @@ void LandingController::updatePhase(
   const bool observer_no_support_timeout =
       flight != nullptr &&
       flight->phase == FlightObserver::Phase::NoSupportTimeout;
-  const bool contact = confirmedSupport(flight, state);
+  const bool contact = confirmedSupport(flight);
   const bool liftoff = flight != nullptr
       ? (observer_airborne || observer_no_support_timeout) &&
             phase_ == Phase::Grounded
       : !contact && prev_floor_contact_;
-  const bool left_contact = state.left_floor_contact;
-  const bool right_contact = state.right_floor_contact;
+  // Per-side support is only taken from the sensor-derived observer output.
+  // RobotState contact fields are intentionally ignored at this boundary.
+  const bool left_contact = flight != nullptr && flight->left_support_contact;
+  const bool right_contact = flight != nullptr && flight->right_support_contact;
   const bool left_touchdown = left_contact && !prev_left_contact_;
   const bool right_touchdown = right_contact && !prev_right_contact_;
   prev_floor_contact_ = contact;
@@ -127,6 +128,8 @@ void LandingController::updatePhase(
     phase_elapsed_s_ = 0.0F;
     airborne_elapsed_s_ = state.dt_s;
     recovery_elapsed_s_ = 0.0F;
+    drive_handoff_elapsed_s_ = 0.0F;
+    drive_handoff_active_ = config_.recovery_drive_ramp_s > 0.0F;
     flight_hip_offset_rad_ = 0.0F;
     flight_knee_offset_rad_ = 0.0F;
     const auto left = WholeBodyModel::legHeight(
@@ -142,7 +145,7 @@ void LandingController::updatePhase(
     // A shock is evidence that something struck the robot, not evidence that
     // a wheel has acquired a support wrench. In particular, the ledge fillet
     // and body/edge collisions produce the same IMU signature while both
-    // wheels are still airborne. Only the validated wheel contact path may
+    // wheels are still airborne. Only the validated IMU-derived support path may
     // create the touchdown phase.
     const bool impact =
         airborne_elapsed_s_ >= config_.min_flight_before_impact_s &&
@@ -277,13 +280,13 @@ JointArray LandingController::flightOffset(
 
 void LandingController::addImpactTorques(const RobotState& state,
                                          Output& out) const {
-  if (left_ref_.in_impact && state.left_floor_contact) {
+  if (left_ref_.in_impact) {
     addSideTorque(out.feedforward_nm, kLh, kLk,
                   state.joints.position_rad[kLh], state.joints.position_rad[kLk],
                   state.joints.velocity_rad_s[kLh], state.joints.velocity_rad_s[kLk],
                   config_, out, left_ref_.height_m, left_ref_.x_m);
   }
-  if (right_ref_.in_impact && state.right_floor_contact) {
+  if (right_ref_.in_impact) {
     addSideTorque(out.feedforward_nm, kRh, kRk,
                   state.joints.position_rad[kRh], state.joints.position_rad[kRk],
                   state.joints.velocity_rad_s[kRh], state.joints.velocity_rad_s[kRk],
@@ -309,9 +312,22 @@ LandingController::Output LandingController::update(
   updatePhase(state, flight);
   out.phase = phase_;
   out.active = phase_ != Phase::Grounded;
-  out.suspend_wheel_balance = phase_ == Phase::Flight ||
-                              (phase_ == Phase::Recovery &&
-                               !state.floor_contact);
+  out.suspend_wheel_balance = phase_ == Phase::Flight;
+
+  if (drive_handoff_active_) {
+    if (phase_ != Phase::Grounded) {
+      drive_handoff_elapsed_s_ = 0.0F;
+      out.drive_velocity_scale = 0.0F;
+    } else {
+      drive_handoff_elapsed_s_ += state.dt_s;
+      const float ramp = std::max(config_.recovery_drive_ramp_s, 1.0e-3F);
+      out.drive_velocity_scale =
+          std::clamp(drive_handoff_elapsed_s_ / ramp, 0.0F, 1.0F);
+      if (out.drive_velocity_scale >= 1.0F) {
+        drive_handoff_active_ = false;
+      }
+    }
+  }
 
   if (phase_ == Phase::Flight) {
     out.position_offset_rad = flightOffset(state, nominal_target_rad);

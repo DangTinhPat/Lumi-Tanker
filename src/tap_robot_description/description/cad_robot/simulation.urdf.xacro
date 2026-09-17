@@ -28,19 +28,8 @@
     <xacro:actuator name="cad_right_wheel" interface="velocity"/>
   </ros2_control>
   <gazebo>
-    <!-- Only this model is published: a bridge losing entity names cannot
-         accidentally substitute the floor or an articulated child link. -->
-    <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
-      <publish_model_pose>true</publish_model_pose>
-      <publish_nested_model_pose>false</publish_nested_model_pose>
-      <publish_link_pose>false</publish_link_pose>
-      <publish_visual_pose>false</publish_visual_pose>
-      <publish_collision_pose>false</publish_collision_pose>
-      <publish_sensor_pose>false</publish_sensor_pose>
-      <use_pose_vector_msg>true</use_pose_vector_msg>
-      <update_frequency>250</update_frequency>
-      <static_publisher>false</static_publisher>
-    </plugin>
+    <!-- No model-pose publisher: pose is simulator ground truth and is not a
+         member of the MPU6500 + six-encoder sensing contract. -->
     <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
       <parameters>$(find tap_sim)/config/ros2_control.yaml</parameters>
     </plugin>
@@ -57,25 +46,4 @@
   </gazebo>
   <gazebo reference="cad_left_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
   <gazebo reference="cad_right_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
-  <xacro:if value="${jump_model or measure_contacts}">
-    <!-- ContactSensor publishes its own raw gz.msgs.Contacts stream. Do not
-         load the legacy tap_sim::ContactSnapshot bridge here: it is an
-         optional diagnostic plugin and its transitive libsystemd dependency
-         is not stable across the Gazebo environment. sim.launch.py bridges
-         these raw sensor topics directly. -->
-    <xacro:macro name="wheel_contact" params="side">
-      <gazebo reference="cad_${side}_wheel_link">
-        <sensor name="${side}_wheel_contact_sensor" type="contact">
-          <always_on>true</always_on><update_rate>1000</update_rate>
-          <topic>/${side}_wheel_contacts</topic>
-          <contact>
-            <!-- libsdformat appends _collision to the explicit URDF name. -->
-            <collision>cad_${side}_wheel_link_collision_collision</collision>
-            <topic>/${side}_wheel_contacts_raw</topic>
-          </contact>
-        </sensor>
-      </gazebo>
-    </xacro:macro>
-    <xacro:wheel_contact side="left"/><xacro:wheel_contact side="right"/>
-  </xacro:if>
 </robot>

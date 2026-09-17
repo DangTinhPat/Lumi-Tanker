@@ -188,12 +188,12 @@ peak displacement 2.49/2.11 mm and final 0.100/0.062 mm. The 3 s deep transition
 failed. See the audit for exact commands and guards; hardware encoder limits
 and deep asymmetric poses remain unvalidated.
 
-Experimental jumping is developed separately from the validated legacy squat
-profile. See [jump development and evidence](docs/JUMP.md) for research,
-motor-envelope assumptions, single-shot controls and acceptance criteria.
-`tools/run_jump.py` opts into bounded actuators and measured wheel contacts;
-plain `ros2 launch tap_sim sim.launch.py` is unchanged by default. A working
-jump button is not proof of greater-than-10-cm flight or successful landing.
+Landing is evaluated through the deployable sensor contract only: MPU6500
+accelerometer/gyro plus six motor encoders. The former simulator-pose/contact
+jump harness is retired; `jump.enabled` and world-pose station keeping are
+rejected by the node. Use `tools/test_landing_ros_contract.py` for the
+sensor-only interface check and the landing smoke tools for closed-loop
+simulation evidence.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -202,7 +202,8 @@ colcon test-result --verbose
 python3 tools/generate_control_model.py --check
 python3 tools/test_ros_contract.py
 python3 tools/test_station_ros_contract.py
-python3 tools/transformation_smoke.py --config src/tap_control/config/stationary_show.yaml
+python3 tools/test_landing_ros_contract.py
+python3 tools/transformation_smoke.py
 python3 tools/sim_smoke.py --duration 30 --exercise --poses --max-pitch-error .12
 python3 tools/gui_reset_standup_smoke.py
 ```
