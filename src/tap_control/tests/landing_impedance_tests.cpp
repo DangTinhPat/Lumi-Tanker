@@ -24,16 +24,16 @@ void noOpAtDefaults() {
   // compression velocity - still must never engage Impact at defaults,
   // since the velocity threshold is impossibly high. Both sides toggled
   // together here; the asymmetric case is its own test below.
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.001F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.001F);
   for (float t = 0.0F; t < 0.2F; t += 0.001F) {
     const auto out = imp.update(false, false, hip, knee, hip, knee, 0.3F,
-                                -0.6F, 0.3F, -0.6F, 0.001F);
+                                -0.6F, 0.3F, -0.6F, 9.81F, 0.001F);
     ok = ok && out.left_leg_kp_scale == 1.0F && out.left_leg_kd_scale == 1.0F &&
          out.right_leg_kp_scale == 1.0F && out.right_leg_kd_scale == 1.0F;
   }
   for (int i = 0; i < 500; ++i) {
     const auto out = imp.update(true, true, hip, knee, hip, knee, 0.3F, -0.6F,
-                                0.3F, -0.6F, 0.001F);
+                                0.3F, -0.6F, 9.81F, 0.001F);
     ok = ok && out.left_leg_kp_scale == 1.0F && out.left_leg_kd_scale == 1.0F &&
          out.right_leg_kp_scale == 1.0F && out.right_leg_kd_scale == 1.0F;
   }
@@ -84,12 +84,12 @@ void engagesOnlyOnGenuineImpactVelocity() {
 
   // Liftoff, real flight, then a GENTLE touchdown (near-zero compression
   // velocity) on both sides - must NOT engage Impact.
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   }
   const auto gentle =
-      imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+      imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   check(!imp.active() && gentle.left_leg_kp_scale == 1.0F &&
             gentle.right_leg_kp_scale == 1.0F,
         "LandingImpedance: a gentle touchdown (near-zero compression "
@@ -99,12 +99,12 @@ void engagesOnlyOnGenuineImpactVelocity() {
   // Same sequence, but now with a real compression velocity at the
   // touchdown instant on BOTH sides (knees flexing fast, as they would
   // under a genuine symmetric impact) - MUST engage Impact on both.
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   }
   const auto hard = imp.update(true, true, hip, knee, hip, knee, 0.0F, -2.0F,
-                               0.0F, -2.0F, 0.01F);
+                               0.0F, -2.0F, 9.81F, 0.01F);
   check(imp.active() &&
             near_equal(hard.left_leg_kp_scale, cfg.impact_kp_scale) &&
             near_equal(hard.right_leg_kp_scale, cfg.impact_kp_scale) &&
@@ -126,13 +126,13 @@ void asymmetricTouchdownOnlyEngagesTheSideThatLanded() {
   LandingImpedance imp(cfg);
   const float hip = geometry::neutral_hip_rad, knee = 0.0F;
 
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   for (float t = 0.0F; t < 0.1F; t += 0.01F) {
-    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   }
   // Left touches down hard; right is still airborne.
   const auto split = imp.update(true, false, hip, knee, hip, knee, 0.0F, -2.0F,
-                                0.0F, 0.0F, 0.01F);
+                                0.0F, 0.0F, 9.81F, 0.01F);
   check(near_equal(split.left_leg_kp_scale, cfg.impact_kp_scale) &&
             near_equal(split.left_leg_kd_scale, cfg.impact_kd_scale),
         "LandingImpedance: the side that actually touched down (left) "
@@ -141,6 +141,53 @@ void asymmetricTouchdownOnlyEngagesTheSideThatLanded() {
         "LandingImpedance: the side still airborne (right) is untouched - "
         "an asymmetric landing no longer softens/damps a leg that never hit "
         "anything");
+}
+
+void contactlessImuEventDoesNotEngageEitherSide() {
+  LandingImpedance::Config cfg;
+  cfg.impact_kp_scale = 0.15F;
+  cfg.impact_kd_scale = 3.0F;
+  cfg.touchdown_velocity_threshold_m_s = 1.0e6F;
+  cfg.hard_impact_accel_mps2 = 20.0F;
+  cfg.min_airborne_before_touchdown_s = 0.05F;
+  LandingImpedance imp(cfg);
+  const float hip = geometry::neutral_hip_rad, knee = 0.0F;
+
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F,
+                   0.0F, 0.0F, 9.81F, 0.01F);
+  for (int i = 0; i < 10; ++i) {
+    const auto out = imp.update(false, false, hip, knee, hip, knee, 0.0F,
+                                -4.0F, 0.0F, -4.0F, 100.0F, 0.01F, true);
+    check(out.left_leg_kp_scale == 1.0F && out.right_leg_kp_scale == 1.0F,
+          "LandingImpedance: contactless IMU shock leaves both airborne sides normal");
+  }
+  check(imp.active(),
+        "LandingImpedance: contactless IMU shock leaves the sides in Airborne, not Impact");
+}
+
+void globalImuEventOnlyAffectsContactedSide() {
+  LandingImpedance::Config cfg;
+  cfg.impact_kp_scale = 0.15F;
+  cfg.impact_kd_scale = 3.0F;
+  cfg.touchdown_velocity_threshold_m_s = 1.0e6F;
+  cfg.hard_impact_accel_mps2 = 20.0F;
+  cfg.min_airborne_before_touchdown_s = 0.05F;
+  LandingImpedance imp(cfg);
+  const float hip = geometry::neutral_hip_rad, knee = 0.0F;
+
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F,
+                   0.0F, 0.0F, 9.81F, 0.01F);
+  for (int i = 0; i < 10; ++i) {
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F,
+                     0.0F, 0.0F, 9.81F, 0.01F);
+  }
+  const auto out = imp.update(true, false, hip, knee, hip, knee, 0.0F, 0.0F,
+                              0.0F, 0.0F, 100.0F, 0.01F, true);
+  check(near_equal(out.left_leg_kp_scale, cfg.impact_kp_scale) &&
+            near_equal(out.left_leg_kd_scale, cfg.impact_kd_scale),
+        "LandingImpedance: global IMU event can trigger only the contacted side");
+  check(out.right_leg_kp_scale == 1.0F && out.right_leg_kd_scale == 1.0F,
+        "LandingImpedance: global IMU event does not trigger the airborne side");
 }
 
 void reboundsAndRecoversToGroundedAndInert() {
@@ -153,12 +200,12 @@ void reboundsAndRecoversToGroundedAndInert() {
   cfg.rebound_blend_s = 0.1F;
   LandingImpedance imp(cfg);
   const float hip = geometry::neutral_hip_rad, knee = 0.0F;
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   for (float t = 0.0F; t < 0.15F; t += 0.01F) {
-    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+    (void)imp.update(false, false, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   }
   const auto touchdown = imp.update(true, true, hip, knee, hip, knee, 0.0F,
-                                    -2.0F, 0.0F, -2.0F, 0.01F);
+                                    -2.0F, 0.0F, -2.0F, 9.81F, 0.01F);
   check(imp.active() && near_equal(touchdown.left_leg_kp_scale, cfg.impact_kp_scale) &&
             near_equal(touchdown.right_leg_kp_scale, cfg.impact_kp_scale),
         "LandingImpedance: Impact engaged after a genuine touchdown, both sides");
@@ -166,12 +213,12 @@ void reboundsAndRecoversToGroundedAndInert() {
   // Velocity settles to 0 (leg stopped moving, bottomed out): with
   // min_impact_before_rebound_s == 0, the very next tick transitions to
   // Rebound.
-  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 0.01F);
+  (void)imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F, 0.0F, 9.81F, 0.01F);
   // Run out the rebound blend.
   LandingImpedance::Output settled{};
   for (int i = 0; i < 50; ++i) {
     settled = imp.update(true, true, hip, knee, hip, knee, 0.0F, 0.0F, 0.0F,
-                         0.0F, 0.01F);
+                         0.0F, 9.81F, 0.01F);
   }
   check(near_equal(settled.left_leg_kp_scale, 1.0F) &&
             near_equal(settled.left_leg_kd_scale, 1.0F) &&
@@ -343,6 +390,8 @@ int main() {
   legHeightJacobianMatchesFiniteDifference();
   engagesOnlyOnGenuineImpactVelocity();
   asymmetricTouchdownOnlyEngagesTheSideThatLanded();
+  contactlessImuEventDoesNotEngageEitherSide();
+  globalImuEventOnlyAffectsContactedSide();
   reboundsAndRecoversToGroundedAndInert();
   embeddedControllerNoOpAtDefaults();
   embeddedControllerAppliesScaleToKneeOnlyNotHip();

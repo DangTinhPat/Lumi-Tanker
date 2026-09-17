@@ -26,6 +26,7 @@
 #include "robot_control/StationKeeper.hpp"
 #include "robot_control/JumpController.hpp"
 #include "robot_control/WheelFrame.hpp"
+#include "robot_control/TrajectoryObserver.hpp"
 
 namespace {
 
@@ -91,8 +92,10 @@ class BalanceControllerNode : public rclcpp::Node {
         control_period_s_(declare_parameter<double>("control_period_s", 0.005)),
         wheel_radius_m_(declare_parameter<double>("wheel_radius_m", 0.03)),
         pitch_offset_rad_(declare_parameter<double>("pitch_offset_rad", 0.0)),
-        pitch_source_(declare_parameter<std::string>("pitch_source",
-                                                     "sim_pose")),
+        // The production path is IMU-backed. sim_pose remains available only
+        // for legacy/offline experiments that explicitly opt into it; it must
+        // never be the implicit source for a landing claim.
+        pitch_source_(declare_parameter<std::string>("pitch_source", "imu")),
         sim_pose_child_frame_(declare_parameter<std::string>(
             "sim_pose_child_frame", "tap_robot")),
         sim_pose_index_(declare_parameter<int>("sim_pose_index", 0)),
@@ -172,6 +175,15 @@ class BalanceControllerNode : public rclcpp::Node {
         // (pre-2026-09-16 behavior).
         kalman_accel_trust_gain_(static_cast<float>(
             declare_parameter<double>("kalman_accel_trust_gain", 0.0))),
+        // An accelerometer measures specific force, not gravity. During
+        // free-fall its magnitude approaches zero and during impact/fast
+        // rotation its direction is not a valid tilt measurement. These
+        // gates keep the estimator on gyro prediction through those dynamic
+        // intervals instead of feeding atan2() an arbitrary vector.
+        kalman_accel_max_deviation_mps2_(static_cast<float>(
+            declare_parameter<double>("kalman_accel_max_deviation_mps2", 1.5))),
+        kalman_accel_max_pitch_rate_rad_s_(static_cast<float>(
+            declare_parameter<double>("kalman_accel_max_pitch_rate_rad_s", 1.5))),
         leg_kp_(static_cast<float>(declare_parameter<double>("leg_kp", 12.0))),
         // Default is now derived from the real mass/geometry data (Track B
         // item 3, 2026-09-16), not a guess: critical damping for a 2nd-order
@@ -217,6 +229,12 @@ class BalanceControllerNode : public rclcpp::Node {
     config.mpc.fall_pitch_rad = static_cast<float>(
         declare_parameter<double>("mpc.fall_pitch_rad", 1.0));
     config.state_machine.fall_pitch_rad = config.mpc.fall_pitch_rad;
+    // Partial feedback linearization - see MpcBalancer::Config::
+    // nonlinear_gravity_correction_gain's own comment. 0 (default) is an
+    // exact no-op, matching this stack's usual promotion discipline (must be
+    // n>=25-evidence-gated before becoming a yaml default).
+    config.mpc.nonlinear_gravity_correction_gain = static_cast<float>(
+        declare_parameter<double>("mpc.nonlinear_gravity_correction_gain", 0.0));
     config.mpc.left_wheel_sign = left_wheel_sign_;
     config.mpc.max_ground_velocity_m_s = static_cast<float>(
         declare_parameter<double>("mpc.max_ground_velocity", 0.6));
@@ -295,6 +313,8 @@ class BalanceControllerNode : public rclcpp::Node {
         declare_parameter<double>("mpc.landing_kd_boost", 0.0));
     config.mpc.landing_ground_accel_boost_m_s2 = static_cast<float>(
         declare_parameter<double>("mpc.landing_ground_accel_boost_m_s2", 0.0));
+    config.mpc.landing_hold_airborne_velocity =
+        declare_parameter<bool>("mpc.landing_hold_airborne_velocity", false);
 
     // Reactive airborne/touchdown leg-TARGET offset (see LandingReflex.hpp) -
     // distinct from the stiffness-only landing_* boosts above: this changes
@@ -310,6 +330,37 @@ class BalanceControllerNode : public rclcpp::Node {
         declare_parameter<double>("landing_reflex.catch_hold_s", 0.2));
     config.landing_reflex.catch_blend_s = static_cast<float>(
         declare_parameter<double>("landing_reflex.catch_blend_s", 0.2));
+    // Active velocity-matched extension - see LandingReflex::Config::
+    // active_extension_gravity_m_s2's own comment. Both default off (0 = no
+    // extension attempted, exact no-op).
+    config.landing_reflex.active_extension_gravity_m_s2 = static_cast<float>(
+        declare_parameter<double>("landing_reflex.active_extension_gravity_m_s2", 0.0));
+    config.landing_reflex.active_extension_max_rad = static_cast<float>(
+        declare_parameter<double>("landing_reflex.active_extension_max_rad", 0.0));
+    config.landing_reflex.active_extension_max_hip_rad = static_cast<float>(
+        declare_parameter<double>("landing_reflex.active_extension_max_hip_rad", -1.0));
+    config.landing_reflex.active_extension_delay_s = static_cast<float>(
+        declare_parameter<double>("landing_reflex.active_extension_delay_s", 0.0));
+    config.landing_reflex.unloading_accel_mps2 = static_cast<float>(
+        declare_parameter<double>("landing_reflex.unloading_accel_mps2", 0.0));
+    config.landing_reflex.target_slew_rate_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_reflex.target_slew_rate_rad_s", 0.0));
+    // Differential (ROLL-axis) HIP offset - see LandingReflex::Config::
+    // roll_rate_hip_gain_rad_per_rad_s's own comment (targets the hip, not
+    // the knee, because LandingImpedance crushes the knee's stiffness during
+    // exactly this window). Both default off (0 = exact no-op).
+    config.landing_reflex.roll_rate_hip_gain_rad_per_rad_s = static_cast<float>(
+        declare_parameter<double>(
+            "landing_reflex.roll_rate_hip_gain_rad_per_rad_s", 0.0));
+    config.landing_reflex.roll_hip_offset_max_rad = static_cast<float>(
+        declare_parameter<double>("landing_reflex.roll_hip_offset_max_rad", 0.0));
+    // Capture-point hip placement - see LandingReflex::Config::
+    // capture_point_gravity_m_s2's own comment. Both default off (0 = exact
+    // no-op).
+    config.landing_reflex.capture_point_gravity_m_s2 = static_cast<float>(
+        declare_parameter<double>("landing_reflex.capture_point_gravity_m_s2", 0.0));
+    config.landing_reflex.capture_point_max_hip_rad = static_cast<float>(
+        declare_parameter<double>("landing_reflex.capture_point_max_hip_rad", 0.0));
 
     // Virtual leg-length spring-damper via GAIN SCHEDULING (see
     // LandingImpedance.hpp) - distinct from landing_reflex (which moves the
@@ -323,6 +374,14 @@ class BalanceControllerNode : public rclcpp::Node {
         declare_parameter<double>("landing_impedance.impact_kp_scale", 1.0));
     config.landing_impedance.impact_kd_scale = static_cast<float>(
         declare_parameter<double>("landing_impedance.impact_kd_scale", 1.0));
+    config.landing_impedance.airborne_hip_kp_scale = static_cast<float>(
+        declare_parameter<double>("landing_impedance.airborne_hip_kp_scale", 1.0));
+    config.landing_impedance.airborne_hip_kd_scale = static_cast<float>(
+        declare_parameter<double>("landing_impedance.airborne_hip_kd_scale", 1.0));
+    config.landing_impedance.airborne_knee_kp_scale = static_cast<float>(
+        declare_parameter<double>("landing_impedance.airborne_knee_kp_scale", 1.0));
+    config.landing_impedance.airborne_knee_kd_scale = static_cast<float>(
+        declare_parameter<double>("landing_impedance.airborne_knee_kd_scale", 1.0));
     config.landing_impedance.touchdown_velocity_threshold_m_s = static_cast<float>(
         declare_parameter<double>(
             "landing_impedance.touchdown_velocity_threshold_m_s", 1.0e6));
@@ -333,6 +392,135 @@ class BalanceControllerNode : public rclcpp::Node {
     config.landing_impedance.min_airborne_before_touchdown_s = static_cast<float>(
         declare_parameter<double>(
             "landing_impedance.min_airborne_before_touchdown_s", 0.15));
+    // Energy-based sizing (see LandingImpedance::Config::
+    // leg_knee_inertia_kgm2's own comment). Reuses the SAME real knee
+    // inertia and the SAME leg_kp_/leg_kd_ this node already computed above
+    // (critical-damping-derived default, not a separate guess) as the
+    // "nominal" gains the energy calculation scales relative to.
+    // knee_hard_limit_rad defaults to the URDF's own actuator limit
+    // (src/tap_robot_description/description/cad_robot/robot.urdf.xacro,
+    // <joint cad_*_knee> lower="-2.1") - the TRUE mechanical limit impact
+    // absorption must stay short of, not a softer operating bound.
+    // leg_knee_inertia_kgm2 defaults to 0 (energySizingConfigured() false,
+    // exact no-op) since enabling it also requires deciding
+    // energy_stroke_margin/knee_hard_limit_rad deliberately, not silently.
+    config.landing_impedance.leg_knee_inertia_kgm2 = static_cast<float>(
+        declare_parameter<double>("landing_impedance.leg_knee_inertia_kgm2", 0.0));
+    config.landing_impedance.leg_kp_nominal_nm_rad = leg_kp_;
+    config.landing_impedance.leg_kd_nominal_nm_s_rad = leg_kd_;
+    config.landing_impedance.knee_hard_limit_rad = static_cast<float>(
+        declare_parameter<double>("landing_impedance.knee_hard_limit_rad", -2.1));
+    config.landing_impedance.energy_stroke_margin = static_cast<float>(
+        declare_parameter<double>("landing_impedance.energy_stroke_margin", 0.7));
+    config.landing_impedance.energy_kp_scale_min = static_cast<float>(
+        declare_parameter<double>("landing_impedance.energy_kp_scale_min", 0.02));
+    config.landing_impedance.energy_kp_scale_max = static_cast<float>(
+        declare_parameter<double>("landing_impedance.energy_kp_scale_max", 1.0));
+    config.landing_impedance.energy_kd_scale_max = static_cast<float>(
+        declare_parameter<double>("landing_impedance.energy_kd_scale_max", 6.0));
+    // See LandingImpedance::Config::hard_impact_accel_mps2/
+    // energy_capture_window_s's own comments. Both default off (impossibly
+    // high accel gate, 0 capture window = original single-tick behavior).
+    config.landing_impedance.hard_impact_accel_mps2 = static_cast<float>(
+        declare_parameter<double>("landing_impedance.hard_impact_accel_mps2", 1.0e6));
+    config.landing_impedance.energy_capture_window_s = static_cast<float>(
+        declare_parameter<double>("landing_impedance.energy_capture_window_s", 0.0));
+
+    config.landing_controller.enabled =
+        declare_parameter<bool>("landing_controller.enabled", false);
+    config.landing_controller.flight_gravity_m_s2 = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_gravity_m_s2", 9.81));
+    config.landing_controller.flight_extension_delay_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_extension_delay_s", 0.08));
+    config.landing_controller.flight_extension_max_m = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_extension_max_m", 0.035));
+    config.landing_controller.flight_hip_offset_max_rad = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_hip_offset_max_rad", 0.04));
+    config.landing_controller.flight_knee_offset_max_rad = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_knee_offset_max_rad", 0.25));
+    config.landing_controller.flight_target_slew_rate_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_target_slew_rate_rad_s", 2.0));
+    config.landing_controller.flight_kp_scale = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_kp_scale", 0.5));
+    config.landing_controller.flight_kd_scale = static_cast<float>(
+        declare_parameter<double>("landing_controller.flight_kd_scale", 1.0));
+    config.landing_controller.flight_pitch_rate_hip_gain_rad_per_rad_s =
+        static_cast<float>(declare_parameter<double>(
+            "landing_controller.flight_pitch_rate_hip_gain_rad_per_rad_s", 0.0));
+    config.landing_controller.flight_pitch_rate_hip_offset_max_rad =
+        static_cast<float>(declare_parameter<double>(
+            "landing_controller.flight_pitch_rate_hip_offset_max_rad", 0.0));
+    config.landing_controller.min_flight_before_impact_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.min_flight_before_impact_s", 0.03));
+    config.landing_controller.impact_accel_mps2 = static_cast<float>(
+        declare_parameter<double>("landing_controller.impact_accel_mps2", 35.0));
+    config.landing_controller.impact_pitch_rate_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.impact_pitch_rate_rad_s", 4.0));
+    config.landing_controller.imu_impact_debounce_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.imu_impact_debounce_s", 0.02));
+    config.landing_controller.imu_impact_without_wheel_contact =
+        declare_parameter<bool>("landing_controller.imu_impact_without_wheel_contact", false);
+    config.landing_controller.height_kp_n_m = static_cast<float>(
+        declare_parameter<double>("landing_controller.height_kp_n_m", 0.0));
+    config.landing_controller.height_kd_n_s_m = static_cast<float>(
+        declare_parameter<double>("landing_controller.height_kd_n_s_m", 0.0));
+    config.landing_controller.x_kp_n_m = static_cast<float>(
+        declare_parameter<double>("landing_controller.x_kp_n_m", 0.0));
+    config.landing_controller.x_kd_n_s_m = static_cast<float>(
+        declare_parameter<double>("landing_controller.x_kd_n_s_m", 0.0));
+    config.landing_controller.max_virtual_force_n = static_cast<float>(
+        declare_parameter<double>("landing_controller.max_virtual_force_n", 40.0));
+    config.landing_controller.max_feedforward_torque_nm = static_cast<float>(
+        declare_parameter<double>("landing_controller.max_feedforward_torque_nm", 3.0));
+    config.landing_controller.impact_kp_scale = static_cast<float>(
+        declare_parameter<double>("landing_controller.impact_kp_scale", 0.05));
+    config.landing_controller.impact_kd_scale = static_cast<float>(
+        declare_parameter<double>("landing_controller.impact_kd_scale", 1.0));
+    config.landing_controller.min_impact_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.min_impact_s", 0.04));
+    config.landing_controller.max_impact_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.max_impact_s", 0.35));
+    config.landing_controller.recovery_blend_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.recovery_blend_s", 0.25));
+    config.landing_controller.recovery_pitch_rate_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.recovery_pitch_rate_rad_s", 1.2));
+    config.landing_controller.recovery_joint_speed_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_controller.recovery_joint_speed_rad_s", 1.5));
+    // Sensor-only support/flight observer. Absolute ledge height is not
+    // observable from this sensor set during flight; these parameters only
+    // gate support-loss, ballistic, collision and touchdown phases.
+    config.flight_observer.gravity_m_s2 = static_cast<float>(
+        declare_parameter<double>("flight_observer.gravity_m_s2", 9.81));
+    config.flight_observer.support_loss_debounce_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.support_loss_debounce_s", 0.012));
+    config.flight_observer.free_fall_accel_threshold_m_s2 = static_cast<float>(
+        declare_parameter<double>("flight_observer.free_fall_accel_threshold_m_s2", 3.5));
+    config.flight_observer.free_fall_debounce_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.free_fall_debounce_s", 0.012));
+    config.flight_observer.collision_accel_threshold_m_s2 = static_cast<float>(
+        declare_parameter<double>("flight_observer.collision_accel_threshold_m_s2", 25.0));
+    config.flight_observer.collision_hold_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.collision_hold_s", 0.02));
+    config.flight_observer.touchdown_debounce_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.touchdown_debounce_s", 0.015));
+    config.flight_observer.support_settle_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.support_settle_s", 0.10));
+    config.flight_observer.max_airborne_s = static_cast<float>(
+        declare_parameter<double>("flight_observer.max_airborne_s", 0.75));
+    config.trajectory_observer.wheel_radius_m =
+        static_cast<float>(wheel_radius_m_);
+    config.trajectory_observer.half_track_m = config.mpc.half_wheel_base_m;
+    config.trajectory_observer_min_confidence = static_cast<float>(
+        declare_parameter<double>("trajectory_observer.min_confidence", 0.50));
+    // The raw IMU event is latched in onImu because the impact signature can
+    // be shorter than one control tick. Keep the thresholds identical to the
+    // LandingController configuration so the ROS adapter and core classify
+    // the same physical event.
+    landing_impact_accel_mps2_ = config.landing_controller.impact_accel_mps2;
+    landing_impact_pitch_rate_rad_s_ =
+        config.landing_controller.impact_pitch_rate_rad_s;
+    landing_impact_latch_s_ = static_cast<float>(declare_parameter<double>(
+        "landing_controller.imu_impact_latch_s", 0.06));
 
     // Real-time whole-body kinematic compensation: the MPC gets a leaned
     // base-pitch target computed from the live leg pose (CoM offset), so the
@@ -391,6 +579,22 @@ class BalanceControllerNode : public rclcpp::Node {
     config.hip_max_rad = pose_hip_max_rad_;
     config.knee_min_rad = pose_knee_min_rad_;
     config.knee_max_rad = pose_knee_max_rad_;
+    // See EmbeddedController::Config::keep_legs_active_when_fallen's own
+    // comment. false (default) preserves the prior total-safe-stop behavior
+    // byte-for-byte.
+    config.keep_legs_active_when_fallen = declare_parameter<bool>(
+        "keep_legs_active_when_fallen", false);
+    keep_legs_active_when_fallen_ = config.keep_legs_active_when_fallen;
+    config.landing_fallen_recovery_enabled = declare_parameter<bool>(
+        "landing_fallen_recovery.enabled", false);
+    config.landing_recovery_control_pitch_rad = static_cast<float>(
+        declare_parameter<double>("landing_fallen_recovery.control_pitch_rad", 1.25));
+    config.landing_recovery_handoff_pitch_rad = static_cast<float>(
+        declare_parameter<double>("landing_fallen_recovery.handoff_pitch_rad", 0.25));
+    config.landing_recovery_pitch_rate_rad_s = static_cast<float>(
+        declare_parameter<double>("landing_fallen_recovery.pitch_rate_rad_s", 0.6));
+    config.landing_recovery_hold_s = static_cast<float>(
+        declare_parameter<double>("landing_fallen_recovery.hold_s", 0.20));
     const auto load_pose = [this](const std::string& name, robot_control::JointArray& pose) {
       const auto values = declare_parameter<std::vector<double>>(
           name, std::vector<double>(pose.begin(), pose.end()));
@@ -494,6 +698,21 @@ class BalanceControllerNode : public rclcpp::Node {
     jump_contact_topics_[0] = declare_parameter<std::string>("jump.left_contacts_topic", "left_wheel_contacts");
     jump_contact_topics_[1] = declare_parameter<std::string>("jump.right_contacts_topic", "right_wheel_contacts");
     jump_ground_collision_ = declare_parameter<std::string>("jump.ground_collision", "ground_plane");
+    contact_support_surface_tokens_ = declare_parameter<std::vector<std::string>>(
+        "contact.support_surface_tokens",
+        std::vector<std::string>{"ground_plane", "ledge_pad",
+                                 "rough_arena_spawn_pad",
+                                 "parabolic_uneven_arena", "step_band_"});
+    contact_reject_surface_tokens_ = declare_parameter<std::vector<std::string>>(
+        "contact.reject_surface_tokens", std::vector<std::string>{"fillet"});
+    contact_min_support_normal_z_ = static_cast<float>(declare_parameter<double>(
+        "contact.min_support_normal_z", 0.5));
+    if (!std::isfinite(contact_min_support_normal_z_) ||
+        contact_min_support_normal_z_ < 0.0F ||
+        contact_min_support_normal_z_ > 1.0F) {
+      throw std::invalid_argument(
+          "contact.min_support_normal_z must be finite and in [0,1]");
+    }
     if (!std::isfinite(jump_contact_timeout_s_) || jump_contact_timeout_s_ <= 0 ||
         (jump_config_.enabled && pitch_source_ != "sim_pose"))
       throw std::invalid_argument("Jump requires sim_pose and positive contact timeout");
@@ -532,24 +751,27 @@ class BalanceControllerNode : public rclcpp::Node {
             return;
           }
           jump_contact_last_seen_[side]=stamp;
-          any_wheel_contact_[side]=!msg->contacts.empty();
           any_wheel_contact_stamps_[side]=stamp;
-          bool touching=false;
+          // A contact sensor publishes a heartbeat even when its contact list
+          // is empty. Keep that heartbeat fresh, but derive support only from
+          // a validated wheel/support-surface pair. In particular, a wheel
+          // touching the departure fillet, body, or another obstacle is not a
+          // floor contact and must not terminate Flight.
+          bool support_touching=false;
+          bool jump_ground_touching=false;
           for(const auto& c:msg->contacts) {
-            const auto& a=c.collision1.name;const auto& b=c.collision2.name;
-            const auto wheel = [&](const std::string& name) {
-              return (a.find(name)!=std::string::npos && b.find(jump_ground_collision_)!=std::string::npos) ||
-                     (b.find(name)!=std::string::npos && a.find(jump_ground_collision_)!=std::string::npos);
-            };
-            if(!wheel(side==0?"cad_left_wheel_link_collision":"cad_right_wheel_link_collision")) {
-              // Unrecognized nonempty reports are invalid, not airborne proof.
-              jump_contact_stamps_[side]=0;
-              return;
-            }
-            touching=true;
+            support_touching = support_touching ||
+                               isValidatedWheelSupportContact(c, side);
+            jump_ground_touching = jump_ground_touching ||
+                                   isJumpGroundContact(c, side);
           }
+          any_wheel_contact_[side]=support_touching;
+          // Jump keeps its stricter, single-ground-surface contract. A
+          // non-ground contact still counts as a live sensor heartbeat, but
+          // never as jump touchdown.
           jump_contact_stamps_[side]=stamp;
-          if(side==0) jump_left_contact_=touching; else jump_right_contact_=touching;
+          if(side==0) jump_left_contact_=jump_ground_touching;
+          else jump_right_contact_=jump_ground_touching;
         });
     }
     station_enabled_ = declare_parameter<bool>("station_keeper.enabled", false);
@@ -691,6 +913,88 @@ class BalanceControllerNode : public rclcpp::Node {
   }
 
  private:
+  bool containsWheelCollision(const std::string& name,
+                              std::size_t side) const {
+    const char* leaf = side == 0 ? "cad_left_wheel_link_collision"
+                                 : "cad_right_wheel_link_collision";
+    if (name == leaf) return true;
+    const std::string suffix = std::string("::") + leaf;
+    if (name.size() > suffix.size() &&
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      return true;
+    }
+    // Gazebo Sim expands an URDF collision named
+    // `cad_*_wheel_link_collision` to the scoped entity name
+    // `...::cad_*_wheel_link_collision_collision`.  The extra suffix is
+    // version/description-format specific, so accept it explicitly while
+    // keeping the side-specific collision check strict.
+    const std::string sdf_suffix = suffix + "_collision";
+    return name.size() > sdf_suffix.size() &&
+           name.compare(name.size() - sdf_suffix.size(), sdf_suffix.size(),
+                        sdf_suffix) == 0;
+  }
+
+  bool isConfiguredSupportSurface(const std::string& name) const {
+    if (name.empty()) return false;
+    for (const auto& token : contact_reject_surface_tokens_) {
+      if (!token.empty() && name.find(token) != std::string::npos) {
+        return false;
+      }
+    }
+    for (const auto& token : contact_support_surface_tokens_) {
+      if (!token.empty() && name.find(token) != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool hasSupportNormal(const ros_gz_interfaces::msg::Contact& contact) const {
+    // Some ros_gz_bridge versions omit normals in the ROS conversion. In that
+    // case the explicit support-surface name is the only available physical
+    // classifier; never infer support from a merely nonempty contact list.
+    if (contact.normals.empty()) return true;
+    for (const auto& normal : contact.normals) {
+      const double nx = normal.x;
+      const double ny = normal.y;
+      const double nz = normal.z;
+      const double norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+      if (std::isfinite(norm) && norm > 1.0e-9 &&
+          std::isfinite(nz) &&
+          std::abs(nz) / norm >= contact_min_support_normal_z_) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool isValidatedWheelSupportContact(
+      const ros_gz_interfaces::msg::Contact& contact, std::size_t side) const {
+    const auto& first = contact.collision1.name;
+    const auto& second = contact.collision2.name;
+    const bool first_wheel = containsWheelCollision(first, side);
+    const bool second_wheel = containsWheelCollision(second, side);
+    // Exactly one member of the pair must be this side's wheel. This rejects
+    // wheel-wheel and wrong-side/body contacts even if they contain a known
+    // terrain token elsewhere in their fully-qualified names.
+    if (first_wheel == second_wheel) return false;
+    const auto& support = first_wheel ? second : first;
+    return isConfiguredSupportSurface(support) && hasSupportNormal(contact);
+  }
+
+  bool isJumpGroundContact(const ros_gz_interfaces::msg::Contact& contact,
+                           std::size_t side) const {
+    const auto& first = contact.collision1.name;
+    const auto& second = contact.collision2.name;
+    const bool first_wheel = containsWheelCollision(first, side);
+    const bool second_wheel = containsWheelCollision(second, side);
+    if (first_wheel == second_wheel || jump_ground_collision_.empty()) {
+      return false;
+    }
+    const auto& support = first_wheel ? second : first;
+    return support.find(jump_ground_collision_) != std::string::npos;
+  }
+
   void onImu(const sensor_msgs::msg::Imu& msg) {
     const auto& q = msg.orientation;
     if (!std::isfinite(msg.angular_velocity.y) || !std::isfinite(msg.angular_velocity.z) ||
@@ -705,19 +1009,26 @@ class BalanceControllerNode : public rclcpp::Node {
     // loop period: onImu runs per IMU message (e.g. 500 Hz), which need not
     // match control_period_s_ (e.g. 1 kHz). Falls back to the nominal
     // period for the first sample or a bad/stale stamp.
-    const float dt =
+    const float raw_dt =
         (last_imu_stamp_s_ > 0.0 && stamp_s > last_imu_stamp_s_)
             ? static_cast<float>(stamp_s - last_imu_stamp_s_)
             : static_cast<float>(control_period_s_);
+    // A delayed bridge sample must not integrate a whole wall-clock gap as a
+    // single gyro step. The watchdog handles sustained staleness; this clamp
+    // protects the estimator during a short scheduling hiccup.
+    const float dt = std::clamp(raw_dt, 1.0e-4F, 0.02F);
 
     raw_imu_pitch_rate_rad_s_ = pitch_rate_rad_s;
     raw_imu_yaw_rate_rad_s_ = static_cast<float>(msg.angular_velocity.z);
-    // Observation-only (see the member declaration) - never gates control,
-    // so an invalid sample here just skips this one update rather than
-    // rejecting the whole IMU message the pitch/yaw path already validated.
+    // See the member declaration - an invalid sample here just skips this
+    // one update rather than rejecting the whole IMU message the pitch/yaw
+    // path already validated.
     if (std::isfinite(msg.angular_velocity.x)) {
       raw_imu_roll_rate_rad_s_ = static_cast<float>(msg.angular_velocity.x);
     }
+    // Always updated regardless of pitch_source, mirroring
+    // accel_magnitude_m_s2 below - see Types.hpp's ImuState::roll_rate_rad_s.
+    state_.imu.roll_rate_rad_s = raw_imu_roll_rate_rad_s_;
     raw_imu_yaw_rad_ = yawFromQuaternion(q.w, q.x, q.y, q.z);
     // Raw (unfiltered) specific-force magnitude, independent of pitch_source_
     // and of the separate low-passed accel_*_lp_ gravity estimate below (that
@@ -734,6 +1045,25 @@ class BalanceControllerNode : public rclcpp::Node {
         static_cast<float>(msg.linear_acceleration.x) * static_cast<float>(msg.linear_acceleration.x) +
         static_cast<float>(msg.linear_acceleration.y) * static_cast<float>(msg.linear_acceleration.y) +
         static_cast<float>(msg.linear_acceleration.z) * static_cast<float>(msg.linear_acceleration.z));
+    // Real, always-updated regardless of pitch_source - see Types.hpp's
+    // ImuState::accel_magnitude_m_s2 (LandingImpedance's hard-impact gate).
+    state_.imu.accel_magnitude_m_s2 = last_accel_magnitude_m_s2_;
+    // Preserve a short fused acceleration/gyro event across the asynchronous
+    // IMU-to-control-loop boundary. A single valid sample is enough here: the
+    // event is only armed after the airborne gate in the core, and its lifetime
+    // is bounded by landing_impact_latch_s_.
+    // Use receipt/sim-clock time for the expiry. A valid sensor timestamp can
+    // already be older than the next timer tick when the bridge is delayed;
+    // using that stamp directly would erase the event before the controller
+    // ever sees it.
+    const double event_time_s = now().seconds();
+    if (landing_impact_latch_s_ > 0.0F &&
+        last_accel_magnitude_m_s2_ >= landing_impact_accel_mps2_ &&
+        std::abs(pitch_rate_rad_s) >= landing_impact_pitch_rate_rad_s_) {
+      pending_imu_impact_event_ = true;
+      pending_imu_impact_expiry_s_ =
+          event_time_s + static_cast<double>(landing_impact_latch_s_);
+    }
     // A zero timestamp is not evidence that this sample is fresh. Keep the
     // watchdog fail-closed instead of replacing an invalid stamp with now().
     last_imu_stamp_s_ = stamp_s > 0.0 ? stamp_s : 0.0;
@@ -911,22 +1241,30 @@ class BalanceControllerNode : public rclcpp::Node {
       // ~0.3 rad/s) so it does not fire during ordinary balancing.
       constexpr float kHighPitchRateRadS = 1.5F;
       const bool fast_rotation = std::fabs(pitch_rate_rad_s) > kHighPitchRateRadS;
-      const float r_effective =
-          kalman_r_measure_ *
-          (1.0F + ((pose_changing || fast_rotation) ? kalman_accel_trust_gain_ : 0.0F) *
-                      accel_dev_excess * accel_dev_excess);
-      const float innovation = pitch_measured - complementary_pitch_rad_;
-      const float s = kalman_p_[0][0] + r_effective;
-      const float k0 = kalman_p_[0][0] / s;
-      const float k1 = kalman_p_[1][0] / s;
-      complementary_pitch_rad_ += k0 * innovation;
-      kalman_bias_ += k1 * innovation;
-      const float p00 = kalman_p_[0][0];
-      const float p01 = kalman_p_[0][1];
-      kalman_p_[0][0] -= k0 * p00;
-      kalman_p_[0][1] -= k0 * p01;
-      kalman_p_[1][0] -= k1 * p00;
-      kalman_p_[1][1] -= k1 * p01;
+      const bool accel_force_valid =
+          accel_mag >= kMinPlausibleAccelMag &&
+          accel_mag <= kMaxPlausibleAccelMag &&
+          std::fabs(accel_dev) <= kalman_accel_max_deviation_mps2_ &&
+          std::fabs(pitch_rate_rad_s) <= kalman_accel_max_pitch_rate_rad_s_;
+      accel_tilt_measurement_valid_ = accel_force_valid;
+      if (accel_force_valid) {
+        const float r_effective =
+            kalman_r_measure_ *
+            (1.0F + ((pose_changing || fast_rotation) ? kalman_accel_trust_gain_ : 0.0F) *
+                        accel_dev_excess * accel_dev_excess);
+        const float innovation = pitch_measured - complementary_pitch_rad_;
+        const float s = kalman_p_[0][0] + r_effective;
+        const float k0 = kalman_p_[0][0] / s;
+        const float k1 = kalman_p_[1][0] / s;
+        complementary_pitch_rad_ += k0 * innovation;
+        kalman_bias_ += k1 * innovation;
+        const float p00 = kalman_p_[0][0];
+        const float p01 = kalman_p_[0][1];
+        kalman_p_[0][0] -= k0 * p00;
+        kalman_p_[0][1] -= k0 * p01;
+        kalman_p_[1][0] -= k1 * p00;
+        kalman_p_[1][1] -= k1 * p01;
+      }
     }
 
     float pitch_rad =
@@ -1076,6 +1414,10 @@ class BalanceControllerNode : public rclcpp::Node {
         s * state_.joints.velocity_rad_s[kRightWheel] * r;
     state_.wheel.position_m = 0.5F * (left_position + right_position);
     state_.wheel.velocity_m_s = 0.5F * (left_velocity + right_velocity);
+    state_.wheel.left_position_m = left_position;
+    state_.wheel.right_position_m = right_position;
+    state_.wheel.left_velocity_m_s = left_velocity;
+    state_.wheel.right_velocity_m_s = right_velocity;
     last_joint_state_stamp_s_ = stamp_s > 0.0 ? stamp_s : 0.0;
     have_joint_state_ = true;
   }
@@ -1122,6 +1464,26 @@ class BalanceControllerNode : public rclcpp::Node {
       return;
     }
 
+    // Do not let the core interpret the absence of the first contact sample as
+    // a real liftoff. Hold actuators off until both per-wheel streams have
+    // produced at least one timestamped sample; later, a stale/empty sample is
+    // handled as genuine no-contact by the fail-closed state below.
+    if (pitch_source_ != "sim_pose" && !wheelContactObservationReady()) {
+      publishMode(robot_control::MotorCommand{});
+      publishWheelCommand(robot_control::MotorCommand{});
+      publishLegCommand(robot_control::MotorCommand{});
+      return;
+    }
+
+    const double control_now_s = now().seconds();
+    if (pending_imu_impact_event_ &&
+        control_now_s <= pending_imu_impact_expiry_s_) {
+      state_.imu.hard_impact_event = true;
+    } else {
+      state_.imu.hard_impact_event = false;
+      pending_imu_impact_event_ = false;
+    }
+
     // Real per-wheel contact sensing (docs/RULES.md Rule 1 / Track B.1):
     // when not using sim_pose ground truth, floor_contact comes from actual
     // Gazebo contact sensor data (requires measure_contacts:=true at launch,
@@ -1129,16 +1491,19 @@ class BalanceControllerNode : public rclcpp::Node {
     // simulator-omniscient pose heuristic. Missing/stale contacts must not
     // imply grounded balance -- fail closed (not-fresh means not-grounded),
     // matching jumpContactFresh()'s own fail-closed idiom below.
+    const bool left_contact_fresh = wheelContactFresh(0);
+    const bool right_contact_fresh = wheelContactFresh(1);
     state_.floor_contact = pitch_source_ == "sim_pose"
         ? true
-        : (anyWheelContactFresh() && (any_wheel_contact_[0] || any_wheel_contact_[1]));
+        : ((left_contact_fresh && any_wheel_contact_[0]) ||
+           (right_contact_fresh && any_wheel_contact_[1]));
     // Per-side (ROLL differential impedance): sim_pose's global height/pitch
     // heuristic has no per-wheel granularity, so both sides mirror the
     // combined value there; the real per-wheel contact path already has it.
     state_.left_floor_contact = pitch_source_ == "sim_pose"
-        ? state_.floor_contact : (anyWheelContactFresh() && any_wheel_contact_[0]);
+        ? state_.floor_contact : (left_contact_fresh && any_wheel_contact_[0]);
     state_.right_floor_contact = pitch_source_ == "sim_pose"
-        ? state_.floor_contact : (anyWheelContactFresh() && any_wheel_contact_[1]);
+        ? state_.floor_contact : (right_contact_fresh && any_wheel_contact_[1]);
     if (pitch_source_ == "sim_pose" && have_sim_pose_) {
       state_.floor_contact =
           last_sim_pose_z_m_ >= sim_contact_min_base_z_m_ &&
@@ -1170,36 +1535,62 @@ class BalanceControllerNode : public rclcpp::Node {
           last_accel_magnitude_m_s2_ >= imu_touchdown_accel_mps2_) {
         state_.floor_contact = true;
       }
-      // Fused hard-impact settle delay (see hard_impact_delay_enabled_
-      // declaration above for the citation and rationale). Overrides
-      // floor_contact back to false -- even past the two widen-only blocks
-      // above -- for hard_impact_settle_s_ after the last tick a fused
-      // accel+pitch-rate hard impact was seen, extending on every
-      // continuing-impact tick. Off by default, a no-op.
-      if (hard_impact_delay_enabled_) {
-        const bool hard_impact_now =
-            last_accel_magnitude_m_s2_ >= hard_impact_accel_mps2_ &&
-            std::abs(state_.imu.pitch_rate_rad_s) >= hard_impact_pitch_rate_rad_s_;
-        if (hard_impact_now) {
-          hard_impact_settle_remaining_s_ = hard_impact_settle_s_;
-        } else if (hard_impact_settle_remaining_s_ > 0.0F) {
-          hard_impact_settle_remaining_s_ =
-              std::max(0.0F, hard_impact_settle_remaining_s_ - state_.dt_s);
-        }
-        if (hard_impact_settle_remaining_s_ > 0.0F) {
-          state_.floor_contact = false;
-        }
-      }
+      state_.left_floor_contact = state_.floor_contact;
+      state_.right_floor_contact = state_.floor_contact;
     }
     if(jump_config_.enabled) {
       // Missing contacts may hold posture, but never imply grounded balance.
       state_.floor_contact=jumpContactFresh()&&(jump_left_contact_||jump_right_contact_);
+      state_.left_floor_contact=jumpContactFresh()&&jump_left_contact_;
+      state_.right_floor_contact=jumpContactFresh()&&jump_right_contact_;
+    }
+    // Fused hard-impact settle delay (see hard_impact_delay_enabled_
+    // declaration above for the citation and rationale). It is allowed to
+    // start only from a validated wheel/support contact in the real-sensor
+    // path. An accelerometer/gyro shock while airborne is therefore telemetry,
+    // not permission to manufacture an airborne/grounded transition. The
+    // override keeps per-side contact consistent with the combined contract.
+    if (hard_impact_delay_enabled_) {
+      const bool hard_impact_now =
+          last_accel_magnitude_m_s2_ >= hard_impact_accel_mps2_ &&
+          std::abs(state_.imu.pitch_rate_rad_s) >= hard_impact_pitch_rate_rad_s_;
+      const bool validated_support_contact = pitch_source_ != "sim_pose" &&
+                                             state_.floor_contact;
+      if (validated_support_contact && hard_impact_now) {
+        hard_impact_settle_remaining_s_ = hard_impact_settle_s_;
+      } else if (validated_support_contact &&
+                 hard_impact_settle_remaining_s_ > 0.0F) {
+        hard_impact_settle_remaining_s_ =
+            std::max(0.0F, hard_impact_settle_remaining_s_ - state_.dt_s);
+      } else if (!validated_support_contact) {
+        // A shock after leaving the ledge must not leave a stale delay armed
+        // until the next unrelated touchdown.
+        hard_impact_settle_remaining_s_ = 0.0F;
+      }
+      if (hard_impact_settle_remaining_s_ > 0.0F) {
+        state_.floor_contact = false;
+        state_.left_floor_contact = false;
+        state_.right_floor_contact = false;
+      }
     }
 
     if(jump_config_.enabled && jump_wheel_frame_compensation_) {
       wheel_frame_=robot_control::WheelFrame::observe(state_.joints,state_.imu.pitch_rad,
           state_.imu.pitch_rate_rad_s,static_cast<float>(wheel_radius_m_));
-      if(wheel_frame_.valid) state_.wheel=wheel_frame_.axle;
+      if(wheel_frame_.valid) {
+        // Keep the raw per-side encoder channels for TrajectoryObserver.  The
+        // compensated axle value is still the balance/jump input, but assigning
+        // the aggregate wholesale would erase the observer's encoder evidence.
+        const float left_position = state_.wheel.left_position_m;
+        const float right_position = state_.wheel.right_position_m;
+        const float left_velocity = state_.wheel.left_velocity_m_s;
+        const float right_velocity = state_.wheel.right_velocity_m_s;
+        state_.wheel = wheel_frame_.axle;
+        state_.wheel.left_position_m = left_position;
+        state_.wheel.right_position_m = right_position;
+        state_.wheel.left_velocity_m_s = left_velocity;
+        state_.wheel.right_velocity_m_s = right_velocity;
+      }
       else { command_.request_enable=false;command_.request_disable=true; }
     }
 
@@ -1257,6 +1648,9 @@ class BalanceControllerNode : public rclcpp::Node {
       imu_seeded_ = false;  // re-seed the pitch filter from a fresh, validated sample
       seed_window_count_ = 0;
       seed_accum_x_ = seed_accum_y_ = seed_accum_z_ = 0.0F;
+      pending_imu_impact_event_ = false;
+      pending_imu_impact_expiry_s_ = 0.0;
+      state_.imu.hard_impact_event = false;
       reset_requested_ = false;
     }
 
@@ -1348,7 +1742,14 @@ class BalanceControllerNode : public rclcpp::Node {
     const auto mode = controller_->mode();
     if (mode == robot_control::ControlMode::Fallen ||
         mode == robot_control::ControlMode::EmergencyStop) {
-      discardPendingPose();
+      // Legacy Fallen safe-stops the legs, so discarding to measured joints is
+      // fine. Landing experiments with keep_legs_active_when_fallen keep the
+      // legs live; repeatedly discarding there makes the stance target chase
+      // impact-distorted joints instead of remaining a suspension setpoint.
+      if (mode == robot_control::ControlMode::EmergencyStop ||
+          !keep_legs_active_when_fallen_) {
+        discardPendingPose();
+      }
       if(jump_->active()) stopJump("controller_fault");
       station_keeper_->reset();
       station_output_ = {};
@@ -1466,6 +1867,9 @@ class BalanceControllerNode : public rclcpp::Node {
       if(jump_->active()) stopJump("clock_rewind");
       jump_request_pending_=false;
       resetJumpContacts();
+      pending_imu_impact_event_ = false;
+      pending_imu_impact_expiry_s_ = 0.0;
+      state_.imu.hard_impact_event = false;
       station_keeper_->reset();
       station_output_ = {};
       measured_control_dt_s_ = control_period_s_;
@@ -1496,11 +1900,24 @@ class BalanceControllerNode : public rclcpp::Node {
   }
 
   bool anyWheelContactFresh() const {
-    for(double stamp:any_wheel_contact_stamps_) {
-      const double age=now().seconds()-stamp;
-      if(!(stamp>0 && age>=-kJumpContactClockToleranceS && age<=jump_contact_timeout_s_)) return false;
-    }
-    return true;
+    return wheelContactFresh(0) || wheelContactFresh(1);
+  }
+
+  bool wheelContactFresh(std::size_t side) const {
+    if (side >= any_wheel_contact_stamps_.size()) return false;
+    const double stamp = any_wheel_contact_stamps_[side];
+    const double age = now().seconds() - stamp;
+    return stamp > 0.0 && age >= -kJumpContactClockToleranceS &&
+           age <= jump_contact_timeout_s_;
+  }
+
+  bool wheelContactObservationReady() const {
+    // Both streams must initialize before enabling. Once initialized, contact
+    // is deliberately an OR: the wheel that touches first is a valid
+    // touchdown event, while its per-side freshness remains independently
+    // visible to the landing controller.
+    return any_wheel_contact_stamps_[0] > 0.0 &&
+           any_wheel_contact_stamps_[1] > 0.0;
   }
 
   void resetJumpContacts() {
@@ -1673,17 +2090,40 @@ class BalanceControllerNode : public rclcpp::Node {
     const bool fresh = sensorDataFresh(now_s);
     const robot_control::MpcBalancer::DebugState mpc_debug =
         controller_->mpcDebugState();
-    char buffer[1536];
+    const char* landing_phase = "Grounded";
+    switch (controller_->landingPhase()) {
+      case robot_control::LandingController::Phase::Grounded:
+        landing_phase = "Grounded";
+        break;
+      case robot_control::LandingController::Phase::Flight:
+        landing_phase = "Flight";
+        break;
+      case robot_control::LandingController::Phase::Impact:
+        landing_phase = "Impact";
+        break;
+      case robot_control::LandingController::Phase::Recovery:
+        landing_phase = "Recovery";
+        break;
+    }
+    const auto flight = controller_->flightEstimate();
+    const auto trajectory = controller_->trajectoryEstimate();
+    char buffer[2048];
     const int written = std::snprintf(
         buffer, sizeof(buffer),
         "%s|pitch=%.3f|pitch_rate=%.3f|cmd_v=%.2f|cmd_w=%.2f|enable=%d|estop=%d|imu=%d|joints=%d"
         "|dt_ms=%.2f|jitter_ms=%.2f|imu_age_ms=%.1f|ori_age_ms=%.1f|js_age_ms=%.1f"
         "|fresh=%d|stale_n=%d|timeout_ms=%.0f|pose_idx=%d|pose_n=%zu|pose_z=%.3f"
-        "|contact=%d|accel_mag=%.2f|roll_rate=%.4f"
+        "|contact=%d|left_contact=%d|right_contact=%d|contact_fresh=%d|impact_event=%d"
+        "|accel_mag=%.2f|accel_tilt_valid=%d|roll_rate=%.4f"
         "|wheel_pos=%.3f|wheel_vel=%.3f|l_qd=%.2f|r_qd=%.2f"
         "|l_qd_meas=%.2f|r_qd_meas=%.2f|l_qd_cmd=%.2f|r_qd_cmd=%.2f"
         "|l_tau_meas=%.2f|r_tau_meas=%.2f"
-        "|l_hip=%.3f|l_knee=%.3f|kp_scale=%.2f"
+        "|l_hip=%.3f|l_knee=%.3f|kp_scale=%.2f|l_knee_kp_scale=%.2f"
+        "|landing_phase=%s|landing_ff_lh=%.3f|landing_ff_lk=%.3f|landing_ff_rh=%.3f|landing_ff_rk=%.3f"
+        "|flight_phase=%s|flight_airborne=%d|flight_ballistic=%d|flight_collision=%d|flight_touchdown=%d"
+        "|support_loss_ms=%.1f|flight_time_ms=%.1f|vz_down=%.3f|freefall_conf=%.2f|collision_conf=%.2f"
+        "|obs_valid=%d|obs_x=%.4f|obs_y=%.4f|obs_v=%.4f|obs_w=%.4f|obs_yaw=%.4f|obs_conf=%.2f|obs_stationary=%d"
+        "|landing_v=%.4f|landing_v_observer=%d"
         "|ctrl=mpc|mpc_cmd=%.3f|mpc_end_pitch=%.3f|mpc_cmd_v=%.3f|mpc_iters=%d"
         "|wb_dx=%.4f|wb_h=%.3f|pitch_ref=%.4f|pose_tgt=%.2f,%.2f"
         "|station=%d|anchor_ex=%.4f|anchor_ey=%.4f|anchor_yaw=%.4f|station_v=%.4f|station_w=%.4f"
@@ -1699,7 +2139,12 @@ class BalanceControllerNode : public rclcpp::Node {
         fresh ? 1 : 0, stale_cycle_count_, 1000.0 * sensor_timeout_s_,
         last_sim_pose_index_,
         last_sim_pose_count_, last_sim_pose_z_m_, state_.floor_contact ? 1 : 0,
+        state_.left_floor_contact ? 1 : 0,
+        state_.right_floor_contact ? 1 : 0,
+        anyWheelContactFresh() ? 1 : 0,
+        state_.imu.hard_impact_event ? 1 : 0,
         static_cast<double>(last_accel_magnitude_m_s2_),
+        accel_tilt_measurement_valid_ ? 1 : 0,
         static_cast<double>(raw_imu_roll_rate_rad_s_),
         static_cast<double>(state_.wheel.position_m),
         static_cast<double>(state_.wheel.velocity_m_s),
@@ -1713,6 +2158,30 @@ class BalanceControllerNode : public rclcpp::Node {
         static_cast<double>(state_.joints.position_rad[kLeftHip]),
         static_cast<double>(state_.joints.position_rad[kLeftKnee]),
         static_cast<double>(motors.kp_scale[kLeftHip]),
+        static_cast<double>(motors.kp_scale[kLeftKnee]),
+        landing_phase,
+        static_cast<double>(motors.feedforward_nm[kLeftHip]),
+        static_cast<double>(motors.feedforward_nm[kLeftKnee]),
+        static_cast<double>(motors.feedforward_nm[kRightHip]),
+        static_cast<double>(motors.feedforward_nm[kRightKnee]),
+        robot_control::toString(flight.phase), flight.airborne ? 1 : 0,
+        flight.ballistic ? 1 : 0, flight.collision_candidate ? 1 : 0,
+        flight.touchdown_candidate ? 1 : 0,
+        1000.0 * static_cast<double>(flight.support_loss_elapsed_s),
+        1000.0 * static_cast<double>(flight.flight_time_s),
+        static_cast<double>(flight.downward_velocity_m_s),
+        static_cast<double>(flight.free_fall_confidence),
+        static_cast<double>(flight.collision_confidence),
+        trajectory.valid ? 1 : 0,
+        static_cast<double>(trajectory.forward_position_m),
+        static_cast<double>(trajectory.lateral_position_m),
+        static_cast<double>(trajectory.forward_velocity_m_s),
+        static_cast<double>(trajectory.yaw_rate_rad_s),
+        static_cast<double>(trajectory.yaw_rad),
+        static_cast<double>(trajectory.confidence),
+        trajectory.stationary ? 1 : 0,
+        static_cast<double>(controller_->landingForwardVelocity()),
+        controller_->landingUsesTrajectoryObserver() ? 1 : 0,
         static_cast<double>(mpc_debug.optimal_command_m_s),
         static_cast<double>(mpc_debug.horizon_end_pitch_rad),
         static_cast<double>(mpc_debug.commanded_ground_velocity_m_s),
@@ -1769,6 +2238,8 @@ class BalanceControllerNode : public rclcpp::Node {
   float kalman_q_bias_;
   float kalman_r_measure_;
   float kalman_accel_trust_gain_;
+  float kalman_accel_max_deviation_mps2_;
+  float kalman_accel_max_pitch_rate_rad_s_;
   float kalman_bias_ = 0.0F;
   float kalman_p_[2][2] = {{1.0F, 0.0F}, {0.0F, 1.0F}};
   float leg_kp_;
@@ -1787,14 +2258,20 @@ class BalanceControllerNode : public rclcpp::Node {
   float seed_accum_y_ = 0.0F;
   float seed_accum_z_ = 0.0F;
   float last_accel_magnitude_m_s2_ = 9.81F;
+  bool accel_tilt_measurement_valid_ = false;
+  float landing_impact_accel_mps2_ = 35.0F;
+  float landing_impact_pitch_rate_rad_s_ = 4.0F;
+  float landing_impact_latch_s_ = 0.06F;
+  bool pending_imu_impact_event_ = false;
+  double pending_imu_impact_expiry_s_ = 0.0;
   float raw_imu_pitch_rate_rad_s_ = 0.0F;
   float raw_imu_yaw_rate_rad_s_ = 0.0F;
-  // Real gyro roll rate, published for observation only (see publishMode's
-  // "roll_rate=" field) - not consumed by any control logic yet.
-  // angular_velocity.x was never read anywhere in this file before; this is
-  // the direct raw signal, not an Euler-angle-derived estimate (which is
-  // degenerate near pitch = pi, see docs/LEDGE_DRIVEOFF_LIMIT.md's own note
-  // on peak_roll_rad measurement artifacts).
+  // Real gyro roll rate: published for telemetry (publishMode's "roll_rate="
+  // field) AND, since 2026-09-16, fed into state_.imu.roll_rate_rad_s for
+  // LandingReflex's differential-knee roll gate (see that Config field's own
+  // comment). The direct raw signal, not an Euler-angle-derived estimate
+  // (which is degenerate near pitch = pi, see docs/LEDGE_DRIVEOFF_LIMIT.md's
+  // own note on peak_roll_rad measurement artifacts).
   float raw_imu_roll_rate_rad_s_ = 0.0F;
   float raw_imu_yaw_rad_ = 0.0F;
   float last_sim_pose_pitch_rad_ = 0.0F;
@@ -1829,6 +2306,7 @@ class BalanceControllerNode : public rclcpp::Node {
   float pose_hip_max_rad_ = 0.8F;
   float pose_knee_min_rad_ = -1.6F;
   float pose_knee_max_rad_ = 0.3F;
+  bool keep_legs_active_when_fallen_ = false;
 
   robot_control::RobotState state_{};
   robot_control::ControlCommand command_{};
@@ -1848,16 +2326,16 @@ class BalanceControllerNode : public rclcpp::Node {
   static constexpr double kJumpContactClockToleranceS=0.010;
   std::array<double,2> jump_contact_stamps_{};
   std::array<double,2> jump_contact_last_seen_{};
-  // Generic per-wheel "touching anything" signal, independent of
-  // jump_ground_collision_ name-matching (which rejects e.g. ledge_pad as
-  // "unrecognized" -- correct for jump's own single-surface world, wrong for
-  // the general floor_contact use below, which just needs real contact vs.
-  // no contact, not which named surface). Set from the same subscription
-  // callback as jump_contact_stamps_, same freshness idiom.
+  // Validated per-wheel support signal. It is deliberately narrower than
+  // "touching anything": edge fillets/body collisions are not support for
+  // the wheel MPC or landing phase machine.
   std::array<bool,2> any_wheel_contact_{};
   std::array<double,2> any_wheel_contact_stamps_{};
   std::array<std::string,2> jump_contact_topics_;
   std::string jump_profile_,jump_ground_collision_;
+  std::vector<std::string> contact_support_surface_tokens_;
+  std::vector<std::string> contact_reject_surface_tokens_;
+  float contact_min_support_normal_z_ = 0.5F;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr jump_status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr actuator_enable_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr leg_velocity_reference_pub_;

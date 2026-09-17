@@ -12,18 +12,26 @@ signs and exact CAD-derived whole-body FK. Robot model:
 `src/tap_robot_description/description/cad_robot/robot.urdf.xacro`.
 
 **Scope boundary:** the user authorizes algorithm/simulation work only — not
-hardware actuation, motor flashing, or deployment. Simulation success (build,
-RViz, closed-loop Gazebo) is never evidence of physical/hardware capability;
-keep these evidence levels distinct in any report.
+hardware actuation, motor flashing, or deployment. The final deployment target
+is an ESP32-S3 N16R8. The permanently fixed physical sensor inventory is only
+one MPU6500 and six motor encoders. Physical wheel-contact, force/torque,
+range, camera, localization and motor-current sensors are excluded from the
+contract and may not become hidden future dependencies. Simulation success
+(build, RViz, closed-loop Gazebo) is never
+evidence of physical/hardware capability; keep these evidence levels distinct
+in any report.
 
 **Mandatory: read `docs/RULES.md`** before adding or changing any
 control-path code — it holds every standing project rule, binding on every
 session. Rule 1 there is the strictest so far: no control decision may
-depend on simulator-internal state with no real-hardware equivalent (the
-clearest current example: `sim_pose`, the default `pitch_source`, read
-straight from Gazebo's model pose rather than estimated from a real sensor;
-this is a known, deliberately-not-yet-fixed violation tracked as its own
-future track — see the file for the full explanation).
+depend on simulator-internal state with no real-hardware equivalent. The
+deployable path is MPU6500 plus six encoders; `sim_pose` and Gazebo contact
+telemetry are diagnostic/simulation inputs only and must not silently become
+the hardware support or pose estimate.
+
+`docs/RULES.md` and `architecture.md` are protected project-contract files.
+Do not modify either one without explicit user permission for that document
+change; a normal implementation request is not sufficient authorization.
 
 ## Build, run, test
 
@@ -98,8 +106,8 @@ Five colcon packages under `src/`:
     `controller_config:=` at launch, not compiled in.
   - `tests/` — C++ unit/contract tests registered as ctest targets, plus
     `test_urdf_model.py`.
-- **`tap_sim`** — Gazebo integration: free-body physics model, contact sensing
-  (`src/contact_snapshot.cpp`), bounded actuator plugin
+  - **`tap_sim`** — Gazebo integration: free-body physics model, simulation-only
+  contact telemetry (`src/contact_snapshot.cpp`), bounded actuator plugin
   (`src/bounded_gazebo_system.cpp`, `include/tap_sim/{actuator_bounds,
   actuator_gate,leg_velocity_reference}.hpp`), ros2_control config, launch
   (`launch/sim.launch.py`), worlds (`empty.sdf`, opt-in `jump.sdf`). The
@@ -152,6 +160,7 @@ than this file; read the relevant one before nontrivial work in that area
 | MPC, trajectories, control modes, recovery | `.agents/skills/tap-control-expert/SKILL.md` |
 | ROS interfaces, Gazebo, launch, GUI integration | `.agents/skills/tap-ros-gazebo/SKILL.md` |
 | Tests, regressions, simulation evidence | `.agents/skills/tap-qa-regression/SKILL.md` |
+| Balance/landing/fall-recovery theory (humanoid, quadruped, wheel-legged), before designing a new mechanism | `.agents/skills/legged-locomotion-references/SKILL.md` |
 
 `docs/ALGORITHM_MIGRATION.md` tracks port/verification status per algorithm
 piece and is required reading before assuming something is already ported or

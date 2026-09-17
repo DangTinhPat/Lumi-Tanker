@@ -51,7 +51,10 @@ EmbeddedController::EmbeddedController(Config config)
       joint_motion_(config_.joint_motion),
       state_machine_(config_.state_machine),
       landing_reflex_(config_.landing_reflex),
-      landing_impedance_(config_.landing_impedance) {}
+      landing_impedance_(config_.landing_impedance),
+      landing_controller_(config_.landing_controller),
+      flight_observer_(config_.flight_observer),
+      trajectory_observer_(config_.trajectory_observer) {}
 
 float EmbeddedController::updateBalancePitchRef(const RobotState& state,
                                                const ControlCommand& command) {
@@ -153,8 +156,8 @@ MpcBalancer::Output EmbeddedController::runBalance(
                      updateBalancePitchRef(state, command), hold_station);
 }
 
-void EmbeddedController::resetBalance(float ground_position_m) {
-  mpc_.reset(ground_position_m);
+void EmbeddedController::resetBalance(float ground_position_m, bool floor_contact) {
+  mpc_.reset(ground_position_m, floor_contact);
 }
 
 void EmbeddedController::setBalanceFallPitch(float fall_pitch_rad) noexcept {
@@ -166,7 +169,7 @@ MpcBalancer::DebugState EmbeddedController::mpcDebugState() const noexcept {
 }
 
 void EmbeddedController::reset(const RobotState& state) {
-  resetBalance(state.wheel.position_m);
+  resetBalance(state.wheel.position_m, state.floor_contact);
   setBalanceFallPitch(config_.mpc.fall_pitch_rad);
   joint_motion_.reset(state.joints.position_rad);
   state_machine_.reset();
@@ -174,9 +177,21 @@ void EmbeddedController::reset(const RobotState& state) {
   pitch_trim_rad_ = 0.0F;
   trim_dwell_elapsed_s_ = 0.0F;
   station_dwell_s_ = 0.0F;
+  landing_recovery_hold_elapsed_s_ = 0.0F;
   last_whole_body_ = WholeBodyModel::Result{};
-  landing_reflex_.reset();
-  landing_impedance_.reset();
+  landing_reflex_.reset(state.floor_contact);
+  landing_impedance_.reset(state.left_floor_contact, state.right_floor_contact);
+  landing_controller_.reset(state.floor_contact, state.left_floor_contact,
+                             state.right_floor_contact);
+  flight_observer_.reset(state);
+  trajectory_observer_.reset(state);
+  last_landing_output_ = LandingController::Output{};
+  last_flight_estimate_ = FlightObserver::Output{};
+  last_trajectory_estimate_ = TrajectoryObserver::Output{};
+  last_landing_forward_velocity_m_s_ = state.wheel.velocity_m_s;
+  last_landing_uses_trajectory_observer_ = false;
+  last_supported_forward_velocity_m_s_ = state.wheel.velocity_m_s;
+  last_supported_trajectory_velocity_valid_ = false;
   stand_up_stage_ = StandUpStage::Idle;
   stand_up_settle_cycles_ = 0;
   stand_up_settle_elapsed_s_ = 0.0F;
@@ -209,16 +224,29 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   }
 
   const ControlMode previous_mode = state_machine_.mode();
+  last_trajectory_estimate_ = trajectory_observer_.update(state);
+  last_flight_estimate_ = flight_observer_.update(state);
   const ControlMode mode = state_machine_.update(
-      state, command, joint_motion_.active(), standingUp());
+      state, command, joint_motion_.active(), standingUp(),
+      last_flight_estimate_.airborne || last_flight_estimate_.support_settling);
   if (usesBalance(mode) && !usesBalance(previous_mode)) {
     setBalanceFallPitch(config_.mpc.fall_pitch_rad);
-    resetBalance(state.wheel.position_m);
+    resetBalance(state.wheel.position_m, state.floor_contact);
     // Fresh re-entry into Balance/Drive/PoseChange (e.g. after Fallen or
     // StandingUp) must not replay a stale latched airborne/catch offset from
     // before the mode left balancing.
-    landing_reflex_.reset();
-    landing_impedance_.reset();
+    landing_reflex_.reset(state.floor_contact);
+    landing_impedance_.reset(state.left_floor_contact, state.right_floor_contact);
+    landing_controller_.reset(state.floor_contact, state.left_floor_contact,
+                               state.right_floor_contact);
+    flight_observer_.reset(state);
+    trajectory_observer_.reset(state);
+    last_flight_estimate_ = FlightObserver::Output{};
+    last_trajectory_estimate_ = TrajectoryObserver::Output{};
+    last_landing_output_ = LandingController::Output{};
+    last_supported_forward_velocity_m_s_ = state.wheel.velocity_m_s;
+    last_supported_trajectory_velocity_valid_ = false;
+    landing_recovery_hold_elapsed_s_ = 0.0F;
   }
 
   MotorCommand output{};
@@ -251,7 +279,8 @@ MotorCommand EmbeddedController::update(const RobotState& state,
         writeSafeStop(output, state);
         return output;
       }
-      writeBalancedCommand(output, balance, joint_target, LandingImpedance::Output{});
+      writeBalancedCommand(output, balance, joint_target, LandingImpedance::Output{},
+                           LandingController::Output{});
     }
     return output;
   }
@@ -263,24 +292,27 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   }
 
   if (mode == ControlMode::Enabling) {
-    resetBalance(state.wheel.position_m);
+    resetBalance(state.wheel.position_m, state.floor_contact);
     writePostureHold(output, command.target_joint_position_rad);
     return output;
   }
 
-  if (mode == ControlMode::Disabled ||
-      mode == ControlMode::EmergencyStop ||
-      mode == ControlMode::Fallen) {
+  if (mode == ControlMode::Disabled || mode == ControlMode::EmergencyStop) {
     joint_motion_.reset(state.joints.position_rad);
     writeSafeStop(output, state);
     return output;
   }
 
-  const MpcBalancer::Output balance =
-      runBalance(state, command,
-                 usesBalance(mode));
-  if (balance.fallen) {
-    state_machine_.forceFallen();
+  // StateMachine::update() has its OWN, separate absolute-pitch "tipped"
+  // check (std::abs(state.imu.pitch_rad) > fall_pitch_rad) that forces
+  // ControlMode::Fallen independently of MpcBalancer's own relative-pitch
+  // check below - in the common case (pitch_ref near 0) the two trip at
+  // nearly the same real pitch, so keep_legs_active_when_fallen must cover
+  // THIS path too, not only the balance.fallen branch further down, or it
+  // would still total-safe-stop the legs in the exact scenario it exists
+  // for. Legacy behavior (false) is unchanged: total safe-stop, same as
+  // Disabled/EmergencyStop above.
+  if (mode == ControlMode::Fallen && !config_.keep_legs_active_when_fallen) {
     joint_motion_.reset(state.joints.position_rad);
     writeSafeStop(output, state);
     return output;
@@ -289,11 +321,100 @@ MotorCommand EmbeddedController::update(const RobotState& state,
   JointArray joint_target =
       joint_motion_.active() ? joint_motion_.update(state.dt_s)
                              : command.target_joint_position_rad;
+  const LandingController::Output landing_output =
+      landing_controller_.update(state, joint_target, &last_flight_estimate_);
+  last_landing_output_ = landing_output;
+  const bool landing_fallen_recovery =
+      config_.landing_fallen_recovery_enabled &&
+      config_.keep_legs_active_when_fallen && mode == ControlMode::Fallen &&
+      state.floor_contact &&
+      std::abs(state.imu.pitch_rad) <= config_.landing_recovery_control_pitch_rad;
+  if (landing_fallen_recovery) {
+    setBalanceFallPitch(std::max(config_.mpc.fall_pitch_rad,
+                                 config_.landing_recovery_control_pitch_rad));
+  } else if (mode == ControlMode::Fallen) {
+    setBalanceFallPitch(config_.mpc.fall_pitch_rad);
+    landing_recovery_hold_elapsed_s_ = 0.0F;
+  }
+  ControlCommand balance_command = command;
+  if (landing_fallen_recovery) {
+    balance_command.target_forward_velocity_m_s = 0.0F;
+    balance_command.target_yaw_rate_rad_s = 0.0F;
+  }
+  const MpcBalancer::Output balance =
+      runBalance(state, balance_command,
+                 (usesBalance(mode) || landing_fallen_recovery) &&
+                     !landing_output.suspend_wheel_balance);
+  if (landing_fallen_recovery && !balance.fallen) {
+    const bool handoff_ready =
+        std::abs(state.imu.pitch_rad) <= config_.landing_recovery_handoff_pitch_rad &&
+        std::abs(state.imu.pitch_rate_rad_s) <=
+            config_.landing_recovery_pitch_rate_rad_s;
+    if (handoff_ready) {
+      landing_recovery_hold_elapsed_s_ += state.dt_s;
+      if (landing_recovery_hold_elapsed_s_ >=
+          config_.landing_recovery_hold_s) {
+        state_machine_.recoverToBalance();
+        setBalanceFallPitch(config_.mpc.fall_pitch_rad);
+        landing_recovery_hold_elapsed_s_ = 0.0F;
+      }
+    } else {
+      landing_recovery_hold_elapsed_s_ = 0.0F;
+    }
+  } else {
+    landing_recovery_hold_elapsed_s_ = 0.0F;
+  }
+  // Legs (reflex/impedance) computed BEFORE the fallen branch below and
+  // shared by both outcomes - see Config::keep_legs_active_when_fallen's own
+  // comment for why: unlike the wheel-drive MPC (which needs real
+  // ground/friction authority and legitimately has none to trust once its
+  // own linear-model-derived fall_pitch_rad trips), the leg mechanisms below
+  // (capture-point hip placement, differential roll correction, active knee
+  // extension, impedance) never depended on that authority and remain
+  // physically valid regardless of how far pitch has gone.
   // Reactive airborne/touchdown leg-target offset (see LandingReflex.hpp).
   // Only reached in Balance/Drive/PoseChange (every other mode returns
   // earlier above). All-zero config makes this an exact no-op every cycle.
+  const bool reflex_floor_contact = !last_flight_estimate_.airborne &&
+                                    state.floor_contact;
+  last_landing_forward_velocity_m_s_ = state.wheel.velocity_m_s;
+  last_landing_uses_trajectory_observer_ = false;
+  const float min_trajectory_confidence = std::clamp(
+      config_.trajectory_observer_min_confidence, 0.0F, 1.0F);
+  const bool trajectory_sample_valid =
+      last_trajectory_estimate_.valid &&
+      last_trajectory_estimate_.confidence >= min_trajectory_confidence &&
+      std::isfinite(last_trajectory_estimate_.forward_velocity_m_s);
+  const bool unloading = config_.landing_reflex.unloading_accel_mps2 > 0.0F &&
+      state.imu.accel_magnitude_m_s2 <=
+          config_.landing_reflex.unloading_accel_mps2;
+  // Preserve the last supported estimate before selecting the landing input.
+  // Do not overwrite it on an unloading sample: that sample is exactly where
+  // an unloaded wheel encoder can report zero despite the robot's real
+  // horizontal launch velocity still being nonzero.
+  if (state.floor_contact && !unloading && trajectory_sample_valid) {
+    last_supported_forward_velocity_m_s_ =
+        last_trajectory_estimate_.forward_velocity_m_s;
+    last_supported_trajectory_velocity_valid_ = true;
+  }
+  const bool support_lost_for_landing = !state.floor_contact || unloading;
+  if (support_lost_for_landing &&
+      last_supported_trajectory_velocity_valid_) {
+    // This is the pre-liftoff latch.  LandingReflex itself latches this value
+    // on its liftoff edge and holds the resulting hip target through flight.
+    last_landing_forward_velocity_m_s_ =
+        last_supported_forward_velocity_m_s_;
+    last_landing_uses_trajectory_observer_ = true;
+  } else if (trajectory_sample_valid) {
+    last_landing_forward_velocity_m_s_ =
+        last_trajectory_estimate_.forward_velocity_m_s;
+    last_landing_uses_trajectory_observer_ = true;
+  }
   const JointArray reflex_offset = landing_reflex_.update(
-      state.floor_contact, state.imu.pitch_rate_rad_s, state.dt_s);
+      reflex_floor_contact, state.imu.pitch_rate_rad_s,
+      state.imu.roll_rate_rad_s, state.imu.accel_magnitude_m_s2,
+      last_landing_forward_velocity_m_s_, last_whole_body_.com_height_m,
+      joint_target[left_hip], joint_target[left_knee], state.dt_s);
   // Virtual leg-length spring-damper via gain scheduling (see
   // LandingImpedance.hpp): softens Kp / raises Kd on real touchdown so the
   // leg yields under whatever real impact force is already acting on it,
@@ -305,12 +426,37 @@ MotorCommand EmbeddedController::update(const RobotState& state,
       state.joints.position_rad[left_knee], state.joints.position_rad[right_hip],
       state.joints.position_rad[right_knee], state.joints.velocity_rad_s[left_hip],
       state.joints.velocity_rad_s[left_knee], state.joints.velocity_rad_s[right_hip],
-      state.joints.velocity_rad_s[right_knee], state.dt_s);
+      state.joints.velocity_rad_s[right_knee], state.imu.accel_magnitude_m_s2,
+      state.dt_s, state.imu.hard_impact_event);
   for (std::size_t i = 0; i < kJointCount; ++i) {
-    joint_target[i] += reflex_offset[i];
+    joint_target[i] += reflex_offset[i] + landing_output.position_offset_rad[i];
   }
   joint_target = standUpPose(joint_target);
-  writeBalancedCommand(output, balance, joint_target, impedance);
+
+  if (balance.fallen) {
+    if (!config_.keep_legs_active_when_fallen) {
+      // Legacy behavior, preserved exactly (default): total safe-stop.
+      state_machine_.forceFallen();
+      joint_motion_.reset(state.joints.position_rad);
+      writeSafeStop(output, state);
+      return output;
+    }
+    // MPC's own linear model no longer trusts a wheel command at this pitch
+    // (see MpcBalancer::Config::fall_pitch_rad) - stop the wheels, but do NOT
+    // force ControlMode::Fallen or disable the legs. `balance` here is still
+    // a validly-constructed Output (MpcBalancer returns immediately on the
+    // fall check, before touching any field) - its defaults are exactly what
+    // this branch needs: ground_velocity_m_s/wheel velocities at 0 (wheels
+    // actively brake to a stop, not freewheel - torque_nm stays at
+    // wheel_max_torque_nm below), leg_kp_scale/leg_kd_scale at a normal 1.0
+    // (modulated only by impedance, same as any other tick), so reusing
+    // writeBalancedCommand as-is is correct, not a shortcut.
+    writeBalancedCommand(output, balance, joint_target, impedance,
+                         landing_output);
+    return output;
+  }
+
+  writeBalancedCommand(output, balance, joint_target, impedance, landing_output);
   return output;
 }
 
@@ -357,7 +503,8 @@ void EmbeddedController::writePostureHold(
 void EmbeddedController::writeBalancedCommand(
     MotorCommand& output, const MpcBalancer::Output& balance,
     const JointArray& joint_target,
-    const LandingImpedance::Output& impedance) const {
+    const LandingImpedance::Output& impedance,
+    const LandingController::Output& landing) const {
   output.enable_motors = true;
   output.position_rad = joint_target;
   output.velocity_rad_s.fill(0.0F);
@@ -366,28 +513,35 @@ void EmbeddedController::writeBalancedCommand(
   output.kp_scale.fill(1.0F);
   output.kd_scale.fill(1.0F);
 
-  output.velocity_rad_s[left_wheel] = balance.left_wheel_velocity_rad_s;
-  output.velocity_rad_s[right_wheel] = balance.right_wheel_velocity_rad_s;
+  output.velocity_rad_s[left_wheel] =
+      landing.suspend_wheel_balance ? 0.0F : balance.left_wheel_velocity_rad_s;
+  output.velocity_rad_s[right_wheel] =
+      landing.suspend_wheel_balance ? 0.0F : balance.right_wheel_velocity_rad_s;
   output.position_rad[left_wheel] = 0.0F;
   output.position_rad[right_wheel] = 0.0F;
 
-  // LandingImpedance's gain schedule applies to the KNEE ONLY - every
-  // mechanism in this file's history that touched the hip in any way
-  // (force, position, or gain scaling) measured worse than doing nothing on
-  // the 20 cm ledge test; only knee-only exclusion of the hip ever measured
-  // better. Hip kp/kd stay exactly at the existing balance scale. At
-  // default (impedance inactive) the knee scale below is exactly 1.0.
-  output.kp_scale[left_hip] = balance.leg_kp_scale;
-  output.kp_scale[right_hip] = balance.leg_kp_scale;
+  // LandingImpedance's Impact schedule remains knee-focused. Hip scaling is
+  // opt-in and intended for pre-touchdown airborne compliance only; defaults
+  // are exactly 1.0, preserving the previous hip behavior.
+  output.kp_scale[left_hip] = balance.leg_kp_scale * impedance.left_hip_kp_scale *
+                              landing.kp_scale[left_hip];
+  output.kp_scale[right_hip] = balance.leg_kp_scale * impedance.right_hip_kp_scale *
+                               landing.kp_scale[right_hip];
   // Per-side (ROLL axis, 2026-09-16): each knee scaled by ITS OWN side's
   // impedance output, not a shared value - see LandingImpedance.hpp.
-  output.kp_scale[left_knee] = balance.leg_kp_scale * impedance.left_leg_kp_scale;
-  output.kp_scale[right_knee] = balance.leg_kp_scale * impedance.right_leg_kp_scale;
+  output.kp_scale[left_knee] = balance.leg_kp_scale * impedance.left_leg_kp_scale *
+                               landing.kp_scale[left_knee];
+  output.kp_scale[right_knee] = balance.leg_kp_scale * impedance.right_leg_kp_scale *
+                                landing.kp_scale[right_knee];
 
-  output.kd_scale[left_hip] = balance.leg_kd_scale;
-  output.kd_scale[right_hip] = balance.leg_kd_scale;
-  output.kd_scale[left_knee] = balance.leg_kd_scale * impedance.left_leg_kd_scale;
-  output.kd_scale[right_knee] = balance.leg_kd_scale * impedance.right_leg_kd_scale;
+  output.kd_scale[left_hip] = balance.leg_kd_scale * impedance.left_hip_kd_scale *
+                              landing.kd_scale[left_hip];
+  output.kd_scale[right_hip] = balance.leg_kd_scale * impedance.right_hip_kd_scale *
+                               landing.kd_scale[right_hip];
+  output.kd_scale[left_knee] = balance.leg_kd_scale * impedance.left_leg_kd_scale *
+                               landing.kd_scale[left_knee];
+  output.kd_scale[right_knee] = balance.leg_kd_scale * impedance.right_leg_kd_scale *
+                                landing.kd_scale[right_knee];
 
   output.torque_nm[left_hip] = config_.leg_max_torque_nm;
   output.torque_nm[left_knee] = config_.leg_max_torque_nm;
@@ -395,8 +549,9 @@ void EmbeddedController::writeBalancedCommand(
   output.torque_nm[right_knee] = config_.leg_max_torque_nm;
   output.torque_nm[left_wheel] = config_.wheel_max_torque_nm;
   output.torque_nm[right_wheel] = config_.wheel_max_torque_nm;
-  // LandingImpedance never sets a position target or feedforward torque -
-  // feedforward_nm stays at 0 here and is only ever set by the jump path.
+  for (std::size_t i = 0; i < kJointCount; ++i) {
+    output.feedforward_nm[i] += landing.feedforward_nm[i];
+  }
 }
 
 JointArray EmbeddedController::standUpPose(const JointArray& pose) const {
@@ -418,7 +573,7 @@ void EmbeddedController::beginStandUp(const RobotState& state) {
   joint_motion_.startMove(state.joints.position_rad,
                           standUpPose(config_.stand_up.tuck_pose_rad),
                           config_.stand_up.tuck_duration_s);
-  resetBalance(state.wheel.position_m);
+  resetBalance(state.wheel.position_m, state.floor_contact);
   setBalanceFallPitch(config_.stand_up.fall_pitch_rad);
   stand_up_settle_elapsed_s_ = 0.0F;
 }
@@ -442,7 +597,7 @@ void EmbeddedController::advanceStandUp(const RobotState& state) {
         stand_up_stage_ = StandUpStage::Settle;
         stand_up_settle_cycles_ = 0;
         stand_up_settle_elapsed_s_ = 0.0F;
-        resetBalance(state.wheel.position_m);
+        resetBalance(state.wheel.position_m, state.floor_contact);
       }
       break;
 
@@ -471,7 +626,7 @@ void EmbeddedController::finishStandUp(const RobotState& state) {
   stand_up_settle_cycles_ = 0;
   stand_up_settle_elapsed_s_ = 0.0F;
   setBalanceFallPitch(config_.mpc.fall_pitch_rad);
-  resetBalance(state.wheel.position_m);
+  resetBalance(state.wheel.position_m, state.floor_contact);
 }
 
 }  // namespace robot_control

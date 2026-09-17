@@ -42,9 +42,9 @@ def generate_launch_description():
     state = Node(package='robot_state_publisher', executable='robot_state_publisher',
                  parameters=[{'use_sim_time': True, 'robot_description': ParameterValue(
                      Command(['xacro ', xacro, ' jump_model:=', jump_model,
-                              ' measure_contacts:=', measure_contacts,
-                              ' jump_leg_speed:=', LaunchConfiguration('jump_leg_speed'),
-                              ' jump_leg_velocity_damping:=', LaunchConfiguration('jump_leg_velocity_damping')]), value_type=str)}], output='screen')
+                             ' measure_contacts:=', measure_contacts,
+                             ' jump_leg_speed:=', LaunchConfiguration('jump_leg_speed'),
+                             ' jump_leg_velocity_damping:=', LaunchConfiguration('jump_leg_velocity_damping')]), value_type=str)}], output='screen')
     spawn = Node(package='ros_gz_sim', executable='create', output='screen',
                  arguments=['-world', 'empty', '-name', 'tap_robot', '-allow_renaming', 'false',
                             '-topic', '/robot_description',

@@ -45,6 +45,40 @@ class MpcBalancer {
     bool position_anchor_hold = false;    // hold station against steady drift
     float max_target_distance_m = 0.25F;
     float fall_pitch_rad = 0.65F;
+    // Nonlinear gravity-torque correction (2026-09-16): the QP horizon above
+    // is built on a LINEARIZED inverted pendulum (buildModel's cosh/sinh
+    // solve theta'' = omega^2*theta, i.e. sin(theta)~=theta, cos(theta)~=1)
+    // - a small-angle approximation, valid only near pitch_ref. A real 50cm
+    // ledge drop showed pitch reaching 30-40+ deg BEFORE the fall_pitch_rad
+    // cutoff even engages, well outside that approximation's validity, and
+    // measured evidence (docs/ledge landing traces) showed the commanded
+    // correction growing too slowly relative to how fast the real
+    // (nonlinear) pitch error was actually accelerating - the model
+    // systematically under-estimates the true restoring effort needed once
+    // the small-angle assumption breaks down.
+    //
+    // Fix: partial feedback linearization (standard technique for
+    // underactuated cart-pole/wheeled-inverted-pendulum systems), applied as
+    // a post-hoc correction to the QP's first-step output rather than
+    // rebuilding the (expensive, precomputed-once) horizon model itself.
+    // The QP's returned u_lin is calibrated, under the LINEAR model, to
+    // produce a specific intended angular acceleration
+    // theta''_intended = omega^2*theta_err - u_lin/l. Solving the TRUE
+    // dynamics theta'' = (g/l)*sin(theta_err) - (u_real/l)*cos(theta_err)
+    // for the real ground acceleration that achieves that SAME intended
+    // theta'' (algebra collapses the pendulum length l out entirely) gives:
+    //   u_real = (u_lin + g*(sin(theta_err) - theta_err)) / cos(theta_err)
+    // At small theta_err this is an exact no-op (sin-theta -> 0, cos -> 1,
+    // u_real -> u_lin) - the correction is automatically inert near
+    // upright, only kicking in once the small-angle assumption actually
+    // matters. cos(theta_err) -> 0 near +-90 deg is a REAL physical
+    // singularity (a wheel pushing directly under a pendulum lying flat
+    // produces zero restoring torque about the pitch axis, regardless of
+    // control cleverness) - guarded by a floor, past which correction is
+    // skipped and the wheel authority naturally (and correctly) recedes
+    // rather than commanding an unbounded acceleration. 0 (default) is an
+    // exact no-op - the QP's own linear-model output is used unmodified.
+    float nonlinear_gravity_correction_gain = 0.0F;
     float leg_kp_scale = 1.0F;
     float leg_kd_scale = 1.0F;
     float turning_stiffness_boost = 0.25F;
@@ -62,6 +96,11 @@ class MpcBalancer {
     float landing_kp_boost = 0.0F;
     float landing_kd_boost = 0.0F;
     float landing_ground_accel_boost_m_s2 = 0.0F;
+    // During a touchdown bounce, contact can flicker false for a few tens of
+    // ms while the previously-computed catch velocity is still physically
+    // useful at the next re-contact. false preserves the legacy off-contact
+    // low-pass-to-zero behavior exactly.
+    bool landing_hold_airborne_velocity = false;
     float left_wheel_sign = 1.0F;  // common polarity, BOTH native wheels +forward
 
     float leg_length_m = 0.24F;  // provisional effective pendulum, not link length
@@ -136,7 +175,7 @@ class MpcBalancer {
   MpcBalancer();
   explicit MpcBalancer(Config config);
 
-  void reset(float ground_position_m = 0.0F);
+  void reset(float ground_position_m = 0.0F, bool floor_contact = true);
   // `balance_pitch_ref_rad` is the base-pitch target the wheels should hold the
   // robot at (0 = upright). Feed it the whole-body equilibrium pitch so the
   // legs can bend / the pose can change without the balancer rolling away to

@@ -1,0 +1,98 @@
+# Controlled 50 cm ledge landing experiment.
+#
+# Scope:
+# - Does not change production defaults in balance_controller.yaml.
+# - Avoids the old landing_recovery_test pre-crouch regression: the default
+#   stance is already deep (knee ~= -1.396 rad), so adding -0.4 rad drives the
+#   target into the -1.6 rad operating clamp before impact and leaves too
+#   little suspension stroke.
+# - Uses bounded active knee extension during measured airborne time to create
+#   extra compression travel before touchdown, then blends back during catch.
+#
+# Evidence target:
+#   python3 tools/ledge_height_smoke.py --heights 0.50 --trials N \
+#     --controller-config src/tap_control/config/landing_50cm_controlled.yaml
+balance_controller_node:
+  ros__parameters:
+    keep_legs_active_when_fallen: true
+    landing_fallen_recovery.enabled: true
+    landing_fallen_recovery.control_pitch_rad: 1.25
+    landing_fallen_recovery.handoff_pitch_rad: 0.22
+    landing_fallen_recovery.pitch_rate_rad_s: 0.55
+    landing_fallen_recovery.hold_s: 0.20
+    landing_controller.enabled: true
+    trajectory_observer.min_confidence: 0.50
+    landing_controller.flight_extension_delay_s: 0.09
+    landing_controller.flight_extension_max_m: 0.025
+    landing_controller.flight_hip_offset_max_rad: 0.025
+    landing_controller.flight_knee_offset_max_rad: 0.18
+    landing_controller.flight_target_slew_rate_rad_s: 1.4
+    # Keep posture authority during free fall. 0.20 left the leg target
+    # effectively open-loop once the wheels lost support; the bounded active
+    # extension is still the only trajectory change, while the nominal PD
+    # authority now holds the two legs against pitch-coupled motion.
+    landing_controller.flight_kp_scale: 0.60
+    landing_controller.flight_kd_scale: 1.0
+    landing_controller.flight_pitch_rate_hip_gain_rad_per_rad_s: 0.0
+    landing_controller.flight_pitch_rate_hip_offset_max_rad: 0.0
+    landing_controller.impact_accel_mps2: 18.0
+    landing_controller.impact_pitch_rate_rad_s: 3.0
+    landing_controller.imu_impact_debounce_s: 0.015
+    # Raw IMU impact signatures in the 50 cm trace last only 1-2 samples;
+    # retain the event long enough for the 1 kHz control timer to consume it.
+    landing_controller.imu_impact_latch_s: 0.06
+    # IMU shock is supplementary telemetry/gain cue only. It cannot create
+    # touchdown without a validated wheel/support contact.
+    landing_controller.imu_impact_without_wheel_contact: false
+    # Do not multiply two independent soft-Kp schedules into near-zero
+    # authority. LandingImpedance owns the knee compliance; the phase
+    # controller keeps nominal posture authority for hips and the catch path.
+    landing_controller.impact_kp_scale: 1.0
+    landing_controller.impact_kd_scale: 1.0
+    landing_controller.height_kp_n_m: 20.0
+    landing_controller.height_kd_n_s_m: 8.0
+    landing_controller.max_virtual_force_n: 30.0
+    landing_controller.max_feedforward_torque_nm: 2.0
+    landing_controller.min_impact_s: 0.05
+    landing_controller.max_impact_s: 0.30
+    landing_controller.recovery_blend_s: 0.25
+    landing_reflex.airborne_knee_crouch_rad: 0.0
+    # Enable the bounded pre-touchdown extension.  The flight controller's
+    # separate Cartesian extension remains capped at 25 mm; this reflex adds
+    # only the encoder/IMU-timed extension allowed by its own joint-space cap.
+    landing_reflex.active_extension_gravity_m_s2: 9.81
+    landing_reflex.active_extension_max_rad: 0.18
+    landing_reflex.active_extension_max_hip_rad: 0.035
+    landing_reflex.active_extension_delay_s: 0.09
+    # Pre-arm from real IMU unloading/free-fall before wheel contact becomes
+    # a reliable false edge. This remains sensor-only: no Gazebo pose/state.
+    landing_reflex.unloading_accel_mps2: 4.0
+    # Avoid the old step-like hip/knee target jump that saturated leg torque.
+    landing_reflex.target_slew_rate_rad_s: 1.4
+    # Capture-point hip placement: while airborne, place the future wheel
+    # contact forward in the direction of the measured liftoff motion instead
+    # of leaving it directly below/behind the moving CoM. This is the
+    # forward-reaching part of the landing maneuver; it is latched at
+    # liftoff, converted through the native FK Jacobian, and slew-limited.
+    # Keep the first deployment bounded: a large hip shift can snag the edge
+    # or move the support point past the CoM.
+    landing_reflex.capture_point_gravity_m_s2: 9.81
+    landing_reflex.capture_point_max_hip_rad: 0.12
+    landing_reflex.catch_hold_s: 0.08
+    landing_reflex.catch_blend_s: 0.25
+    landing_reflex.min_airborne_before_touchdown_s: 0.03
+    # True suspension part: soften knee position stiffness and add damping
+    # during the first real impact. The debounce is intentionally shorter than
+    # the old 0.15 s because 50 cm traces showed first contact often flickers
+    # back within 30-75 ms.
+    landing_impedance.airborne_hip_kp_scale: 1.0
+    landing_impedance.airborne_hip_kd_scale: 1.0
+    landing_impedance.airborne_knee_kp_scale: 1.0
+    landing_impedance.airborne_knee_kd_scale: 1.0
+    landing_impedance.impact_kp_scale: 0.15
+    landing_impedance.impact_kd_scale: 3.0
+    landing_impedance.touchdown_velocity_threshold_m_s: 0.05
+    landing_impedance.hard_impact_accel_mps2: 18.0
+    landing_impedance.rebound_blend_s: 0.20
+    landing_impedance.max_impact_duration_s: 0.35
+    landing_impedance.min_airborne_before_touchdown_s: 0.03

@@ -23,11 +23,36 @@ struct ImuState {
   float pitch_rate_rad_s = 0.0F;
   float yaw_rad = 0.0F;
   float yaw_rate_rad_s = 0.0F;
+  // Body-frame roll rate (2026-09-16, LandingReflex's differential-knee roll
+  // gate - see Config::roll_rate_knee_gain_rad_per_rad_s's own comment).
+  // Source: raw gyro angular_velocity.x, never fused/estimated (there is no
+  // roll estimator in this stack - only pitch has one). Defaults to 0 so any
+  // caller/test that never sets this keeps the prior no-roll-signal
+  // behavior.
+  float roll_rate_rad_s = 0.0F;
+  // Raw accelerometer specific-force magnitude (2026-09-16, LandingImpedance
+  // hard-impact gate - see its Config::hard_impact_accel_mps2 comment).
+  // Defaults to 1g (stationary, grounded) so any caller/test that never
+  // sets this keeps the prior no-impact-signal behavior.
+  float accel_magnitude_m_s2 = 9.81F;
+  // One-shot/short-lived event latched from a raw accelerometer + gyro
+  // touchdown signature. The IMU callback owns the latch because a real
+  // impact can last only one or two samples while the control loop may run at
+  // a different rate. It is sensor-backed; it is not a pose/contact ground
+  // truth shortcut.
+  bool hard_impact_event = false;
 };
 
 struct WheelOdometry {
   float position_m = 0.0F;
   float velocity_m_s = 0.0F;
+  // Native +Y wheel encoder motion converted to ground-tangent metres.  These
+  // fields preserve per-side data for relative trajectory observation; the
+  // averaged fields above remain the balance controller's existing interface.
+  float left_position_m = 0.0F;
+  float right_position_m = 0.0F;
+  float left_velocity_m_s = 0.0F;
+  float right_velocity_m_s = 0.0F;
 };
 
 struct JointState {

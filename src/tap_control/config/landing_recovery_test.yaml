@@ -16,6 +16,7 @@
 # option for this scenario).
 balance_controller_node:
   ros__parameters:
+    keep_legs_active_when_fallen: true
     # Nonzero only so the newly-wired kd_scale term in publishLegCommand() has
     # something to multiply; kd_scale itself stays 0 outside the landing
     # window (see landing_kd_boost), so this alone changes nothing.

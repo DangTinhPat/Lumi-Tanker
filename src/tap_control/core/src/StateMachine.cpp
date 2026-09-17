@@ -17,7 +17,8 @@ void StateMachine::reset() {
 ControlMode StateMachine::update(const RobotState& state,
                                  const ControlCommand& command,
                                  bool pose_motion_active,
-                                 bool stand_up_active) {
+                                 bool stand_up_active,
+                                 bool airborne) {
   const bool stand_trigger = command.request_stand_up && !stand_up_requested_;
   stand_up_requested_ = command.request_stand_up;
   if (state.emergency_stop || command.request_disable) {
@@ -52,7 +53,11 @@ ControlMode StateMachine::update(const RobotState& state,
     return mode_;
   }
 
-  if (tipped) {
+  // A large pitch during a confirmed support-loss interval is expected in a
+  // ledge landing. Do not convert flight into Fallen before touchdown; the
+  // leg landing path still needs to run and the wheel MPC has no ground
+  // authority in that interval.
+  if (tipped && !airborne) {
     enter(ControlMode::Fallen);
     return mode_;
   }

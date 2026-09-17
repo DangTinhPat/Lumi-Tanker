@@ -27,6 +27,7 @@ These are persistent expert instructions, not claims of running agent processes.
 | MPC, trajectories, control modes, recovery | `.agents/skills/tap-control-expert/SKILL.md` |
 | ROS interfaces, Gazebo, launch, GUI integration | `.agents/skills/tap-ros-gazebo/SKILL.md` |
 | Tests, regressions, simulation evidence | `.agents/skills/tap-qa-regression/SKILL.md` |
+| Balance/landing/fall-recovery theory (humanoid, quadruped, wheel-legged), before designing a new mechanism | `.agents/skills/legged-locomotion-references/SKILL.md` |
 
 ## Model Contract
 
@@ -46,6 +47,14 @@ These are persistent expert instructions, not claims of running agent processes.
 - Supplier lengths `0.105/0.110 m` are nominal; retain CAD joint origins unless
   intentionally recalibrated. Knee mechanical range `30..145 deg` is not yet
   mapped to CAD zero. Preview limits and torque/speed values are placeholders.
+- Authoritative planned sensor inventory is one MPU6500 (3-axis accelerometer
+  and 3-axis gyroscope) plus six motor encoders (four leg joints and two wheel
+  joints). Physical wheel-contact switches, force/torque sensors, motor
+  current/torque feedback, range sensors, cameras and external localization are
+  permanently excluded from the hardware contract and must not become future
+  hidden dependencies. Gazebo contacts, efforts and pose are simulation
+  telemetry only; derive deployable support hypotheses from MPU6500 and encoder
+  data.
 - Re-read the current model and `PHYSICS.md` before edits; record intentional
   changes to this contract rather than overwriting newer user decisions.
 
@@ -56,6 +65,10 @@ These are persistent expert instructions, not claims of running agent processes.
 `src/tap_sim/{launch,world,scripts}`; inspect actual implementation before use.
 Keep the control core ROS-independent and robot-specific parameters explicit.
 Use portable package/resource lookup, not machine-specific paths in runtime code.
+
+Do not modify `docs/RULES.md` or `architecture.md` unless the user explicitly
+authorizes that document change. Reading and proposing changes is allowed;
+writing either protected contract requires clear user permission.
 
 Reference: `.reference/wheel_leg` at
 `701cef416b3f224925ab3b2532cf1ee5d401c703`; treat it as read-only provenance,

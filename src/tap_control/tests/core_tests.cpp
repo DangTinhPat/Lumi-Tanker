@@ -129,6 +129,47 @@ void mpcTests() {
   check(out.fallen && out.left_wheel_velocity_rad_s == 0 && out.right_wheel_velocity_rad_s == 0,
         "MPC rejects nonfinite sensor input");
 }
+void nonlinearCorrectionTests() {
+  MpcBalancer::Config config;  // nonlinear_gravity_correction_gain default 0.
+  // Raise the accel/friction ceiling so the QP is NOT already saturated at
+  // the default limits (default max_ground_accel_m_s2=2.0 empirically
+  // saturates for essentially any pitch error >= ~0.1 rad, which would hide
+  // the correction's effect behind an identical post-clamp value on both
+  // sides - probed directly against this real solver before picking these).
+  config.max_ground_accel_m_s2 = 100.0F;
+  config.wheel_ground_mu = 100.0F;
+  MpcBalancer::Config corrected_config = config;
+  corrected_config.nonlinear_gravity_correction_gain = 1.0F;
+
+  // At a genuinely large pitch error, the nonlinear-corrected command must
+  // differ from the uncorrected linear one (sin/cos deviate meaningfully
+  // from theta/1 by .5 rad), and must still respect the same accel/velocity
+  // limits (the correction re-clamps to accel_limit - see solveHorizon).
+  MpcBalancer plain(config);
+  MpcBalancer nl(corrected_config);
+  RobotState large_state;
+  large_state.imu.pitch_rad = .5F;
+  ControlCommand cmd;
+  auto plain_out = plain.update(large_state, cmd);
+  auto nl_out = nl.update(large_state, cmd);
+  check(std::isfinite(nl_out.ground_velocity_m_s) &&
+        std::abs(nl_out.ground_velocity_m_s - plain_out.ground_velocity_m_s) > 1.0e-6F,
+        "nonlinear gravity correction changes the command at a large pitch error");
+  check(std::abs(nl.debugState().optimal_command_m_s) <=
+        corrected_config.max_ground_accel_m_s2 + 1.0e-5F,
+        "nonlinear-corrected acceleration still respects the accel limit");
+
+  // Near-zero pitch error: correction must be an exact no-op (sin/cos
+  // collapse to theta/1), matching the small-angle regime it was built for.
+  MpcBalancer plain_small(config);
+  MpcBalancer nl_small(corrected_config);
+  RobotState small_state;
+  small_state.imu.pitch_rad = .01F;
+  auto plain_small_out = plain_small.update(small_state, cmd);
+  auto nl_small_out = nl_small.update(small_state, cmd);
+  check(near(plain_small_out.ground_velocity_m_s, nl_small_out.ground_velocity_m_s, 1.0e-4F),
+        "nonlinear gravity correction is near-inert at a small pitch error");
+}
 void landingWindowTests() {
   // Disabled config (all landing_* boosts default 0): a touchdown edge must
   // not change the output at all, matching the previous no-landing-logic path.
@@ -366,8 +407,237 @@ void safetyRegressionTests() {
   check(stopped(out) && controller.mode() == ControlMode::EmergencyStop,
         "encoder recovery does not clear emergency latch");
 }
+void keepLegsActiveWhenFallenTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  config.balance_pitch_ref_period_s = 0;
+  config.keep_legs_active_when_fallen = true;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+  check(controller.mode() == ControlMode::Balance,
+        "keep_legs_active_when_fallen precondition: starts balanced");
+
+  // Trip both the StateMachine's absolute-pitch "tipped" check and
+  // MpcBalancer's own relative-pitch check. Mode legitimately still becomes
+  // Fallen (an accurate description of the robot's real state) - what
+  // changes is that it no longer implies total actuation shutdown.
+  state.imu.pitch_rad = config.mpc.fall_pitch_rad + .05F;
+  const auto out = controller.update(state, command);
+  check(controller.mode() == ControlMode::Fallen,
+        "keep_legs_active_when_fallen precondition: mode still reports Fallen");
+  check(out.enable_motors, "keep_legs_active_when_fallen: motors stay enabled");
+  check(out.velocity_rad_s[static_cast<std::size_t>(JointId::LeftWheel)] == 0 &&
+        out.velocity_rad_s[static_cast<std::size_t>(JointId::RightWheel)] == 0,
+        "keep_legs_active_when_fallen: wheels still commanded to stop");
+  check(out.kp_scale[static_cast<std::size_t>(JointId::LeftHip)] > 0 &&
+        out.kp_scale[static_cast<std::size_t>(JointId::LeftKnee)] > 0 &&
+        out.kp_scale[static_cast<std::size_t>(JointId::RightHip)] > 0 &&
+        out.kp_scale[static_cast<std::size_t>(JointId::RightKnee)] > 0,
+        "keep_legs_active_when_fallen: legs keep nonzero stiffness, unlike the default safe-stop");
+
+  // Default (false) must still be byte-for-byte the legacy total safe-stop.
+  EmbeddedController::Config legacy_config;
+  legacy_config.state_machine.enable_cycles = 1;
+  legacy_config.balance_pitch_ref_period_s = 0;
+  EmbeddedController legacy(legacy_config);
+  RobotState legacy_state;
+  legacy_state.joints.position_rad = legacy_config.stand_up.stand_pose_rad;
+  ControlCommand legacy_command;
+  legacy_command.target_joint_position_rad = legacy_state.joints.position_rad;
+  legacy.reset(legacy_state);
+  legacy_command.request_enable = true;
+  (void)legacy.update(legacy_state, legacy_command);
+  legacy_command.request_enable = false;
+  (void)legacy.update(legacy_state, legacy_command);
+  legacy_state.imu.pitch_rad = legacy_config.mpc.fall_pitch_rad + .05F;
+  const auto legacy_out = legacy.update(legacy_state, legacy_command);
+  check(legacy.mode() == ControlMode::Fallen && stopped(legacy_out),
+        "keep_legs_active_when_fallen default (false) still total-safe-stops, unchanged");
+}
+void landingReflexStillRunsWhenFallenTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  config.balance_pitch_ref_period_s = 0;
+  config.keep_legs_active_when_fallen = true;
+  config.landing_reflex.airborne_knee_crouch_rad = 0.2F;
+  config.landing_reflex.min_airborne_before_touchdown_s = 0.0F;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.dt_s = 0.001F;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  state.imu.accel_magnitude_m_s2 = 0.2F;
+  // Give the observer enough real samples to confirm support loss before
+  // applying a large pitch disturbance. A one-tick contact gap is deliberately
+  // not a landing event anymore.
+  for (int i = 0; i < 20; ++i) (void)controller.update(state, command);
+  state.imu.pitch_rad = config.mpc.fall_pitch_rad + .05F;
+  const auto out = controller.update(state, command);
+  constexpr auto lk = static_cast<std::size_t>(JointId::LeftKnee);
+  constexpr auto rk = static_cast<std::size_t>(JointId::RightKnee);
+  check(controller.mode() != ControlMode::Fallen && out.enable_motors,
+        "airborne observer prevents a false Fallen transition");
+  check(out.position_rad[lk] < command.target_joint_position_rad[lk] &&
+        out.position_rad[rk] < command.target_joint_position_rad[rk],
+        "landing reflex while fallen: airborne knee target still applies after fall threshold");
+}
+void landingFallenRecoveryHandoffTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  config.balance_pitch_ref_period_s = 0;
+  config.keep_legs_active_when_fallen = true;
+  config.landing_fallen_recovery_enabled = true;
+  config.landing_recovery_control_pitch_rad = 1.2F;
+  config.landing_recovery_handoff_pitch_rad = 0.2F;
+  config.landing_recovery_pitch_rate_rad_s = 0.5F;
+  config.landing_recovery_hold_s = 0.03F;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.dt_s = 0.01F;
+  state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = true;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+
+  state.imu.pitch_rad = config.mpc.fall_pitch_rad + 0.1F;
+  (void)controller.update(state, command);
+  check(controller.mode() == ControlMode::Fallen,
+        "landing fallen recovery precondition: fall still latches Fallen");
+
+  state.imu.pitch_rad = 0.1F;
+  state.imu.pitch_rate_rad_s = 0.0F;
+  MotorCommand out;
+  for (int i = 0; i < 5; ++i) {
+    out = controller.update(state, command);
+  }
+  check(controller.mode() == ControlMode::Balance && out.enable_motors,
+        "landing fallen recovery: settled contact hands off back to Balance");
+}
+
+void trajectoryObserverFeedsLandingCaptureTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  config.balance_pitch_ref_period_s = 0.0F;
+  config.landing_reflex.capture_point_gravity_m_s2 = 9.81F;
+  config.landing_reflex.capture_point_max_hip_rad = 1.0F;
+  config.trajectory_observer_min_confidence = 0.5F;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.dt_s = 0.01F;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+
+  // The first sample after the Balance re-entry reset seeds the observer;
+  // this second encoder sample makes its relative velocity valid.
+  state.wheel.left_position_m = 0.005F;
+  state.wheel.right_position_m = 0.005F;
+  state.wheel.left_velocity_m_s = 0.5F;
+  state.wheel.right_velocity_m_s = 0.5F;
+  (void)controller.update(state, command);
+  check(controller.trajectoryEstimate().valid &&
+            controller.trajectoryEstimate().confidence >= 0.5F,
+        "landing integration has a valid encoder/IMU trajectory estimate");
+
+  state.wheel.left_position_m = 0.010F;
+  state.wheel.right_position_m = 0.010F;
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  const auto out = controller.update(state, command);
+  constexpr auto lh = static_cast<std::size_t>(JointId::LeftHip);
+  constexpr auto rh = static_cast<std::size_t>(JointId::RightHip);
+  check(controller.landingUsesTrajectoryObserver() &&
+            near(controller.landingForwardVelocity(), 0.5F, 1.0e-4F),
+        "landing capture uses observer velocity instead of the command");
+  check(out.position_rad[lh] != command.target_joint_position_rad[lh] &&
+            near(out.position_rad[lh] - command.target_joint_position_rad[lh],
+                 out.position_rad[rh] - command.target_joint_position_rad[rh],
+                 1.0e-5F),
+        "observer-driven capture offset is symmetric across both hips");
+}
+
+void trajectoryObserverLatchesSupportedVelocityAtLiftoffTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  config.balance_pitch_ref_period_s = 0.0F;
+  config.landing_reflex.capture_point_gravity_m_s2 = 9.81F;
+  config.landing_reflex.capture_point_max_hip_rad = 1.0F;
+  config.trajectory_observer_min_confidence = 0.5F;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.dt_s = 0.01F;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+
+  // Establish a valid supported +0.7 m/s trajectory estimate.
+  state.wheel.left_position_m = 0.007F;
+  state.wheel.right_position_m = 0.007F;
+  state.wheel.left_velocity_m_s = 0.7F;
+  state.wheel.right_velocity_m_s = 0.7F;
+  (void)controller.update(state, command);
+  check(controller.trajectoryEstimate().valid &&
+            near(controller.landingForwardVelocity(), 0.7F, 1.0e-4F),
+        "liftoff latch precondition: supported observer velocity is valid");
+
+  // The first airborne encoder sample is unloaded and reports zero.  The
+  // landing input must remain the last supported +0.7 m/s, not collapse to 0.
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  state.wheel.left_position_m = 0.007F;
+  state.wheel.right_position_m = 0.007F;
+  state.wheel.left_velocity_m_s = 0.0F;
+  state.wheel.right_velocity_m_s = 0.0F;
+  (void)controller.update(state, command);
+  check(controller.landingUsesTrajectoryObserver() &&
+            near(controller.landingForwardVelocity(), 0.7F, 1.0e-4F),
+        "liftoff latch keeps the last supported velocity when encoders unload");
+}
 }
 int main() {
-  motionTests(); geometryTests(); mpcTests(); landingWindowTests(); controllerTests(); safetyRegressionTests();
+  motionTests(); geometryTests(); mpcTests(); nonlinearCorrectionTests(); landingWindowTests();
+  controllerTests(); safetyRegressionTests(); keepLegsActiveWhenFallenTests();
+  landingReflexStillRunsWhenFallenTests();
+  landingFallenRecoveryHandoffTests();
+  trajectoryObserverFeedsLandingCaptureTests();
+  trajectoryObserverLatchesSupportedVelocityAtLiftoffTests();
   return failures ? 1 : 0;
 }

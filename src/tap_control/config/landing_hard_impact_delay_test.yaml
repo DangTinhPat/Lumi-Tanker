@@ -4,6 +4,7 @@
 # so an A/B result attributes any change to this one idea alone.
 balance_controller_node:
   ros__parameters:
+    keep_legs_active_when_fallen: true
     hard_impact_delay_enabled: true
     hard_impact_accel_mps2: 50.0
     hard_impact_pitch_rate_rad_s: 6.0

@@ -81,11 +81,11 @@ void MpcBalancer::setComHeight(float com_height_m) {
   }
 }
 
-void MpcBalancer::reset(float ground_position_m) {
+void MpcBalancer::reset(float ground_position_m, bool floor_contact) {
   commanded_ground_velocity_m_s_ = 0.0F;
   ground_position_target_m_ = ground_position_m;
   u_warm_.fill(0.0F);
-  prev_floor_contact_ = true;
+  prev_floor_contact_ = floor_contact;
   landing_window_remaining_s_ = 0.0F;
   last_debug_ = DebugState{};
 }
@@ -291,7 +291,26 @@ float MpcBalancer::solveHorizon(const StateVec& x0,
   last_debug_.horizon_end_pitch_rad = x[1] + pitch_ref_rad;
   last_debug_.solver_iterations = iters;
 
-  return u[0];
+  float ground_accel = u[0];
+  // See Config::nonlinear_gravity_correction_gain's own comment for the
+  // derivation. `relative[1]` is theta_err = pitch - pitch_ref at the real
+  // current tick (never reassigned above - only the separate `x` trajectory
+  // var is forward-simulated), exactly the operand the correction needs.
+  if (config_.nonlinear_gravity_correction_gain > 0.0F) {
+    const float theta_err = relative[1];
+    const float cos_err = std::cos(theta_err);
+    constexpr float kCosFloor = 0.15F;  // ~81.4 deg: real actuation singularity guard.
+    if (std::abs(cos_err) > kCosFloor) {
+      const float gravity = std::max(config_.gravity_m_s2, 0.1F);
+      const float u_real =
+          (ground_accel + gravity * (std::sin(theta_err) - theta_err)) / cos_err;
+      const float corrected = ground_accel +
+          config_.nonlinear_gravity_correction_gain * (u_real - ground_accel);
+      ground_accel = clampf(corrected, -accel_limit, accel_limit);
+    }
+  }
+
+  return ground_accel;
 }
 
 MpcBalancer::Output MpcBalancer::update(const RobotState& state,
@@ -346,8 +365,13 @@ MpcBalancer::Output MpcBalancer::update(const RobotState& state,
   }
 
   if (!integrate || !state.floor_contact) {
-    commanded_ground_velocity_m_s_ =
-        lowPass(commanded_ground_velocity_m_s_, 0.1F, 0.0F, dt_s);
+    const bool hold_landing_velocity =
+        integrate && !state.floor_contact && landing_active &&
+        config_.landing_hold_airborne_velocity;
+    if (!hold_landing_velocity) {
+      commanded_ground_velocity_m_s_ =
+          lowPass(commanded_ground_velocity_m_s_, 0.1F, 0.0F, dt_s);
+    }
     // Off-contact: let the anchor follow the robot so it does not snap back on
     // re-contact.
     ground_position_target_m_ = state.wheel.position_m;

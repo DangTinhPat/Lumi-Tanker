@@ -14,13 +14,16 @@ endif()
 
 add_library(tap_control_core STATIC
   src/EmbeddedController.cpp
+  src/FlightObserver.cpp
   src/JointMotionPlanner.cpp
   src/JumpController.cpp
+  src/LandingController.cpp
   src/LandingImpedance.cpp
   src/LandingReflex.cpp
   src/MpcBalancer.cpp
   src/StateMachine.cpp
   src/StationKeeper.cpp
+  src/TrajectoryObserver.cpp
   src/WholeBodyModel.cpp)
 target_include_directories(tap_control_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -38,9 +41,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   include(CTest)
   option(TAP_BUILD_BENCHMARK "Build the existing host control benchmark" OFF)
   if(BUILD_TESTING)
-    foreach(test core_allocation_tests core_tests station_keeper_tests
+    foreach(test core_allocation_tests core_tests flight_observer_tests station_keeper_tests
                  deep_squat_tests jump_tests jump_quality_tests wheel_frame_tests
-                 landing_reflex_tests landing_impedance_tests)
+                 landing_reflex_tests landing_impedance_tests landing_controller_tests)
       add_executable(${test} ../tests/${test}.cpp)
       target_link_libraries(${test} PRIVATE tap_control_core)
       if(MSVC)

@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--duration', type=float, default=15.0)
     parser.add_argument('--exercise', action='store_true')
     parser.add_argument('--poses', action='store_true')
+    parser.add_argument('--gui', action='store_true',
+                        help='keep Gazebo GUI visible during the motion trial')
     parser.add_argument('--domain', type=int, default=87)
     parser.add_argument('--max-pitch-error', type=float, default=0.30)
     parser.add_argument('--controller-config', type=str, default=None,
@@ -95,7 +97,8 @@ def main():
     binary = ROOT / 'install/tap_control/lib/tap_control/balance_controller_node'
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     try:
-        launch_args = sim_launch_command('gui:=false', 'auto_enable:=true')
+        launch_args = sim_launch_command(
+            f'gui:={str(args.gui).lower()}', 'auto_enable:=true')
         if args.controller_config:
             launch_args.append(f'controller_config:={args.controller_config}')
         process = start_owned_process(launch_args,
@@ -112,8 +115,10 @@ def main():
 
         stages = [('hold', args.duration, 0.0, 0.0)]
         if args.exercise:
-            stages += [('forward', 3.0, 0.06, 0.0), ('stop', 3.0, 0.0, 0.0),
-                       ('yaw', 3.0, 0.0, 0.15), ('stop_after_yaw', 3.0, 0.0, 0.0)]
+            stages += [('forward', 3.0, 0.06, 0.0),
+                       ('stop_after_forward', 2.0, 0.0, 0.0),
+                       ('backward', 3.0, -0.06, 0.0),
+                       ('stop_after_backward', 2.0, 0.0, 0.0)]
         pose_targets = {}
         if args.poses:
             curves = json.loads((ROOT / 'src/tap_teleop/config/pose_curves.json').read_text())
@@ -154,15 +159,25 @@ def main():
             dy = rows[-1]['base_y'] - rows[0]['base_y']
             if stage == 'hold' and math.hypot(dx, dy) > .10:
                 raise RuntimeError(f'Hold drift exceeds 0.10 m: {math.hypot(dx, dy):.3f}')
-            if stage in ('forward', 'stop', 'yaw', 'stop_after_yaw'):
+            if stage in ('forward', 'stop_after_forward', 'backward',
+                         'stop_after_backward'):
                 tail = rows[-min(100, len(rows)):]
                 error = sum(abs(row['wheel_vel'] - speed) for row in tail) / len(tail)
                 if error > .025:
                     raise RuntimeError(f'{stage}: final speed MAE {error:.3f} exceeds 0.025 m/s')
-            if stage == 'yaw':
-                turned = math.remainder(rows[-1]['yaw'] - rows[0]['yaw'], 2 * math.pi)
-                if abs(turned - yaw * duration) > .08:
-                    raise RuntimeError(f'Yaw tracking error: {turned:.3f} vs {yaw * duration:.3f}')
+                valid_rows = [row for row in rows if row.get('obs_valid', 0) > 0.5]
+                if len(valid_rows) < max(5, len(rows) // 4):
+                    raise RuntimeError(f'{stage}: observer did not produce valid samples')
+                observed_dx = valid_rows[-1]['obs_x'] - valid_rows[0]['obs_x']
+                if stage == 'forward' and observed_dx < .03:
+                    raise RuntimeError(f'{stage}: observer displacement is not forward: {observed_dx:.3f} m')
+                if stage == 'backward' and observed_dx > -.03:
+                    raise RuntimeError(f'{stage}: observer displacement is not backward: {observed_dx:.3f} m')
+                if stage.startswith('stop_'):
+                    if abs(valid_rows[-1]['obs_v']) > .025:
+                        raise RuntimeError(f'{stage}: observer did not settle: {valid_rows[-1]["obs_v"]:.3f} m/s')
+                if any(row.get('flight_airborne', 0) > 0.5 for row in rows):
+                    raise RuntimeError(f'{stage}: flat-ground drive falsely entered flight')
             if stage in pose_targets:
                 names = curves['joint_order']
                 measured = rows[-1]['joint_positions']
@@ -212,6 +227,10 @@ def main():
                 'final_wheel_velocity_m_s': rows[-1].get('wheel_vel'),
                 'final_joint_positions': rows[-1].get('joint_positions'),
                 'roll_change_rad': rows[-1].get('roll', 0) - rows[0].get('roll', 0),
+                'observer_dx_m': rows[-1].get('obs_x', 0) - rows[0].get('obs_x', 0),
+                'observer_dy_m': rows[-1].get('obs_y', 0) - rows[0].get('obs_y', 0),
+                'observer_final_velocity_m_s': rows[-1].get('obs_v'),
+                'observer_confidence': rows[-1].get('obs_conf'),
             }
         (out / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary, indent=2))

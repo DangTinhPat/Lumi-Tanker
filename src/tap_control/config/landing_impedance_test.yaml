@@ -27,6 +27,7 @@
 # production defaults; kept here as a tested, documented negative result.
 balance_controller_node:
   ros__parameters:
+    keep_legs_active_when_fallen: true
     landing_impedance.impact_kp_scale: 0.15
     landing_impedance.impact_kd_scale: 3.0
     landing_impedance.touchdown_velocity_threshold_m_s: 0.05

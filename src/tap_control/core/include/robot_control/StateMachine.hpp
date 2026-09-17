@@ -27,11 +27,13 @@ class StateMachine {
 
   void reset();
   void forceFallen() { enter(ControlMode::Fallen); }
+  void recoverToBalance() { enter(ControlMode::Balance); }
   void abortStandUp() { forceFallen(); }
   [[nodiscard]] ControlMode update(const RobotState& state,
                                    const ControlCommand& command,
                                    bool pose_motion_active,
-                                   bool stand_up_active);
+                                   bool stand_up_active,
+                                   bool airborne = false);
   [[nodiscard]] ControlMode mode() const noexcept;
 
  private:

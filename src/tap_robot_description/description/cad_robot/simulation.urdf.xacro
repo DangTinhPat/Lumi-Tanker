@@ -58,9 +58,11 @@
   <gazebo reference="cad_left_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
   <gazebo reference="cad_right_wheel_link"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
   <xacro:if value="${jump_model or measure_contacts}">
-    <gazebo>
-      <plugin filename="$(find tap_sim)/../../lib/libtap_contact_snapshot.so" name="tap_sim::ContactSnapshot"/>
-    </gazebo>
+    <!-- ContactSensor publishes its own raw gz.msgs.Contacts stream. Do not
+         load the legacy tap_sim::ContactSnapshot bridge here: it is an
+         optional diagnostic plugin and its transitive libsystemd dependency
+         is not stable across the Gazebo environment. sim.launch.py bridges
+         these raw sensor topics directly. -->
     <xacro:macro name="wheel_contact" params="side">
       <gazebo reference="cad_${side}_wheel_link">
         <sensor name="${side}_wheel_contact_sensor" type="contact">
