@@ -113,7 +113,7 @@ void returnTest() {
   StationKeeper::Input in{0, 0, 0, .01, true, false};
   (void)keeper.update(in);
   in.x = .2;
-  // Kinematic scalar response only, not a Gazebo or balancing-plant test.
+  // Kinematic scalar response only, not a simulator or balancing-plant test.
   for (int i=0; i<1200; ++i) {
     const auto out = keeper.update(in);
     in.x += out.forward_correction_m_s*in.dt;

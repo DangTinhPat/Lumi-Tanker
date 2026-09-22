@@ -18,14 +18,14 @@ requirement to retain those values in future tuning.
 
 Sources:
 
-- `src/tap_robot_description/description/cad_robot/robot.urdf.xacro`: joint
+- `src/tap_robot_description/description/company_rb/robot.urdf.xacro`: joint
   origins, axes, collision primitives and damping.
 - The adjacent `masses.yaml` and `mesh_inertials.yaml`: supplied masses and
   estimated uniform-density COM/inertia, including the rotated body visual.
 - `src/tap_teleop/config/pose_curves.json` and
   `src/tap_teleop/tap_teleop/pose_curves.py`: 71 samples per curve and the
   whole-body COM-neutral construction.
-- `src/tap_control/ros2_nodes/BalanceControllerNode.cpp`: relative wheel
+- `src/tap_control/ros2_adapter/BalanceControllerNode.cpp`: relative wheel
   odometry, velocity commands, position-only leg effort and contact heuristic.
 - `src/tap_control/core/src/MpcBalancer.cpp`: ground-velocity target converted
   to wheel velocity with a fixed differential-drive track.
@@ -61,7 +61,7 @@ or IMU axes.
 For one leg let `h`, `k`, `w` be native hip, knee and wheel joint angles. Define:
 
 ```text
-r = 0.030                  wheel radius
+r = 0.040                  current native-model wheel radius
 d = 0.025                  cylinder width
 B = 0.309                  level wheel-center track
 y_L = +0.1545, y_R = -0.1545
@@ -289,7 +289,10 @@ the provisional assignment of four motor masses to the body remain assumptions.
 
 ## Why No Hop Is Supported Currently
 
-Analyzed baseline: total mass 3.938 kg, gravity 9.81 m/s^2, leg command limit
+Analyzed baseline used a superseded mass allocation; its numerical hop estimates
+are historical and are not current-model sizing evidence. Current native-model
+mass is documented in `src/tap_mujoco/model/PHYSICS.md`. Gravity 9.81 m/s^2,
+leg command limit
 3 Nm per joint, joint damping 1 Nms/rad, position gain 40 Nm/rad, and pose slew
 0.4 rad/s. The 12 Nm URDF effort field does not make the node command 12 Nm.
 The wheel velocity interface is idealized, not a validated motor torque model.

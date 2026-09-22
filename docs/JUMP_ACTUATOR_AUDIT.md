@@ -39,9 +39,9 @@ Do not treat unused hip torque capacity as freely transferable vertical power.
   applied saturation differ. Wheels take rad/s commands and apply
   `clamp(0.02*(clamp(qd_cmd,+/-41.88790)-qd),+/-0.13)` Nm with a positive-work
   cutoff. A wheel command is not torque. Sources:
-  `src/tap_sim/include/tap_sim/actuator_bounds.hpp:7`,
-  `src/tap_sim/src/bounded_gazebo_system.cpp:105,168`, and
-  `src/tap_control/ros2_nodes/BalanceControllerNode.cpp:1112,1150`.
+  `src/legacy/ros2_gazebo_sim/include/tap_sim/actuator_bounds.hpp:7`,
+  `src/legacy/ros2_gazebo_sim/src/bounded_gazebo_system.cpp:105,168`, and
+  `src/tap_control/ros2_adapter/BalanceControllerNode.cpp:1112,1150`.
 
 ## Measured Thrust
 
@@ -88,11 +88,11 @@ has only 13.18 mm conservative rise, 3.136 J net leg work, peak knee rate
 Its trajectory/controller differ: this is NOT a controlled profile ablation.
 
 Final conservative COM rise is 82.64 mm, takeoff bracket 10.704-10.712 s.
-At provisional mass 3.938 kg this is 3.193 J of apex potential rise versus
-3.863 J for 100 mm; the 0.671 J difference is not a sufficient actuator-work
-prescription. Stance lifting, internal motion, braking, losses and recoverable
-landing also matter. Full-thrust phase labels include contact debounce after
-physical release; the reported negative work is not all a pre-takeoff loss.
+This historical result used a superseded mass allocation and is not current
+model actuator-sizing evidence. Stance lifting, internal motion, braking,
+losses and recoverable landing also matter. Full-thrust phase labels include
+contact debounce after physical release; the reported negative work is not all
+a pre-takeoff loss.
 
 ## Model/Command Inconsistencies And Limits
 
@@ -121,8 +121,9 @@ physical release; the reported negative work is not all a pre-takeoff loss.
    instrumentation requirement. No reference-velocity history is archived here.
 4. `PHYSICS.md` still describes ideal wheel actuation generically; that applies
    to the legacy plant, not this bounded jump plugin. Its substantive hardware
-   cautions still apply: 3.938 kg is provisional, all four leg motors are lumped
-   in the body, wheel/stator/rotor inertia is a surrogate, knee mechanical limits
+   cautions still apply: the archived mass allocation is superseded, all four
+   leg motors are lumped in the body, wheel/stator/rotor inertia is a surrogate,
+   knee mechanical limits
    are unmapped, and voltage/thermal/electrical/transmission dynamics are absent.
    Neither experimental envelope nor these traces certify hardware capability.
 

@@ -30,6 +30,7 @@ void LandingReflex::reset(bool floor_contact) {
   phase_ = floor_contact ? Phase::Grounded : Phase::Airborne;
   prev_floor_contact_ = floor_contact;
   armed_by_unloading_ = false;
+  unloading_elapsed_s_ = 0.0F;
   latched_hip_offset_rad_ = 0.0F;
   catch_elapsed_s_ = 0.0F;
   airborne_elapsed_s_ = 0.0F;
@@ -56,8 +57,18 @@ JointArray LandingReflex::update(bool floor_contact, float pitch_rate_rad_s,
     return offset;
   }
 
-  const bool unloading = config_.unloading_accel_mps2 > 0.0F &&
+  const bool unloading_sample = config_.unloading_accel_mps2 > 0.0F &&
       accel_magnitude_mps2 <= config_.unloading_accel_mps2;
+  if (unloading_sample) {
+    unloading_elapsed_s_ += dt_s;
+  } else {
+    unloading_elapsed_s_ = 0.0F;
+  }
+  const float unloading_debounce =
+      std::max(config_.unloading_debounce_s, 0.0F);
+  const bool unloading = unloading_sample &&
+      (unloading_debounce <= 0.0F ||
+       unloading_elapsed_s_ >= unloading_debounce);
   const bool airborne_signal = !floor_contact || unloading;
   const bool liftoff_edge = airborne_signal && prev_floor_contact_;
   prev_floor_contact_ = floor_contact;
@@ -76,7 +87,8 @@ JointArray LandingReflex::update(bool floor_contact, float pitch_rate_rad_s,
     // approximation (the knee only moves by up to active_extension_max_rad
     // during the maneuver, a second-order effect on the Jacobian itself).
     // IMPORTANT: d_height_d_knee genuinely depends on BOTH hip and knee (the
-    // shin's absolute orientation is hip+knee) - passing hip=0 here would be
+    // shin's absolute orientation is hip+knee plus the calibrated zero
+    // rebase) - passing hip=0 here would be
     // wrong for any real hip angle; verified directly against this robot's
     // real FK (2026-09-16): at hip=0.9/knee=-1.396 the true tallest-reach
     // point is knee~=-0.46 rad, NOT knee=0 as an earlier version of this

@@ -1,0 +1,205 @@
+"""Process and IPC boundary for the native MuJoCo runner."""
+
+from __future__ import annotations
+
+from collections import deque
+import math
+from pathlib import Path
+import queue
+import subprocess
+import sys
+import threading
+from typing import Dict, Optional
+
+
+def workspace_root() -> Path:
+    here = Path(__file__).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / "AGENTS.md").is_file() and (candidate / "src").is_dir():
+            return candidate
+    raise RuntimeError("cannot locate TAP workspace")
+
+
+class NativeBackend:
+    """Slow UI client; the native child owns the kHz control loop."""
+
+    def __init__(self, root: Optional[Path] = None, rate_hz: int = 2000):
+        self.root = Path(root or workspace_root())
+        self.rate_hz = int(rate_hz)
+        self.process: Optional[subprocess.Popen[str]] = None
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.telemetry: Dict[str, str] = {}
+        self.view: Dict[str, str] = {}
+        self.log = deque(maxlen=200)
+        self._reader: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._viewer_process: Optional[subprocess.Popen[str]] = None
+
+    def runner_path(self) -> Path:
+        candidates = [
+            self.root / "build/native/bin/tap_mujoco_native",
+            self.root / "build/tap_mujoco_native3/tap_mujoco_native",
+            self.root / "build/tap_mujoco_native/tap_mujoco_native",
+            self.root / "build/tap_mujoco_native2/tap_mujoco_native",
+        ]
+        for path in candidates:
+            if path.is_file() and path.stat().st_mode & 0o111:
+                return path
+        raise RuntimeError("native runner is not built; build tap_mujoco_native first")
+
+    @property
+    def running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    @property
+    def viewer_running(self) -> bool:
+        return (self._viewer_process is not None and
+                self._viewer_process.poll() is None)
+
+    def start(self) -> None:
+        with self._lock:
+            if self.running:
+                return
+            runner = self.runner_path()
+            model = self.root / "src/tap_mujoco/model/tap_robot.xml"
+            self.process = subprocess.Popen(
+                [str(runner), "--model", str(model), "--rate", str(self.rate_hz), "--realtime"],
+                cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1)
+            self._reader = threading.Thread(target=self._read_output, daemon=True)
+            self._reader.start()
+            try:
+                self._open_mujoco_viewer(model)
+            except Exception:
+                self.stop()
+                raise
+
+    def _open_mujoco_viewer(self, model_path: Path) -> None:
+        """Open the real MuJoCo 3-D renderer used by the native model.
+
+        The C++ child remains the sole physics/control owner.  This Python
+        viewer loads the identical MJCF and mirrors only the debug VIEW
+        snapshot, so no viewer pose/contact data can enter RobotState or CMF.
+        """
+        viewer_script = self.root / "src/gui/gui/native_viewer.py"
+        if not viewer_script.is_file():
+            raise RuntimeError(f"native MuJoCo viewer is missing: {viewer_script}")
+        self._viewer_process = subprocess.Popen(
+            [sys.executable, str(viewer_script), "--model", str(model_path)],
+            cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+    def _sync_mujoco_viewer(self) -> None:
+        if not self.viewer_running or self._viewer_process.stdin is None:
+            return
+        try:
+            line = "VIEW|" + "|".join(
+                f"{key}={value}" for key, value in self.view.items()) + "\n"
+            self._viewer_process.stdin.write(line)
+            self._viewer_process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            # A user closing the MuJoCo window is not a controller fault. The
+            # child continues safely; the dashboard reports the viewer state.
+            return
+
+    def _close_mujoco_viewer(self) -> None:
+        process = self._viewer_process
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+            process.wait(timeout=2.0)
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        finally:
+            self._viewer_process = None
+
+    def _read_output(self) -> None:
+        process = self.process
+        if process is None or process.stdout is None:
+            return
+        for line in process.stdout:
+            self.lines.put(line.rstrip("\n"))
+
+    @staticmethod
+    def _parse(line: str) -> Dict[str, str]:
+        return {part.split("=", 1)[0]: part.split("=", 1)[1]
+                for part in line.split("|")[1:] if "=" in part}
+
+    def drain(self) -> int:
+        count = 0
+        while True:
+            try:
+                line = self.lines.get_nowait()
+            except queue.Empty:
+                break
+            count += 1
+            if line.startswith("STATE|"):
+                self.telemetry = self._parse(line)
+            elif line.startswith("VIEW|"):
+                self.view = self._parse(line)
+                self._sync_mujoco_viewer()
+            else:
+                self.log.append(line)
+        return count
+
+    def send(self, command: str) -> None:
+        process = self.process
+        if process is None or process.stdin is None or process.poll() is not None:
+            return
+        try:
+            process.stdin.write(command.rstrip("\n") + "\n")
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def stop(self) -> None:
+        self._close_mujoco_viewer()
+        process = self.process
+        if process is None:
+            return
+        self.send("QUIT")
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        self.process = None
+
+    def command_drive(self, velocity: float, yaw_rate: float) -> None:
+        if math.isfinite(velocity) and math.isfinite(yaw_rate):
+            self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
+
+    def command_pose(self, hip: float, knee: float,
+                     right_hip: Optional[float] = None,
+                     right_knee: Optional[float] = None) -> None:
+        if right_hip is None:
+            right_hip = hip
+        if right_knee is None:
+            right_knee = knee
+        values = (hip, knee, right_hip, right_knee)
+        if all(math.isfinite(value) for value in values):
+            self.send("POSE " + " ".join(f"{value:.7g}" for value in values))
+
+    def command_height(self, body_height_m: float) -> None:
+        """Request a symmetric FK height target; C++ owns the inverse FK."""
+        if math.isfinite(body_height_m):
+            self.send(f"HEIGHT {body_height_m:.7g}")
+
+    def command_dance(self, direction: float = 1.0) -> None:
+        if math.isfinite(direction):
+            self.send(f"DANCE START {'-1' if direction < 0 else '1'}")
+
+    def command_dance_stop(self) -> None:
+        self.send("DANCE STOP")

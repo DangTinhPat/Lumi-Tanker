@@ -46,7 +46,7 @@ deliberate, user-approved tradeoff, not an oversight:
    only 0.10 m past that pad's edge (see "Confound #1" below), not a real
    physical limit.
 2. After building an isolated clean world (`terrain:=ledge`,
-   `src/tap_sim/worlds/ledge_test.sdf`) and an initial small batch (n=6-8)
+   `src/legacy/ros2_gazebo_sim/worlds/ledge_test.sdf`) and an initial small batch (n=6-8)
    looked promising (~83-87% recovery, and one A/B run appeared to show the
    `LandingReflex` mechanism was harmless), a **larger, statistically
    meaningful batch (n=10 each) reversed that reading**: recovery rate on
@@ -58,7 +58,7 @@ deliberate, user-approved tradeoff, not an oversight:
 
 ## Current findings (closed-loop Gazebo, isolated clean world, n=10 each)
 
-`src/tap_sim/worlds/ledge_test.sdf`: `ground_plane` (top z=0) plus one static
+`src/legacy/ros2_gazebo_sim/worlds/ledge_test.sdf`: `ground_plane` (top z=0) plus one static
 `ledge_pad` (top z=0.20 m, 0.9x0.9 m) plus a quarter-round fillet (radius
 0.03 m) on the departure edge only, and nothing else. Robot spawns centered
 on the pad; `tools/clean_ledge_smoke.py` drives it off at 1.0 m/s (500 Hz
@@ -412,11 +412,11 @@ Wired real contact telemetry into the ledge-test path too, additively:
 - New launch arg `measure_contacts:=true` (independent of `jump_model`, so it
   does not also swap in `BoundedGazeboSystem`/lower actuator limits like
   `jump_model` does) enables the wheel contact sensors on
-  `src/tap_sim/worlds/ledge_test.sdf` (now loads `gz-sim-contact-system`)
+  `src/legacy/ros2_gazebo_sim/worlds/ledge_test.sdf` (now loads `gz-sim-contact-system`)
   without changing anything else.
 - Bridges the sensor's own `_raw` gz topic directly (`sim.launch.py`) rather
   than through `tap_sim::ContactSnapshot`
-  (`src/tap_sim/src/contact_snapshot.cpp`), which was observed to
+  (`src/legacy/ros2_gazebo_sim/src/contact_snapshot.cpp`), which was observed to
   intermittently fail to load in this environment ("undefined symbol:
   removexattrat" - a `libsystemd` version mismatch in the conda/micromamba
   env, unrelated to that plugin's own code). The existing

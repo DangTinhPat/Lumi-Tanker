@@ -66,8 +66,19 @@ class LandingController {
     // Zero preserves the historical behavior. This is a command handoff
     // guard, not an extra sensor or a simulator-state shortcut.
     float recovery_drive_ramp_s = 0.0F;
+    // Optional sensor-only settle gate before the pre-edge drive command is
+    // allowed back in.  A landing must first be upright and low-rate; otherwise
+    // the drive request can pull the robot away immediately after touchdown.
+    // A non-positive hold disables the gate for backwards-compatible defaults.
+    float recovery_settle_pitch_rad = 0.0F;
+    float recovery_settle_pitch_rate_rad_s = 0.0F;
+    float recovery_settle_hold_s = 0.0F;
     float recovery_pitch_rate_rad_s = 1.2F;
     float recovery_joint_speed_rad_s = 1.5F;
+    // Do not retract the landing extension while either measured leg is still
+    // compressing.  Joint speed alone can become small at maximum deflection
+    // even though the Cartesian leg spring is still moving downward.
+    float recovery_height_rate_m_s = 0.05F;
   };
 
   struct Output {
@@ -82,6 +93,13 @@ class LandingController {
     // leg's impact damping; leaving it disabled for the whole Impact window
     // would remove the primary pitch actuator exactly at touchdown.
     bool suspend_wheel_balance = false;
+    // During Flight the balance loop has no ground wrench, but the wheels can
+    // still be pre-spun to the already-requested tangential speed.  This is a
+    // bounded actuator feed-forward, not balance authority and not a contact
+    // signal; it prevents an unloaded wheel from meeting the ground at zero
+    // speed after a commanded drive-off.
+    bool flight_wheel_velocity_valid = false;
+    float flight_wheel_velocity_m_s = 0.0F;
     // [0, 1] scale for forward/yaw commands during the post-touchdown drive
     // handoff. It is 1.0 when this feature is disabled or no landing is in
     // progress.
@@ -125,7 +143,11 @@ class LandingController {
   float airborne_elapsed_s_ = 0.0F;
   float recovery_elapsed_s_ = 0.0F;
   float drive_handoff_elapsed_s_ = 0.0F;
+  float recovery_settle_elapsed_s_ = 0.0F;
   bool drive_handoff_active_ = false;
+  // Distinguishes early unloading pre-arm from a genuine airborne interval.
+  // A touchdown may only enter Impact after this becomes true.
+  bool flight_was_airborne_ = false;
   float flight_hip_offset_rad_ = 0.0F;
   float flight_knee_offset_rad_ = 0.0F;
   SideRef left_ref_{};

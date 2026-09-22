@@ -17,13 +17,13 @@ reference robot results").
 The sequence, in `Dashboard._reset_standup_gz_phase`/`_advance_reset_standup`:
 
 1. Pause the world (`/world/empty/control`, proven in
-   `src/tap_sim/scripts/activate_controllers`).
+   `src/legacy/ros2_gazebo_sim/scripts/activate_controllers`).
 2. Publish `/emergency_stop=true`.
 3. Teleport the robot base to whatever pose is currently in the dashboard's
    **Spawn X/Y/Z** fields (`/world/empty/set_pose`, proven in
    `tools/recovery_smoke.py`), identity orientation. These fields default to
    `x=0 y=0 z=0.2372` for `terrain=none` (matching `sim.launch.py`'s
-   `spawn_z` default and `src/tap_sim/CONTRACT.md`'s documented wheel-ground
+  `spawn_z` default and `src/legacy/ros2_gazebo_sim/CONTRACT.md`'s documented wheel-ground
    height) or `x=-4.6 y=0 z=0.4372` for `terrain=rough` (the flat test pad
    in `rough_training.sdf`), and are read fresh on every `Reset standup`
    click — not fixed at launch time — so a custom position (e.g. edited

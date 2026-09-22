@@ -60,8 +60,22 @@ current implementation happens to run in simulation:
   velocity) — real hardware will have this.
 - Joint encoders: position and velocity per joint — real hardware will have
   this.
-- Motor current / torque sensing is outside this robot's hardware contract and
-  must not be introduced as a hidden control dependency.
+- **Leg motor Iq-based torque estimate, leg CAN driver only** (2026-09-18
+  exception — see "Leg motor current-based torque exception" below): the
+  four leg joints' CAN driver (SteadyWin GDS68/ODrive, `docs/motor_drivers/
+  GDS68_DRIVER.md`) computes `torque ≈ Iq × Kt` in firmware from its own FOC
+  current sense and returns it in the same MIT feedback frame as
+  position/velocity — no added sensor, no simulator shortcut. Allowed **only**
+  as a secondary, corroborating signal in a support/contact estimator that
+  also requires independent IMU and encoder/kinematic evidence to agree; it
+  must never be the sole or primary gate for a control decision, and it must
+  pass the same persistence/debounce discipline as every other signal in this
+  rule. Wheel motor current/load (UART, CJC BL4820M12,
+  `docs/motor_drivers/WHEEL_MOTOR_PROTOCOL.md`) remains excluded: its `Load`
+  register has an unverified, uncalibrated unit and is not usable. A
+  standalone force/torque sensor (strain gauge, load cell, etc.) remains
+  permanently excluded — this exception covers only the CAN leg driver's own
+  built-in current-based estimate, not any new physical sensor.
 - Wheel odometry derived from the above.
 - Anything computed *from* the above via a real estimator (a complementary
   filter, an EKF, FK/IK) — the computation can run in sim or on hardware
@@ -91,10 +105,13 @@ physics engine:
 `0ca725a`), not `sim_pose` — the earlier version of this section was out of
 date. The permanently fixed hardware sensor inventory is only one MPU6500
 (3-axis accelerometer + 3-axis gyroscope) and six motor encoders (four leg
- joints and two wheel joints). Physical wheel contact sensors, force/torque
- sensors, range sensors, cameras/localizers and motor current/torque feedback
- are permanently excluded from this robot's hardware contract and control
- design. Therefore the current Gazebo
+ joints and two wheel joints), **plus, since 2026-09-18, the four leg joints'
+ own CAN-driver Iq-based torque estimate** (see "Leg motor current-based
+ torque exception" below) — usable only as a secondary corroborating signal,
+ never as a standalone gate. Physical wheel contact sensors, standalone
+ force/torque sensors, range sensors, cameras/localizers, and wheel motor
+ current/load are permanently excluded from this robot's hardware contract
+ and control design. Therefore the current Gazebo
  per-wheel contact stream (`any_wheel_contact_[0]`/`[1]`) is simulation
  telemetry, not a real hardware sensor, and must not be treated as deployable
  touchdown truth. The deployable path must infer a support hypothesis from
@@ -124,6 +141,59 @@ place — see project memory `project_imu_only_direction.md` for status
 tracking. Until fixed, any number gathered with either feature enabled is
 ground-truth-assisted evidence, not evidence about the real-sensor
 controller's own behavior, and must be labeled as such when reported.
+
+### Leg motor current-based torque exception (user, 2026-09-18)
+
+Verified against the actual driver protocol docs the user added
+(`docs/motor_drivers/GDS68_DRIVER.md`, `docs/motor_drivers/
+WHEEL_MOTOR_PROTOCOL.md`) before this exception was written, per this rule's
+own "ask what sensor... produces this value" discipline:
+
+- The four leg joints' CAN driver (SteadyWin GDS68, ODrive-based firmware)
+  measures FOC quadrature current (Iq) as a normal part of closed-loop motor
+  control — not an added sensor — and reports `torque ≈ Iq × Kt` in the same
+  MIT-control feedback frame already used for position/velocity, at the same
+  rate, with no extra query. This is real driver hardware behavior, not a
+  simulator shortcut, so it does not violate this rule's core test ("what
+  sensor will the real robot actually have").
+- The two wheel joints use a different driver (UART, CJC BL4820M12) whose
+  `Load` register has an undocumented, unverified unit — it is not usable and
+  remains excluded. The wheel is also where ground reaction force first acts,
+  so this exception does **not** give a direct read of ground contact force;
+  it only gives an indirect, geometry-filtered (Jacobian-mediated) view from
+  the hip/knee side, after the force has propagated up through the leg
+  structure.
+- Precedent for treating this as within-contract: `masses.yaml`/CAD
+  inertials are already accepted as design-time-known constants (see this
+  rule's "Not allowed" section); the leg CAN driver's Kt and its Iq
+  measurement are exactly analogous — a property the robot's own designer
+  already knows/measures, not information borrowed from Gazebo's omniscient
+  internal state.
+
+**Binding conditions** (all required, not optional extras):
+
+1. Never the sole gate. A leg-torque-residual signal may only raise or lower
+   confidence in a support/contact/flight hypothesis that also independently
+   requires IMU evidence and encoder/kinematic evidence to agree — mirroring
+   the existing multi-signal persistence design in `FlightObserver`.
+2. Residual, not raw value. Any control-path use must compare measured torque
+   against an expected torque computed from the commanded motion and known
+   leg mass/inertia (`masses.yaml`), not threshold the raw instantaneous
+   value — raw Iq is dominated by self-motion and gearbox-friction terms that
+   have nothing to do with external contact.
+3. No wheel extension. This exception is scoped to the four leg (hip/knee)
+   CAN joints only. It must not be read as license to use wheel motor
+   current/load, or to claim a direct ground-normal-force measurement at the
+   wheel-ground contact point.
+4. No new physical sensor. This does not authorize adding a strain gauge,
+   load cell, or any other force/torque hardware — only using data the
+   already-specified GDS68 driver already produces as a normal part of its
+   existing closed-loop control.
+5. Same evidence-labeling discipline as the rest of this rule: report
+   whether a given trial's support/flight decision used this signal, and do
+   not present a leg-torque-assisted result as equivalent to one derived from
+   MPU6500+encoders alone until this signal is itself validated on real
+   hardware.
 
 ### How to apply this rule going forward
 

@@ -79,6 +79,21 @@ TrajectoryObserver::Output TrajectoryObserver::update(
     return output_;
   }
 
+  // The reported velocity is an independent encoder channel.  A corrupted
+  // velocity message must not pass merely because the position increment
+  // still looks plausible; otherwise capture-point landing can consume an
+  // impossible speed with a nonzero confidence.  Keep the previous-position
+  // seed advanced as above so the next sample starts from a clean boundary.
+  if (std::abs(state.wheel.left_velocity_m_s) > max_speed ||
+      std::abs(state.wheel.right_velocity_m_s) > max_speed) {
+    output_.valid = false;
+    output_.confidence = 0.0F;
+    output_.forward_velocity_m_s = 0.0F;
+    output_.lateral_velocity_m_s = 0.0F;
+    output_.yaw_rate_rad_s = 0.0F;
+    return output_;
+  }
+
   const float forward_delta = 0.5F * (delta_left + delta_right);
   const float yaw_delta = (delta_right - delta_left) /
                           std::max(2.0F * config_.half_track_m, 1.0e-4F);

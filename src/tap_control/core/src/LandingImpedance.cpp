@@ -45,9 +45,14 @@ void LandingImpedance::sizeFromEnergy(Side& side, float knee_vel_rad_s) const {
   const float kp_absolute = side.impact_kp_scale * config_.leg_kp_nominal_nm_rad;
   const float kd_critical =
       2.0F * std::sqrt(std::max(kp_absolute, 0.0F) * config_.leg_knee_inertia_kgm2);
+  // Energy sizing is an upper adaptation of the validated impact profile.  A
+  // low measured velocity must not silently remove the configured damping
+  // floor: the IMU/encoder event is noisy and the joint velocity can still be
+  // catching up during the first sample after contact.
+  const float kd_floor = std::max(1.0F, config_.impact_kd_scale);
   side.impact_kd_scale = std::clamp(
-      kd_critical / config_.leg_kd_nominal_nm_s_rad, 1.0F,
-      config_.energy_kd_scale_max);
+      kd_critical / config_.leg_kd_nominal_nm_s_rad, kd_floor,
+      std::max(kd_floor, config_.energy_kd_scale_max));
 }
 
 void LandingImpedance::updateSide(Side& side, bool floor_contact, float h_dot,

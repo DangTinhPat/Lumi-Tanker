@@ -2,6 +2,9 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
+
+#include "robot_control/GeneratedGeometry.hpp"
 
 namespace robot_control {
 
@@ -20,7 +23,20 @@ using JointArray = std::array<float, kJointCount>;
 
 struct ImuState {
   float pitch_rad = 0.0F;
+  // Elapsed time between fresh MPU6500 packets. Zero keeps legacy callers on
+  // RobotState::dt_s; native multi-rate runners fill this with the actual
+  // sensor period so CMF debounce is not stretched by a faster control loop.
+  float sample_dt_s = 0.0F;
   float pitch_rate_rad_s = 0.0F;
+  // Bias-corrected rate for the reduced-order balance model. Keep the raw
+  // pitch_rate_rad_s channel for lifecycle/impact gates until those users are
+  // explicitly migrated to an estimator-confidence contract.
+  float pitch_rate_bias_corrected_rad_s = 0.0F;
+  bool pitch_rate_bias_corrected_valid = false;
+  // Estimated pitch-axis gyro bias. The native bring-up keeps the public
+  // pitch-rate channel raw until calibration confidence is validated; this
+  // field is exposed for estimator supervision and later hardware binding.
+  float gyro_bias_rad_s = 0.0F;
   float yaw_rad = 0.0F;
   float yaw_rate_rad_s = 0.0F;
   // Body-frame roll rate (2026-09-16, LandingReflex's differential-knee roll
@@ -59,10 +75,21 @@ struct JointState {
   JointArray position_rad{};
   JointArray velocity_rad_s{};
   JointArray effort_nm{};
+  // True only when the four leg effort channels came from a complete,
+  // finite GDS68 MIT feedback sample.  A missing JointState effort field is
+  // not equivalent to zero torque: TorqueResidualEstimator must fail closed
+  // instead of turning a transport/driver dropout into an unloading event.
+  bool effort_feedback_valid = false;
 };
 
 struct RobotState {
   float dt_s = 0.005F;
+  // Optional transport sequence numbers. Zero means legacy callers do not
+  // expose freshness and every update is treated as a new sample. Native
+  // high-rate runners use these to prevent a 3-4 kHz control loop from
+  // integrating a 500 Hz IMU/encoder packet six to eight times.
+  std::uint64_t imu_sample_sequence = 0;
+  std::uint64_t encoder_sample_sequence = 0;
   bool floor_contact = true;
   // Per-side contact (2026-09-16, ROLL differential-leg impedance): real
   // touchdown is never simultaneous on both wheels (asymmetric landing,
@@ -81,9 +108,11 @@ struct ControlCommand {
   float target_forward_velocity_m_s = 0.0F;
   float target_yaw_rate_rad_s = 0.0F;
   JointArray target_joint_position_rad{};
+  float target_body_height_m = geometry::neutral_spawn_z_m;
   bool request_enable = false;
   bool request_disable = false;
   bool request_pose_change = false;
+  bool request_height_change = false;
   bool request_stand_up = false;
 };
 

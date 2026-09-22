@@ -7,7 +7,8 @@ pass. Bounded-actuator pose passes do not validate flight or landing.
 
 ## Scope And Acceptance
 
-Simulation only, Gazebo + RViz, current approximate 3.938 kg CAD model.
+Simulation only, Gazebo + RViz; this document records historical jump work
+against a superseded CAD model.
 The selected four GIM6010-8 leg motors and two BL4820M12 wheel motors are not
 fully characterized. No hardware operation, automatic repeated jumps or salto
 is enabled by this work. The requested target is strictly greater than 0.10 m

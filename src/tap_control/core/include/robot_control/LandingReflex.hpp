@@ -14,17 +14,14 @@ namespace robot_control {
 // IMU/contact state - see EmbeddedController::update). This component instead
 // changes WHAT position the legs are commanded to while airborne/landing.
 //
-// TAP's knee range peaks at knee = 0 rad = full leg extension already at
-// neutral standing pose (see WholeBodyModel/GeneratedGeometry: the two leg
-// links are colinear, i.e. at maximum reach, when knee = 0), so a "reach
-// further down to shorten the fall" motion does not exist - confirmed
-// geometrically, not just asserted. What IS available is the opposite: bend
-// (crouch) the knees BEFORE touchdown so that on impact the legs have a real
-// compression stroke to extend back through, under actual commanded motion,
-// instead of already sitting at the knee_max_rad limit with zero give. This
+// The encoder reference is knee = 0 rad, an interior point of the native joint
+// envelope (not full extension and not a limit). The lowered natural ENABLE
+// pose is knee = -0.72893 rad. Landing motion
+// can therefore bend the knees below zero for compression and extend them
+// above zero before touchdown, subject to the configured envelope. This
 // mirrors human/quadruped pre-landing crouch and the touchdown-posture idea in
 // "Real-time Optimal Landing Control of the MIT Mini Cheetah" (arXiv
-// 2110.02799) adapted to this robot's one real remaining degree of freedom.
+// 2110.02799) adapted to this robot.
 //
 // The airborne signal reused here (`floor_contact` false) is the same
 // sensor-derived support hypothesis produced by FlightObserver from MPU6500
@@ -86,6 +83,11 @@ class LandingReflex {
     // flicker on the ledge; a real IMU reads low specific force during
     // unloading/free fall before a reliable support-hypothesis edge. 0 disables.
     float unloading_accel_mps2 = 0.0F;
+    // Require the low-specific-force pre-arm to persist for this long. This
+    // rejects a single noisy MPU6500 sample while retaining the early
+    // unloading lead over the full FlightObserver support-loss debounce.
+    // 0 preserves the legacy immediate pre-arm behavior.
+    float unloading_debounce_s = 0.0F;
     // Limit how fast the reflex target may move once active. 0 disables the
     // slew limiter and preserves the historical instantaneous offset.
     float target_slew_rate_rad_s = 0.0F;
@@ -152,14 +154,14 @@ class LandingReflex {
     // AFTER contact (impedance) or only changes leg LENGTH (active
     // extension). Neither repositions WHERE the wheel will land relative to
     // the CoM's own forward motion - and during the entire airborne window
-    // the wheel-drive MPC has zero authority anyway (no ground, no friction -
-    // see MpcBalancer::update's own !state.floor_contact branch, which skips
+    // the wheel-drive LQR has zero authority anyway (no ground, no friction -
+    // see LqrBalancer's !state.floor_contact branch, which skips
     // the solve and lets commanded_ground_velocity_m_s_ decay to 0). This is
     // the textbook "Instantaneous Capture Point" idea (Pratt, Carff, Raibert,
     // Neuhaus, "Capture Point: A Step toward Humanoid Push Recovery", IEEE
     // Humanoids 2006 - the standard basis for nearly all modern humanoid
     // push-recovery/foot-placement controllers): for a linear-inverted-
-    // pendulum model (the SAME model MpcBalancer already uses - same
+    // pendulum model (the SAME model LqrBalancer uses - same
     // omega = sqrt(g / com_height)), placing the support point at
     // x_capture = x_com + v_com / omega arrests the CoM's horizontal motion
     // at touchdown instead of letting it keep driving the fall. Human stumble
@@ -201,7 +203,7 @@ class LandingReflex {
   explicit LandingReflex(Config config) : config_(config) {}
 
   // True at construction/reset so bring-up (already grounded) never reads as
-  // a spurious liftoff, matching MpcBalancer's own prev_floor_contact_ idiom.
+  // a spurious liftoff, matching LqrBalancer's own prev_floor_contact_ idiom.
   void reset();
   // Seed the edge detector from the first validated contact observation so a
   // startup sample with no contact cannot look like a real liftoff.
@@ -222,7 +224,7 @@ class LandingReflex {
   // TrajectoryObserver estimate from the two encoders, with averaged wheel
   // odometry as a safe fallback. com_height_m is the live whole-body CoM
   // height (EmbeddedController's own last_whole_body_.com_height_m, already
-  // computed every tick for MpcBalancer's pendulum length) - both feed
+  // computed every tick for LqrBalancer's pendulum length) - both feed
   // Config::capture_point_gravity_m_s2's mechanism, applied symmetrically to
   // both hips.
   [[nodiscard]] JointArray update(bool floor_contact, float pitch_rate_rad_s,
@@ -243,6 +245,7 @@ class LandingReflex {
   Phase phase_ = Phase::Grounded;
   bool prev_floor_contact_ = true;
   bool armed_by_unloading_ = false;
+  float unloading_elapsed_s_ = 0.0F;
   float latched_hip_offset_rad_ = 0.0F;
   float catch_elapsed_s_ = 0.0F;
   float airborne_elapsed_s_ = 0.0F;

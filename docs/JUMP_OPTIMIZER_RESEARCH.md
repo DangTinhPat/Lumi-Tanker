@@ -153,19 +153,21 @@ constraint reactions, particularly in flight. A later full-3D residual check
 or optimizer is required before declaring physical feasibility.
 
 CAD zero, native +Y on both sides, all seven masses and all inertia entries
-remain unchanged. Body visual/inertial pitch `-pi/2` is consumed from URDF;
-there is no second rotation or parallel-axis shift in the adapter. Radius stays
-0.030 m, track stays 0.309 m. Total imported mass is 3.938 kg. Motor mass
-allocation and uniform-density inertia estimates remain unmeasured assumptions.
+remain explicit model inputs. Body visual/inertial pitch `-pi/2` is consumed
+from URDF; there is no second rotation or parallel-axis shift in the adapter.
+The active native model uses a `0.040 m` wheel radius, `0.309 m` track and
+`4.621 kg` total mass. The archived URDF/ADAM results below were not regenerated
+for that model and remain historical only. Motor mass allocation and
+uniform-density inertia estimates remain unmeasured assumptions.
 Root/mount, topology, joint types and native axes are validated on load.
 
 The level-ground material-point contact velocity uses precisely:
 
 ```text
-Jx = d(axle_x)/dq - 0.030 * [0,0,1,1,1,1]
+Jx = d(axle_x)/dq - 0.040 * [0,0,1,1,1,1]
 Jz = d(axle_z)/dq
 Jcontact = [Jx; Jz]
-gap = axle_z - 0.030
+gap = axle_z - 0.040
 ```
 
 The wheel's absolute angular rate is pitch+hip+knee+relative-wheel rate.
@@ -301,7 +303,7 @@ no simulator is launched. Default environments without ADAM/CasADi skip this
 optional suite; the passing evidence uses the explicit venv above.
 
 Also built the Function on the parent-provided
-`log/jump_1789218763317496560/expanded.urdf`, mass 3.938 kg, SHA256
+`log/jump_1789218763317496560/expanded.urdf`, SHA256
 `7720f72660e5bc2c8d1cc3717ac145502ad9f1ccc942270b1b36d94fd6f50af8`.
 The URDF parser warns about collision `name` attributes and archived
 `ros2_control` tags; inertial/dynamics checks pass. The adapter does not alter
@@ -311,10 +313,10 @@ Inspected local source SHA256 values:
 
 | Path | SHA256 |
 | --- | --- |
-| `src/tap_robot_description/description/cad_robot/robot.urdf.xacro` | `d8163f8108d81b16723496d5843b1406d33be69486044ffed3c614c781713a90` |
-| `src/tap_robot_description/description/cad_robot/masses.yaml` | `8438c8c303ca535eb0f3781606292ee6216cd96c78594995b72643463332c78e` |
-| `src/tap_robot_description/description/cad_robot/mesh_inertials.yaml` | `d9fd19ab552558df41c265a730bbd6f8209148d68aca96e96f964e33fdcfbdc3` |
-| `src/tap_sim/include/tap_sim/actuator_bounds.hpp` | `fa82bc2e122e33bc21f7e091f08733ec4d91fba1f2795d014fd80048bf0e1612` |
+| `src/tap_robot_description/description/company_rb/robot.urdf.xacro` | `d8163f8108d81b16723496d5843b1406d33be69486044ffed3c614c781713a90` |
+| `src/tap_robot_description/description/company_rb/masses.yaml` | `8438c8c303ca535eb0f3781606292ee6216cd96c78594995b72643463332c78e` |
+| `src/tap_robot_description/description/company_rb/mesh_inertials.yaml` | `d9fd19ab552558df41c265a730bbd6f8209148d68aca96e96f964e33fdcfbdc3` |
+| `src/legacy/ros2_gazebo_sim/include/tap_sim/actuator_bounds.hpp` | `fa82bc2e122e33bc21f7e091f08733ec4d91fba1f2795d014fd80048bf0e1612` |
 
 No full upstream suite, iDynTree cross-library test on TAP, constrained NLP,
 3D residual audit, Gazebo test, package install or hardware action was performed

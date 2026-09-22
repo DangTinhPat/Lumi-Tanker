@@ -35,6 +35,7 @@ class StateMachine {
                                    bool stand_up_active,
                                    bool airborne = false);
   [[nodiscard]] ControlMode mode() const noexcept;
+  [[nodiscard]] float fallPitchRad() const noexcept { return config_.fall_pitch_rad; }
 
  private:
   void enter(ControlMode next_mode);
@@ -43,6 +44,7 @@ class StateMachine {
   ControlMode mode_ = ControlMode::Disabled;
   unsigned cycles_in_mode_ = 0;
   bool stand_up_requested_ = false;
+  bool enable_requested_ = false;
 };
 
 [[nodiscard]] const char* toString(ControlMode mode) noexcept;

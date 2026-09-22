@@ -33,10 +33,10 @@ These are persistent expert instructions, not claims of running agent processes.
 
 - Native CAD joint axes are `+Y` on BOTH sides; CAD assembly is joint zero.
   Do not import the old robot's mirrored right-side angle/wheel signs.
-- Wheel radius: `0.030 m`. Axle center spacing: `0.309 m`; half-track:
+- Wheel radius: `0.040 m`. Axle center spacing: `0.309 m`; half-track:
   `0.1545 m`. Outer width `0.334 m` is not the track.
-- Approximate total mass: `3.938 kg`: body `2.902`, each thigh `0.233`,
-  each shin `0.150`, each wheel plus motor `0.135`.
+- Approximate total mass: `4.621 kg`: body `3.371`, each thigh `0.296`,
+  each shin `0.109`, each wheel plus motor `0.220`.
 - Body visual pitch is `-pi/2`; rotate COM and inertial frame consistently,
   not joint or IMU frames merely to match the mesh. Legs remain unchanged.
 - All four hip/knee motors are provisionally lumped in the body; wheel motor

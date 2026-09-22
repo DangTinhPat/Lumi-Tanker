@@ -126,6 +126,56 @@ void flightPitchRateShapesHipPlacement() {
         "LandingController: Flight pitch-rate shaping moves hip negative and bounded");
 }
 
+void holdsActiveExtensionThroughImpact() {
+  LandingController::Config cfg;
+  cfg.enabled = true;
+  cfg.flight_extension_delay_s = 0.0F;
+  cfg.flight_extension_max_m = 0.035F;
+  cfg.flight_knee_offset_max_rad = 0.20F;
+  cfg.flight_target_slew_rate_rad_s = 100.0F;
+  cfg.min_flight_before_impact_s = 0.02F;
+  cfg.min_impact_s = 0.01F;
+  cfg.max_impact_s = 0.05F;
+  cfg.recovery_blend_s = 0.10F;
+  LandingController ctrl(cfg);
+  RobotState state = baseState();
+  JointArray target = state.joints.position_rad;
+
+  (void)sensorUpdate(ctrl, state, target);
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  for (int i = 0; i < 5; ++i) {
+    (void)sensorUpdate(ctrl, state, target);
+  }
+  const auto flight = sensorUpdate(ctrl, state, target);
+  const float flight_knee =
+      flight.position_offset_rad[static_cast<std::size_t>(JointId::LeftKnee)];
+  check(flight.phase == LandingController::Phase::Flight && flight_knee > 0.0F,
+        "LandingController: active extension is present before touchdown");
+
+  state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = true;
+  auto impact = sensorUpdate(ctrl, state, target);
+  const float impact_knee =
+      impact.position_offset_rad[static_cast<std::size_t>(JointId::LeftKnee)];
+  check(impact.phase == LandingController::Phase::Impact &&
+            near(impact_knee, flight_knee, 1.0e-4F),
+        "LandingController: extension is held through Impact for compression stroke");
+
+  state.joints.velocity_rad_s.fill(0.0F);
+  LandingController::Output recovery;
+  for (int i = 0; i < 6; ++i) {
+    recovery = sensorUpdate(ctrl, state, target);
+  }
+  const float recovery_knee =
+      recovery.position_offset_rad[static_cast<std::size_t>(JointId::LeftKnee)];
+  check(recovery.phase == LandingController::Phase::Recovery &&
+            recovery_knee < impact_knee && recovery_knee > 0.0F,
+        "LandingController: extension blends out after impact, not at touchdown");
+}
+
 void impactProducesCartesianFeedforwardAndRecovery() {
   LandingController::Config cfg;
   cfg.enabled = true;
@@ -385,6 +435,76 @@ void recoveryDriveHandoffIsBoundedAndRamps() {
         "LandingController: drive handoff returns full command");
 }
 
+void recoveryDriveWaitsForSensorStableBody() {
+  LandingController::Config cfg;
+  cfg.enabled = true;
+  cfg.min_flight_before_impact_s = 0.01F;
+  cfg.min_impact_s = 0.01F;
+  cfg.max_impact_s = 0.02F;
+  cfg.recovery_blend_s = 0.01F;
+  cfg.recovery_drive_ramp_s = 0.10F;
+  cfg.recovery_settle_pitch_rad = 0.20F;
+  cfg.recovery_settle_pitch_rate_rad_s = 0.50F;
+  cfg.recovery_settle_hold_s = 0.03F;
+  LandingController ctrl(cfg);
+  RobotState state = baseState();
+  JointArray target = state.joints.position_rad;
+
+  (void)sensorUpdate(ctrl, state, target);
+  state.floor_contact = false;
+  state.left_floor_contact = false;
+  state.right_floor_contact = false;
+  (void)sensorUpdate(ctrl, state, target);
+  state.floor_contact = true;
+  state.left_floor_contact = true;
+  state.right_floor_contact = true;
+  state.imu.pitch_rad = 0.30F;
+  state.imu.pitch_rate_rad_s = 0.0F;
+  auto out = sensorUpdate(ctrl, state, target);
+  for (int i = 0; i < 5; ++i) {
+    out = sensorUpdate(ctrl, state, target);
+  }
+  check(out.phase == LandingController::Phase::Grounded &&
+            out.drive_velocity_scale == 0.0F,
+        "LandingController: drive remains held while body is outside settle window");
+
+  state.imu.pitch_rad = 0.10F;
+  for (int i = 0; i < 3; ++i) {
+    out = sensorUpdate(ctrl, state, target);
+  }
+  check(out.drive_velocity_scale > 0.0F && out.drive_velocity_scale < 1.0F,
+        "LandingController: drive ramp starts only after sensor-stable dwell");
+}
+
+void transientUnloadingKeepsWheelBalanceAlive() {
+  LandingController::Config cfg;
+  cfg.enabled = true;
+  LandingController controller(cfg);
+  RobotState state = baseState();
+  const JointArray target = state.joints.position_rad;
+
+  FlightObserver::Output grounded;
+  grounded.phase = FlightObserver::Phase::Grounded;
+  grounded.support_contact = true;
+  (void)controller.update(state, target, &grounded);
+
+  FlightObserver::Output transient;
+  transient.phase = FlightObserver::Phase::TransientUnloading;
+  transient.support_contact = false;
+  transient.support_unloading = true;
+  transient.airborne = false;
+  auto out = controller.update(state, target, &transient);
+  check(out.phase == LandingController::Phase::Flight &&
+            !out.suspend_wheel_balance,
+        "LandingController: unconfirmed support loss does not cut wheel MPC");
+
+  transient.airborne = true;
+  transient.phase = FlightObserver::Phase::BallisticFlight;
+  out = controller.update(state, target, &transient);
+  check(out.suspend_wheel_balance,
+        "LandingController: confirmed airborne state suspends wheel MPC");
+}
+
 void embeddedControllerDefaultLandingControllerIsNoOp() {
   EmbeddedController controller;
   RobotState state = baseState();
@@ -419,6 +539,7 @@ int main() {
   disabledControllerIsNoOp();
   flightDelaysAndBoundsLegExtension();
   flightPitchRateShapesHipPlacement();
+  holdsActiveExtensionThroughImpact();
   impactProducesCartesianFeedforwardAndRecovery();
   hardImuSpikeWithoutContactDoesNotEnterImpact();
   repeatedHardImuShockWithoutWheelContactStaysFlight();
@@ -427,6 +548,8 @@ int main() {
   hardImuShockFollowedByContactEntersImpact();
   impactFeedforwardOnlyOnContactedSide();
   recoveryDriveHandoffIsBoundedAndRamps();
+  recoveryDriveWaitsForSensorStableBody();
+  transientUnloadingKeepsWheelBalanceAlive();
   embeddedControllerDefaultLandingControllerIsNoOp();
   std::cout << (failures == 0 ? "ALL PASS\n" : "FAILURES PRESENT\n");
   return failures == 0 ? 0 : 1;

@@ -23,7 +23,7 @@ Retrieved 2026-09-12; unmodified HTML snapshot:
 `source_assets/datasheets/cjc_bl4820m12_20260912.html`.
 SHA256: `4334f5f2ecd5c97f759c863e799dc7d407430dca5b45b0a9c7ec35a734234484`.
 Structured reference data is installed with the robot description at
-`description/cad_robot/wheel_motor.yaml`. It is not loaded by the controller
+`description/company_rb/wheel_motor.yaml`. It is not loaded by the controller
 or Xacro and does not enforce actuator limits in Gazebo.
 
 | Published property | Value |
@@ -41,8 +41,8 @@ or Xacro and does not enforce actuator limits in Gazebo.
 
 The page says parameters are reference values and customization is available.
 Do not treat 0.130 Nm as a verified continuous or peak allowance, or no-load
-speed as a loaded speed limit. With the existing 0.030 m wheel and assumed
-direct drive, 400 rpm corresponds to 1.256637 m/s, not a robot speed command.
+speed as a loaded speed limit. With the current 0.040 m wheel and assumed
+direct drive, 400 rpm corresponds to 1.675516 m/s, not a robot speed command.
 The page does not establish gearing; GIM's 8:1 ratio does NOT apply here.
 
 The published ratings need clarification: 12 V * 1 A = 12 W, whereas rated
@@ -130,12 +130,12 @@ That range must not be imposed on the continuous wheel joints.
 
 ## Legacy Model Is Not Yet Converted
 
-Current `masses.yaml` represents 3.938 kg using an earlier mass allocation:
-body 2.902 kg (including four 0.388 kg motors), each thigh 0.233 kg, each shin
-0.150 kg and each wheel-plus-old-motor assembly 0.135 kg. The old 0.388 kg
-leg-motor allocation agrees with the manual's nominal mass. CJC does not publish
-wheel-motor mass on the supplied page, so 0.135 kg remains the user-approved
-combined approximation, not a verified BL4820M12 assembly mass.
+The company BOM in `docs/data/BOM .png` now supersedes that provisional
+allocation. The active `masses.yaml` total is 4.621 kg: body 3.371 kg
+(including four 0.388 kg leg motors), each thigh 0.296 kg, each shin 0.109 kg,
+and each wheel link 0.220 kg (0.150 kg wheel motor + 0.070 kg TPE wheel).
+The BOM fixes link totals but does not provide motor mounting COM, rotor inertia,
+or a composite CAD inertia tensor; those remain explicit simulation estimates.
 
 Do not add six new motor masses on top of the old motor-inclusive masses.
 With existing leg/body groups retained, the bookkeeping total is

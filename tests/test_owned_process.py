@@ -1,4 +1,4 @@
-"""Owned lifecycle tests use tiny Python children, never ROS or Gazebo."""
+"""Owned lifecycle tests use tiny native Python children."""
 import importlib.util
 import os
 from pathlib import Path

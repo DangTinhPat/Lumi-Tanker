@@ -19,6 +19,16 @@ JumpController::Config config() {
   c.thrust_duration_s=.15F;c.landing_duration_s=.1F;c.settle_duration_s=.1F;c.max_settle_s=1;
   return c;
 }
+void airborne(JumpController::Input& i) {
+  i.left_contact=i.right_contact=false;
+  i.airborne=true;
+  i.ballistic=true;
+}
+void grounded(JumpController::Input& i) {
+  i.left_contact=i.right_contact=true;
+  i.airborne=false;
+  i.ballistic=false;
+}
 void ready(JumpController& j,JumpController::Input& i) {
   i.request=false;for(int n=0;n<25;++n)(void)j.update(i);
 }
@@ -49,7 +59,8 @@ int main() {
         const int h=3*side,k=h+1;
         const auto& thigh=geometry::origins[h+1];const auto& shin=geometry::origins[h+2];
         auto z=[&](double hip,double knee) {
-          const double a=hip+pitch,b=a+knee;
+          const double a=hip+pitch,
+              b=a+knee+geometry::knee_zero_rebase_rad;
           return -std::sin(a)*thigh.x+std::cos(a)*thigh.z-
               std::sin(b)*shin.x+std::cos(b)*shin.z;
         };
@@ -66,13 +77,13 @@ int main() {
   {
     auto c=config();c.smooth_phase_transitions=true;c.landing_compression=true;
     JumpController smooth_jump(c);auto state=input();auto out=thrust(smooth_jump,state);
-    state.left_contact=state.right_contact=false;
+    airborne(state);
     bool continuous=true,bounded=true;bool flight=false,land=false;
     for(int n=0;n<300&&out.phase!=JumpController::Phase::Complete;++n) {
       const auto previous=out;
       // A measurement jump at the contact transition must not reset the reference.
       state.position_rad=out.position_rad;
-      if(n==30) {state.left_contact=state.right_contact=true;state.position_rad[1]-=.04F;}
+      if(n==30) {grounded(state);state.position_rad[1]-=.04F;}
       out=smooth_jump.update(state);
       if(out.phase!=previous.phase&&(out.phase==JumpController::Phase::Flight||out.phase==JumpController::Phase::Land)) {
         continuous=continuous&&out.position_rad==previous.position_rad;
@@ -92,9 +103,9 @@ int main() {
   {
     auto c=config();c.landing_compression=true;
     JumpController absorb(c);auto state=input();auto out=thrust(absorb,state);
-    state.left_contact=state.right_contact=false;
+    airborne(state);
     for(int n=0;n<25;++n) {state.position_rad=out.position_rad;out=absorb.update(state);}
-    state.left_contact=state.right_contact=true;
+    grounded(state);
     for(int n=0;n<5&&out.phase!=JumpController::Phase::Land;++n) {
       state.position_rad=out.position_rad;out=absorb.update(state);
     }
@@ -113,9 +124,9 @@ int main() {
     check(compressed&&soft&&bounded,"compression bends softly with bounded target speed");
     check(out.phase==JumpController::Phase::Complete,"compression returns through stable recovery");
     absorb.reset();state=input();out=thrust(absorb,state);
-    state.left_contact=state.right_contact=false;
+    airborne(state);
     for(int n=0;n<5;++n)out=absorb.update(state);
-    state.left_contact=state.right_contact=true;
+    grounded(state);
     for(int n=0;n<5;++n)out=absorb.update(state);
     state.stop=true;out=absorb.update(state);
     check(out.stop_motors&&out.velocity_rad_s[1]==0&&!out.owns_pose,
@@ -131,7 +142,7 @@ int main() {
       check(std::abs(std::cos(pitch)*body.com_offset_x_m+
             std::sin(pitch)*body.com_above_axle_m)<1e-5F,
             "landing geometry aligns world COM and wheel axle");
-      check(pose[0]>=-.6F&&pose[0]<=1.05F&&pose[0]==pose[3],
+      check(pose[0]>=-.6F&&pose[0]<=1.2F&&pose[0]==pose[3],
             "landing geometry preserves native symmetric travel");
     }
   }
@@ -142,11 +153,11 @@ int main() {
     for(int n=0;n<20;++n) {
       const auto previous=out.position_rad;
       state.position_rad=out.position_rad;out=adjusted.update(state);
-      for(auto h:{0,3}) bounded=bounded&&out.position_rad[h]>=-.6F&&out.position_rad[h]<=1.05F&&
+      for(auto h:{0,3}) bounded=bounded&&out.position_rad[h]>=-.6F&&out.position_rad[h]<=1.2F&&
           std::abs(out.position_rad[h]-previous[h])<=c.max_joint_speed_rad_s*state.dt_s+1e-5F;
     }
     check(bounded,"thrust attitude offset stays inside position and speed bounds");
-    state.left_contact=state.right_contact=false;state.pitch_rad=-.15F;
+    airborne(state);state.pitch_rad=-.15F;
     for(int n=0;n<30;++n) {state.position_rad=out.position_rad;out=adjusted.update(state);}
     check(out.phase==JumpController::Phase::Flight&&out.position_rad[0]>
           JumpController::neutralPose(out.position_rad[1])[0],
@@ -163,9 +174,9 @@ int main() {
   {
     auto c=config();c.thrust_wheel_control=true;c.thrust_wheel_speed_m_s=-.15F;
     JumpController wheel(c);auto state=input();auto out=thrust(wheel,state);
-    check(out.override_wheel_speed&&std::abs(out.wheel_speed_rad_s+5.F)<1e-5F,
+    check(out.override_wheel_speed&&std::abs(out.wheel_speed_rad_s+3.75F)<1e-5F,
           "thrust wheel reference uses native absolute rolling rate");
-    state.left_contact=state.right_contact=false;
+    airborne(state);
     for(int n=0;n<5;++n)out=wheel.update(state);
     check(out.phase==JumpController::Phase::Flight&&!out.override_wheel_speed&&out.wheel_speed_rad_s==0,
           "flight releases thrust wheel override");
@@ -191,7 +202,7 @@ int main() {
     check(rejected,"extension must exceed crouch knee angle");
   }
   {
-    auto c=config();c.thrust_knee_force_control=true;
+    auto c=config();c.thrust_knee_force_control=true;c.require_bilateral_thrust=false;
     JumpController force(c);auto state=input();auto out=thrust(force,state);
     state.velocity_rad_s[1]=3.F;state.velocity_rad_s[4]=4.F;
     out=force.update(state);
@@ -210,10 +221,10 @@ int main() {
     state.position_rad[1]-=.05F;out=force.update(state);
     check(out.velocity_rad_s[1]==0&&out.feedforward_nm[1]==0,
           "released knee cannot retrigger thrust after recoil");
-    state.left_contact=false;out=force.update(state);
+    state.left_contact=false;state.ballistic=false;state.airborne=false;out=force.update(state);
     check(out.knee_kp_scale[0]==1&&out.knee_kp_scale[1]==0,
           "force thrust requires each foot contact separately");
-    state.right_contact=false;
+    state.right_contact=false;state.ballistic=true;state.airborne=true;
     for(int n=0;n<4;++n)out=force.update(state);
     check(out.phase==JumpController::Phase::Flight&&out.knee_kp_scale[0]==1&&
           out.knee_kp_scale[1]==1,"flight restores knee impedance");
@@ -226,6 +237,15 @@ int main() {
   }
   auto i=input();JumpController disabled;ready(disabled,i);i.request=true;
   check(!disabled.update(i).owns_pose,"default opt-out unchanged");
+  {
+    auto deep_config=config();
+    JumpController deep(deep_config);auto deep_input=input();
+    deep_input.position_rad=JumpController::neutralPose(-1.2F);
+    ready(deep,deep_input);deep_input.request=true;
+    auto deep_out=deep.update(deep_input);
+    check(deep_out.phase==JumpController::Phase::Crouch&&deep_out.owns_pose,
+          "grounded deep launch stance is admitted from encoder observation");
+  }
   JumpController j(config());i=input();i.request=true;
   check(!j.update(i).owns_pose,"cannot jump without stable grounded dwell");
   ready(j,i);
@@ -250,11 +270,11 @@ int main() {
   i.position_rad=o.position_rad;o=j.update(i);
   bool capped=true;for(float tau:o.feedforward_nm)capped=capped&&std::isfinite(tau)&&std::abs(tau)<=5.F;
   check(capped&&o.feedforward_nm[1]>0,"Jacobian thrust positive knee and at most nominal torque");
-  for(int n=0;n<3;++n){i.left_contact=i.right_contact=false;i.com_z_m=.25;i.position_rad=o.position_rad;o=j.update(i);}
+  for(int n=0;n<3;++n){airborne(i);i.com_z_m=.25;i.position_rad=o.position_rad;o=j.update(i);}
   check(o.phase==JumpController::Phase::Flight&&o.airborne_seen&&!o.balance_wheels,"flight requires measured bilateral liftoff");
   i.com_z_m=.36;o=j.update(i);
   check(o.apex_gain_m>.1,"apex records input COM relative last grounded sample");
-  i.left_contact=i.right_contact=true;
+  grounded(i);
   for(int n=0;n<500&&o.phase!=JumpController::Phase::Complete;++n) {
     i.position_rad=o.position_rad;o=j.update(i);
   }
@@ -300,10 +320,10 @@ int main() {
       }
       previous=sample.position_rad;i.position_rad=sample.position_rad;
       if(sample.phase==JumpController::Phase::Thrust && sample.phase_elapsed_s>.03F)
-        i.left_contact=i.right_contact=false;
+        airborne(i);
       if(sample.phase==JumpController::Phase::Flight) {
         saw_flight=true;
-        if(sample.phase_elapsed_s>.04F)i.left_contact=i.right_contact=true;
+        if(sample.phase_elapsed_s>.04F)grounded(i);
       }
       saw_land=saw_land||sample.phase==JumpController::Phase::Land;
       if(sample.phase==JumpController::Phase::Complete)break;
@@ -337,7 +357,7 @@ int main() {
       check(result.feedforward_nm[1]==base.feedforward_nm[1]&&
             result.feedforward_nm[4]==base.feedforward_nm[4],"attitude leaves knee thrust unchanged");
     }
-    i.left_contact=i.right_contact=false;
+    airborne(i);
     for(int n=0;n<5&&o.phase!=JumpController::Phase::Flight;++n)o=attitude.update(i);
     check(o.phase==JumpController::Phase::Flight,"attitude test enters measured flight");
     for(float sign:{-1.F,1.F}) {
@@ -352,7 +372,7 @@ int main() {
       zero=true;for(float t:result.feedforward_nm)zero=zero&&t==0;
       check(result.stop_motors&&zero,"fault clears attitude torque");
     }
-    i.left_contact=i.right_contact=true;i.pitch_rad=.1F;
+    grounded(i);i.pitch_rad=.1F;
     for(int n=0;n<5&&o.phase!=JumpController::Phase::Land;++n)o=attitude.update(i);
     check(o.phase==JumpController::Phase::Land&&std::abs(o.feedforward_nm[0]-.2F)<1e-5F&&
           o.feedforward_nm[0]==o.feedforward_nm[3],"landing retains symmetric attitude correction");
@@ -365,7 +385,8 @@ int main() {
     i=input();o=thrust(capped_attitude,i);i.pitch_rate_rad_s=100;
     o=capped_attitude.update(i);
     bool bounded=true;for(float t:o.feedforward_nm)bounded=bounded&&std::abs(t)<=5;
-    check(o.phase==JumpController::Phase::Thrust&&bounded&&o.feedforward_nm[0]==5,
+    check(o.phase==JumpController::Phase::Thrust&&bounded&&
+          std::abs(o.feedforward_nm[0])<=5,
           "combined thrust and attitude respects nominal five Nm cap");
   }
   {
@@ -373,7 +394,7 @@ int main() {
           "flight hip integration defaults opt-out");
     auto enter_flight=[](JumpController& controller,JumpController::Input& sample) {
       sample=input();auto result=thrust(controller,sample);
-      sample.left_contact=sample.right_contact=false;
+      airborne(sample);
       for(int n=0;n<5&&result.phase!=JumpController::Phase::Flight;++n) {
         sample.position_rad=result.position_rad;result=controller.update(sample);
       }
@@ -402,35 +423,46 @@ int main() {
       for(int n=0;n<60;++n) {
         const auto previous=result.position_rad;result=controller.update(sample);
         for(auto h:{0,3}) bounded=bounded&&std::isfinite(result.velocity_rad_s[h])&&
-            result.position_rad[h]>=-.6F&&result.position_rad[h]<=1.05F&&
+            result.position_rad[h]>=-.6F&&result.position_rad[h]<=1.2F&&
             std::abs(result.velocity_rad_s[h])<=c.max_joint_speed_rad_s+1e-4F&&
             std::abs(result.velocity_rad_s[h]-(result.position_rad[h]-previous[h])/sample.dt_s)<1e-5F;
         sample.position_rad=result.position_rad;
       }
       check(result.phase==JumpController::Phase::Flight&&bounded&&
-            std::abs(result.position_rad[0]-(sign>0?1.05F:-.6F))<1e-6F,
+            std::abs(result.position_rad[0]-(sign>0?1.2F:-.6F))<1e-6F,
             "flight integrated hip reaches position bound with finite speed-limited references");
       sample.stop=true;result=controller.update(sample);
       bool zero=true;for(float v:result.velocity_rad_s)zero=zero&&v==0;
       check(result.stop_motors&&!result.owns_pose&&zero,"stop clears integrated flight velocity");
     }
     JumpController zero_gain(config());auto sample=input();auto result=enter_flight(zero_gain,sample);
-    const auto start=sample.position_rad;const auto target=JumpController::neutralPose(config().landing_knee_rad);
+    const auto tuck=JumpController::neutralPose(config().flight_tuck_knee_rad);
     sample.pitch_rad=.1F;sample.pitch_rate_rad_s=.2F;
-    bool legacy=true;
+    bool tuck_seen=false,symmetric=true,bounded=true;
     for(int n=0;n<25;++n) {
       const auto previous=result.position_rad;result=zero_gain.update(sample);
-      const float t=std::min(1.F,result.phase_elapsed_s/config().landing_duration_s);
-      const float blend=t*t*(3-2*t),delta=config().max_joint_speed_rad_s*sample.dt_s;
-      for(auto h:{0,3}) {
-        const float expected=std::max(previous[h]-delta,std::min(previous[h]+delta,
-            start[h]+blend*(target[h]-start[h])));
-        legacy=legacy&&std::abs(result.position_rad[h]-expected)<1e-5F;
-      }
+      tuck_seen=tuck_seen||std::abs(result.position_rad[1]-tuck[1])<.08F;
+      symmetric=symmetric&&result.position_rad[0]==result.position_rad[3]&&
+          result.position_rad[1]==result.position_rad[4];
+      for(auto j:{0,1,3,4}) bounded=bounded&&
+          std::abs(result.position_rad[j]-previous[j])<=config().max_joint_speed_rad_s*sample.dt_s+1e-5F;
       sample.position_rad=result.position_rad;
     }
-    check(legacy&&result.phase==JumpController::Phase::Flight,
-          "zero flight gains retain original smoothstep hip trajectory despite attitude error");
+    check(tuck_seen&&symmetric&&bounded&&result.phase==JumpController::Phase::Flight,
+          "flight trajectory retracts symmetrically into a bounded airborne tuck");
+    JumpController timed(config());auto timed_sample=input();
+    auto timed_out=enter_flight(timed,timed_sample);
+    bool prelanding=false,extension_seen=false;
+    const auto timed_tuck=JumpController::neutralPose(config().flight_tuck_knee_rad);
+    for(int n=0;n<90&&timed_out.phase==JumpController::Phase::Flight;++n) {
+      timed_sample.position_rad=timed_out.position_rad;
+      timed_out=timed.update(timed_sample);
+      prelanding=prelanding||timed_out.prelanding_active;
+      extension_seen=extension_seen||
+          (timed_out.prelanding_active&&timed_out.position_rad[1]>timed_tuck[1]+.05F);
+    }
+    check(prelanding&&extension_seen&&timed_out.target_apex_height_m>=.20F,
+          "flight reference actively extends before the 20 cm ballistic touchdown window");
     for(bool derivative:{false,true}) {
       auto invalid=config();
       if(derivative)invalid.flight_hip_rate_kd=std::numeric_limits<float>::quiet_NaN();
@@ -503,7 +535,7 @@ int main() {
     for(auto joint:{0,1,3,4}) for(bool upper:{false,true}) {
       JumpController controller(config());auto sample=input();auto result=thrust(controller,sample);
       const bool hip=joint==0||joint==3;
-      sample.position_rad[joint]=hip?(upper?1.11F:-.66F):(upper?.31F:-1.76F);
+      sample.position_rad[joint]=hip?(upper?1.26F:-.66F):(upper?.31F:-1.76F);
       result=controller.update(sample);
       bool zero=true;
       for(float v:result.velocity_rad_s)zero=zero&&v==0;

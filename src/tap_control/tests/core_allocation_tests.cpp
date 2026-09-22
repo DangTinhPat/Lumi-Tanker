@@ -94,11 +94,9 @@ void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcep
 
 int main() {
   using namespace robot_control;
-  static_assert(MpcBalancer::kMaxHorizon == TAP_MPC_MAX_HORIZON,
-                "Core headers and consumers must share the horizon ABI");
-  std::printf("capacity=%d sizeof: EmbeddedController=%zu MpcBalancer=%zu "
+  std::printf("sizeof: EmbeddedController=%zu LqrBalancer=%zu "
               "JumpController=%zu StationKeeper=%zu RobotState=%zu MotorCommand=%zu\n",
-              MpcBalancer::kMaxHorizon, sizeof(EmbeddedController), sizeof(MpcBalancer),
+              sizeof(EmbeddedController), sizeof(LqrBalancer),
               sizeof(JumpController), sizeof(StationKeeper), sizeof(RobotState),
               sizeof(MotorCommand));
   counting = true;
@@ -117,42 +115,38 @@ int main() {
   command.target_joint_position_rad = state.joints.position_rad;
 
   // Placement construction excludes caller-owned object storage, not constructors.
-  alignas(MpcBalancer) unsigned char mpc_storage[sizeof(MpcBalancer)];
-  MpcBalancer* mpc = nullptr;
-  MpcBalancer::Config mpc_config;
-  mpc_config.nb_timesteps = MpcBalancer::kMaxHorizon;
-  noHeap("MPC construction at capacity", [&] {
-    mpc = ::new (mpc_storage) MpcBalancer(mpc_config);
+  alignas(LqrBalancer) unsigned char lqr_storage[sizeof(LqrBalancer)];
+  LqrBalancer* lqr = nullptr;
+  LqrBalancer::Config lqr_config;
+  noHeap("LQR construction", [&] {
+    lqr = ::new (lqr_storage) LqrBalancer(lqr_config);
   });
-  if (!mpc) return 1;
-  noHeap("MPC reset", [&] { for (int i=0; i<32; ++i) mpc->reset(); });
-  bool solved = false;
-  noHeap("MPC nonzero updates", [&] {
+  if (!lqr) return 1;
+  noHeap("LQR reset", [&] { for (int i=0; i<32; ++i) lqr->reset(); });
+  noHeap("LQR nonzero updates", [&] {
     for (int i=0; i<128; ++i) {
       state.imu.pitch_rad = (i%2 ? .03F : -.02F);
       command.target_forward_velocity_m_s = .05F;
-      checksum += mpc->update(state, command).ground_velocity_m_s;
-      solved = solved || mpc->debugState().solver_iterations > 0;
+      checksum += lqr->update(state, command).ground_velocity_m_s;
     }
   });
-  check(solved, "MPC exercised optimizer, not only equilibrium fast path");
   bool rebuilt = true;
-  noHeap("MPC CoM rebuild and update", [&] {
+  noHeap("LQR CoM rebuild and update", [&] {
     for (int i=0; i<16; ++i) {
-      const float before = mpc->activePendulumLengthM();
-      mpc->setComHeight(i%2 ? .24F : .16F);
-      rebuilt = rebuilt && std::abs(mpc->activePendulumLengthM()-before) > .003F;
-      checksum += mpc->update(state, command).ground_velocity_m_s;
+      const float before = lqr->activePendulumLengthM();
+      lqr->setComHeight(i%2 ? .24F : .16F);
+      rebuilt = rebuilt && std::abs(lqr->activePendulumLengthM()-before) > .003F;
+      checksum += lqr->update(state, command).ground_velocity_m_s;
     }
   });
-  check(rebuilt, "each scheduled CoM change changed active pendulum length");
-  noHeap("MPC airborne and invalid input", [&] {
+  check(rebuilt, "each scheduled CoM change updates active pendulum length");
+  noHeap("LQR airborne and invalid input", [&] {
     state.floor_contact = false;
-    checksum += mpc->update(state, command).ground_velocity_m_s;
+    checksum += lqr->update(state, command).ground_velocity_m_s;
     state.dt_s = std::numeric_limits<float>::quiet_NaN();
-    checksum += mpc->update(state, command).fallen;
+    checksum += lqr->update(state, command).fallen;
   });
-  mpc->~MpcBalancer();
+  lqr->~LqrBalancer();
 
   state = RobotState{};
   state.joints.position_rad = JumpController::neutralPose(0);
@@ -224,6 +218,8 @@ int main() {
         input.left_contact = input.right_contact = false;
       if (jump->phase() == JumpController::Phase::Flight && ++flight_ticks > 30)
         input.left_contact = input.right_contact = true;
+      input.airborne = !input.left_contact && !input.right_contact;
+      input.ballistic = input.airborne;
       const auto out = jump->update(input);
       phases |= 1U << static_cast<unsigned>(out.phase);
       input.position_rad = out.position_rad;
@@ -302,6 +298,8 @@ int main() {
           out.phase==JumpController::Phase::Flight || out.phase==JumpController::Phase::Land?.02F:0.F;
       const float t=out.plan_elapsed_s+.005F;
       in.left_contact=in.right_contact=!(t>=.2F&&t<.4F);
+      in.airborne=!in.left_contact&&!in.right_contact;
+      in.ballistic=in.airborne;
       out=planned.update(in);
       planned_safe=planned_safe&&!out.stop_motors;
       planned_thrust=planned_thrust||out.phase==JumpController::Phase::Thrust;

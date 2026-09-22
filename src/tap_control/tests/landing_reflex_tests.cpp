@@ -247,6 +247,25 @@ void imuUnloadingPrearmsBeforeContactDrops() {
         "LandingReflex: pre-armed reflex commands once contact drops");
 }
 
+void imuUnloadingDebounceRejectsSingleSample() {
+  LandingReflex::Config cfg;
+  cfg.unloading_accel_mps2 = 2.0F;
+  cfg.unloading_debounce_s = 0.02F;
+  cfg.airborne_knee_crouch_rad = 0.2F;
+  LandingReflex reflex(cfg);
+
+  (void)updateReflex(reflex, true, 0.0F, 0.0F, 0.0F, 0.2F,
+                     0.9F, -1.3F, 0.01F, 9.81F);
+  const auto one_sample = updateReflex(
+      reflex, true, 0.0F, 0.0F, 0.0F, 0.2F, 0.9F, -1.3F, 0.01F, 0.4F);
+  check(allZero(one_sample) && !reflex.active(),
+        "LandingReflex: one low-IMU sample cannot pre-arm landing");
+  const auto persistent = updateReflex(
+      reflex, true, 0.0F, 0.0F, 0.0F, 0.2F, 0.9F, -1.3F, 0.01F, 0.4F);
+  check(allZero(persistent) && reflex.active(),
+        "LandingReflex: persistent low-IMU unloading pre-arms landing");
+}
+
 void activeExtensionUsesHipAndKneeWithSlewLimit() {
   LandingReflex::Config cfg;
   cfg.active_extension_gravity_m_s2 = 9.81F;
@@ -348,6 +367,7 @@ int main() {
   rollTermIsDifferentialClampedAndGroundedInert();
   capturePointIsSymmetricInvertsJacobianAndGroundedInert();
   imuUnloadingPrearmsBeforeContactDrops();
+  imuUnloadingDebounceRejectsSingleSample();
   activeExtensionUsesHipAndKneeWithSlewLimit();
   activeExtensionDelayPreventsEarlyEdgeMotion();
   embeddedControllerNoOpAtDefaults();

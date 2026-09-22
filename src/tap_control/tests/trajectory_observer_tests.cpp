@@ -65,6 +65,29 @@ void rejectsEncoderDiscontinuity() {
         "encoder reset-sized discontinuity is rejected");
 }
 
+void rejectsReportedVelocityOutsidePhysicalEnvelope() {
+  TrajectoryObserver observer;
+  auto s = state();
+  observer.reset(s);
+  s.wheel.left_position_m += 0.01F;
+  s.wheel.right_position_m += 0.01F;
+  s.wheel.left_velocity_m_s = 1.0F;
+  s.wheel.right_velocity_m_s = 1.0F;
+  (void)observer.update(s);
+
+  // Position increments remain plausible, but the independently reported
+  // velocity exceeds max_wheel_speed_m_s. It must fail closed rather than
+  // reach landing capture with an impossible speed and confidence.
+  s.wheel.left_position_m += 0.01F;
+  s.wheel.right_position_m += 0.01F;
+  s.wheel.left_velocity_m_s = 2.5F;
+  s.wheel.right_velocity_m_s = 2.5F;
+  const auto out = observer.update(s);
+  check(!out.valid && out.confidence == 0.0F &&
+            out.forward_velocity_m_s == 0.0F,
+        "reported wheel velocity outside the physical envelope is rejected");
+}
+
 void observesDifferentialYaw() {
   TrajectoryObserver observer;
   auto s = state();
@@ -85,6 +108,7 @@ void observesDifferentialYaw() {
 int main() {
   observesForwardAndBackwardMotion();
   rejectsEncoderDiscontinuity();
+  rejectsReportedVelocityOutsidePhysicalEnvelope();
   observesDifferentialYaw();
   return failures == 0 ? 0 : 1;
 }

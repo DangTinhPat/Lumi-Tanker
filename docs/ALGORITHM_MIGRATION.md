@@ -22,8 +22,8 @@ Recovery is implemented but FAILED the tested 90-degree lying case (details
 below). Other fall directions, full pose range and broad disturbance robustness
 remain untested. Final safety-fix strict trial `log/smoke_1789149917` passed.
 
-TAP targets: `src/tap_control/{core,apps,ros2_nodes,config}` for portable algorithms,
-demos, ROS adapter and parameters; `src/tap_sim/{launch,worlds,scripts}` for
+TAP targets: `src/tap_control/{core,apps,ros2_adapter,config}` for portable algorithms,
+demos, ROS adapter and parameters; `src/legacy/ros2_gazebo_sim/{launch,worlds,scripts}` for
 simulation orchestration; existing `src/tap_robot_description` for CAD geometry.
 GUI tooling lives in `src/tap_teleop`; curve generation is
 `tools/generate_pose_curves.py`, with generated data in
@@ -42,10 +42,10 @@ inside the GUI. Reference source prefix below: `balance_firmware_core/`.
 | EmbeddedController stand-up stages | Tuck, Rise with balance, then Settle; fall-direction-aware poses and timeout | Implemented in `src/tap_control/core/src/EmbeddedController.cpp`; native neutral standing pose and configured tuck in `src/tap_control/config/balance_controller.yaml` | FAILED tested lying-90-degree recovery; experimental only, other directions untested, not hardware-ready |
 | `tools/gen_squat_curve.py`; GUI `skill_pose()` | Generate native CoM-aware stance-height poses | Implemented in `tools/generate_pose_curves.py`, `src/tap_teleop/tap_teleop/pose_curves.py` and `src/tap_teleop/config/pose_curves.json` | Python suite and strict 25% squat/stand passed; peak pose pitch error 0.0574 rad; full range unverified |
 | `tools/gen_roll_curve.py`; GUI `skill_pose()` | Generate asymmetric body-tilt poses | Same implemented trajectory tooling and generated config; tests in `tests/test_pose_curves.py` | Python suite and strict 20% roll guards passed; up to 0.066 m base travel and about 0.14 rad unintended yaw change remain |
-| `ros2_nodes/BalanceControllerNode.cpp` | Sensor assembly, orientation/filtering, watchdog, pose slew, command/reset triggers, command/status publishing | `src/tap_control/ros2_nodes/BalanceControllerNode.cpp`; dedicated `sim_pose_topic` default `/tap_robot/pose` | 29 revised synthetic ROS contracts passed on final safety-fix build, fingerprint below; simulated-clock resets and combined attitude pending |
+| `ros2_adapter/BalanceControllerNode.cpp` | Sensor assembly, orientation/filtering, watchdog, pose slew, command/reset triggers, command/status publishing | `src/tap_control/ros2_adapter/BalanceControllerNode.cpp`; dedicated `sim_pose_topic` default `/tap_robot/pose` | 29 revised synthetic ROS contracts passed on final safety-fix build, fingerprint below; simulated-clock resets and combined attitude pending |
 | `apps/balance_demo.cpp`, `apps/mpc_demo.cpp` | Standalone core exercise/demo programs | Implemented in `src/tap_control/apps/balance_demo.cpp` and `src/tap_control/apps/mpc_demo.cpp` | Both demos passed per main; not physical balance evidence |
-| `gui/scripts/gui` | Drive/yaw, enable/stop/reset/stand-up, manual joints, height/roll presets and sequences, mode/IMU diagnostics, Gazebo actions | `src/gui/gui/dashboard.py`, entrypoint `src/gui/scripts/gui` (package name `gui` matches the reference GUI's own `ros2 run gui gui` by request; see `src/gui/README.md`'s collision warning against `/home/dvt/wheel_leg`'s own installed `gui` package); curve generation split out to `src/tap_teleop/tap_teleop/`. Also adds, beyond the original port: an owned Launch/Stop sim button (`gui/sim_process.py`) and a labeled, simulation-only "Reset standup" teleport-based test convenience (`gui/gz_world.py`) not present in the reference GUI's form | Dashboard callback tests passed in gui package CTest; live paused-to-Enable workflow and rendering checked; recovery behind experimental GUI action; complete GUI workflow validation not claimed; Reset standup evidence in `docs/GUI_RESET_STANDUP_QA.md` |
-| Launch/config/scripts and `tools/headless_smoke.py` | World, bridge/controller startup and smoke observation | Implemented in `src/tap_sim/launch/sim.launch.py`, `src/tap_sim/worlds/empty.sdf`, `src/tap_sim/scripts/activate_controllers`, `src/tap_sim/config/ros2_control.yaml`, `tools/sim_smoke.py` | Final safety-fix strict N20 run passed on domain 97; separate lying recovery failed on the same binary |
+| `gui/scripts/gui` | Native drive/yaw, enable/stop/reset/stand-up and diagnostics | `src/gui/gui/native_dashboard.py`, entrypoint `src/gui/scripts/gui`; curve generation remains in `src/tap_teleop/tap_teleop/` | Native GUI/IPC tests cover the current dashboard boundary; this does not prove balance or landing |
+| Legacy launch/config/scripts | ROS 2/Gazebo world, bridge/controller startup and smoke observation | Retained under `src/legacy/ros2_gazebo_sim/`; not part of the native runtime | Historical ROS/Gazebo evidence only |
 
 ## Robot-Specific Hazards
 
@@ -56,11 +56,12 @@ inside the GUI. Reference source prefix below: `balance_firmware_core/`.
    layers or rotate the CAD to disguise a control sign error. Zero CAD pose is
    not the old robot's straight-leg equilibrium.
 2. **Geometry and inertia:** old WholeBodyModel defaults include mass 5.338220 kg
-   and old height clamps/fits. TAP is provisionally 3.938 kg, radius .030 m and
-   half-track .1545 m, not outer half-width .167 m. Body mesh/inertial pitch is
-   -pi/2 without changing joints. See model `PHYSICS.md` for uniform-solid COM,
-   motor lumping and uncalibrated mechanical limits. Old gains and fits are not
-   reusable calibration data.
+   and old height clamps/fits. The current BOM-backed TAP model is 4.621 kg,
+   radius .040 m and half-track .1545 m, not outer half-width .167 m. Body
+   mesh/inertial pitch is -pi/2 without changing joints. See model `PHYSICS.md`
+   for BOM link allocation, uniform-solid COM, motor lumping and uncalibrated
+   mechanical limits. Results recorded against the superseded mass allocation
+   are legacy evidence and are not reusable calibration data.
 3. **MPC limits:** its plant is a linear inverted pendulum driven by ground
    acceleration, not a torque/contact/inertia-constrained multibody optimizer.
    The inherited implementation integrated acceleration with `dt/2`; the core
@@ -92,7 +93,7 @@ inside the GUI. Reference source prefix below: `balance_firmware_core/`.
    world reset/time jumps, trigger clearing and fresh-enable requirements.
    Preserve separate preview and free-body simulation modes; the preview's
    display mount must not constrain the free-body simulation. Inspect
-   `src/tap_sim/CONTRACT.md` and `tests/test_sim_description.py` for the current
+   `src/legacy/ros2_gazebo_sim/CONTRACT.md` and `tests/test_sim_description.py` for the legacy
    simulation-description contract; existence of this setup is not a physics pass.
 
 ## Acceptance Evidence

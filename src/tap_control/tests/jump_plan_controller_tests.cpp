@@ -86,6 +86,8 @@ static void step(JumpController& controller, JumpController::Input& in,
                  JumpController::Output& out,bool left=false,bool right=false) {
   in.position_rad=out.position_rad;in.velocity_rad_s=out.velocity_rad_s;
   in.left_contact=left;in.right_contact=right;
+  in.airborne=!left&&!right;
+  in.ballistic=in.airborne;
   out=controller.update(in);
 }
 
@@ -251,6 +253,8 @@ int main() {
     in.velocity_rad_s=out.velocity_rad_s;
     const float t=out.plan_elapsed_s+.005F;
     in.left_contact=in.right_contact=!(t>=.2F&&t<.6F);
+    in.airborne=!in.left_contact&&!in.right_contact;
+    in.ballistic=in.airborne;
     out=controller.update(in);
     assert(!out.stop_motors);
     if(out.phase==JumpController::Phase::Flight)flight=true;
@@ -266,7 +270,7 @@ int main() {
   assert(flight&&land&&complete);
   controller.reset();
   assert(controller.phase()==JumpController::Phase::Idle);
-  in.body_x_m=std::numeric_limits<double>::quiet_NaN();
+  in.pitch_rad=std::numeric_limits<float>::quiet_NaN();
   assert(controller.safetyFault(in)!=nullptr);
   bool rejected=false;
   c.max_joint_speed_rad_s=12.5663706F;

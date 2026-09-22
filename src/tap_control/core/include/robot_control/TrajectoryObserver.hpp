@@ -12,7 +12,7 @@ namespace robot_control {
 class TrajectoryObserver {
  public:
   struct Config {
-    float wheel_radius_m = 0.030F;
+    float wheel_radius_m = 0.040F;
     float half_track_m = 0.1545F;
     float max_dt_s = 0.05F;
     float max_wheel_speed_m_s = 2.0F;

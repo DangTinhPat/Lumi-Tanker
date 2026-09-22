@@ -12,6 +12,7 @@ void StateMachine::reset() {
   mode_ = ControlMode::Disabled;
   cycles_in_mode_ = 0;
   stand_up_requested_ = false;
+  enable_requested_ = false;
 }
 
 ControlMode StateMachine::update(const RobotState& state,
@@ -21,6 +22,8 @@ ControlMode StateMachine::update(const RobotState& state,
                                  bool airborne) {
   const bool stand_trigger = command.request_stand_up && !stand_up_requested_;
   stand_up_requested_ = command.request_stand_up;
+  const bool enable_trigger = command.request_enable && !enable_requested_;
+  enable_requested_ = command.request_enable;
   if (state.emergency_stop || command.request_disable) {
     enter(ControlMode::EmergencyStop);
     return mode_;
@@ -46,9 +49,11 @@ ControlMode StateMachine::update(const RobotState& state,
     return mode_;
   }
 
+  // STAND_UP is a recovery transaction, not a normal posture command. A
+  // balanced robot must use HEIGHT/POSE; allowing recovery from Balance/Drive
+  // folds the legs under a live body and creates an avoidable pitch impulse.
   if (stand_trigger &&
-      (mode_ == ControlMode::Disabled || mode_ == ControlMode::Fallen ||
-       mode_ == ControlMode::Balance || mode_ == ControlMode::Drive)) {
+      (mode_ == ControlMode::Disabled || mode_ == ControlMode::Fallen)) {
     enter(ControlMode::StandingUp);
     return mode_;
   }
@@ -98,7 +103,15 @@ ControlMode StateMachine::update(const RobotState& state,
 
     case ControlMode::Fallen:
     case ControlMode::EmergencyStop:
-      if (command.request_enable && !state.emergency_stop) {
+      // A normal enable request must not re-arm a robot that is still
+      // visibly tipped.  Recovery has an explicit STAND_UP path with its own
+      // guarded sequence; allowing Fallen -> Enabling here caused a
+      // Fallen/Enabling oscillation in the landing trace and could reapply
+      // balance torques while the body was already past the fall limit.
+      // Fallen is a latched safety state.  A held ENABLE level must not
+      // re-arm the wheels after a transient pitch recovery; require a new
+      // rising edge (or the explicit STAND_UP path above).
+      if (enable_trigger && !state.emergency_stop && !tipped) {
         enter(ControlMode::Enabling);
       }
       break;

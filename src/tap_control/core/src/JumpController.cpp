@@ -23,6 +23,23 @@ JointArray hermite(const JointArray& a,const JointArray& velocity,const JointArr
 }
 JumpController::JumpController():JumpController(Config{}) {}
 JumpController::JumpController(Config config):config_(config) {
+  if (!std::isfinite(config.target_apex_height_m) ||
+      config.target_apex_height_m < 0.20F || config.target_apex_height_m > 0.60F ||
+      !std::isfinite(config.gravity_m_s2) || config.gravity_m_s2 < 1.0F ||
+      config.gravity_m_s2 > 20.0F ||
+      !std::isfinite(config.flight_tuck_knee_rad) ||
+      !std::isfinite(config.flight_tuck_duration_s) ||
+      config.flight_tuck_duration_s < 0.03F || config.flight_tuck_duration_s > 0.25F ||
+      !std::isfinite(config.prelanding_lead_s) || config.prelanding_lead_s < 0.05F ||
+      config.prelanding_lead_s > 0.30F)
+    throw std::invalid_argument("Invalid ballistic jump target or flight timing");
+  if (config.flight_tuck_knee_rad < -1.6F || config.flight_tuck_knee_rad > .2F ||
+      config.flight_tuck_knee_rad > config.crouch_knee_rad)
+    throw std::invalid_argument("Flight tuck must be at least as folded as crouch");
+  nominal_flight_s_ = static_cast<float>(
+      2.0 * std::sqrt(2.0 * config.target_apex_height_m / config.gravity_m_s2));
+  if (!(nominal_flight_s_ > config.prelanding_lead_s + config.flight_tuck_duration_s))
+    throw std::invalid_argument("Ballistic flight is shorter than tuck/prelanding timing");
   if(config.plan) {
     if(!std::isfinite(config.plan_preparation_wait_s) ||
        config.plan_preparation_wait_s<2.F || config.plan_preparation_wait_s>10.F)
@@ -71,14 +88,21 @@ JumpController::JumpController(Config config):config_(config) {
        config.max_flight_s,config.landing_duration_s,config.settle_duration_s,
        config.max_settle_s,config.grounded_duration_s,config.contact_debounce_s,
        config.tracking_tolerance_rad,config.max_pitch_rad,config.max_leg_torque_nm,
+       config.crouch_max_pitch_rad,config.crouch_max_pitch_rate_rad_s,
+       config.crouch_joint_speed_rad_s,config.crouch_min_speed_scale,
        config.max_wheel_torque_nm,config.max_joint_speed_rad_s,config.thrust_force_n}) {
     if (!std::isfinite(v)||v<=0) throw std::invalid_argument("Invalid jump duration/gain/limit");
   }
   if (config.max_leg_torque_nm>5 || config.max_wheel_torque_nm>.13F ||
       config.max_joint_speed_rad_s>28.2744F ||
+      config.crouch_joint_speed_rad_s>config.max_joint_speed_rad_s ||
+      config.crouch_min_speed_scale>1.F ||
+      config.crouch_max_pitch_rad>=config.max_pitch_rad ||
       config.max_pitch_rad>.8F || config.max_thrust_s<config.thrust_duration_s ||
       config.max_settle_s<config.settle_duration_s)
     throw std::invalid_argument("Jump exceeds nominal bounds or invalid timeout");
+  if (nominal_flight_s_ > config.max_flight_s)
+    throw std::invalid_argument("Target apex requires flight beyond max_flight_s");
   for (float k : {config.crouch_knee_rad,config.extension_knee_rad,config.landing_knee_rad})
     if (!std::isfinite(k)||k< -1.6F||k>.2F) throw std::invalid_argument("Jump knee outside provisional geometry");
   if (!(config.crouch_knee_rad<config.landing_knee_rad && config.landing_knee_rad<=0 &&
@@ -93,7 +117,10 @@ JointArray JumpController::neutralPose(float knee) {
 JointArray JumpController::landingPose(float knee,float pitch) {
   WholeBodyModel model;
   const float c=std::cos(pitch),s=std::sin(pitch);
-  float lo=-.6F,hi=1.05F;
+  // The RB CAD-derived COM shifts the deep neutral hip above the old 1.05
+  // rad preview bracket; keep the root bracket wide enough to solve the
+  // actual native model instead of silently returning a biased endpoint.
+  float lo=-.6F,hi=1.2F;
   for (int i=0;i<30;++i) {
     float m=(lo+hi)/2;
     const auto body=model.compute(m,knee,m,knee);
@@ -105,13 +132,18 @@ void JumpController::enter(Phase phase,const char* reason) {phase_=phase;reason_
 void JumpController::reset() {
   phase_=Phase::Idle;reason_="idle";elapsed_=grounded_=lost_contact_=landed_=settled_=0;
   last_request_=airborne_=false;last_ground_com_=takeoff_com_=apex_com_=0;crouch_contact_lost_=0;
+  rest_pose_=neutralPose(0.F);
   start_=target_=rest_pose_;
   last_command_=target_;
   thrust_finished_={};
   plan_time_s_=0.F;
-  plan_origin_x_=previous_body_x_=previous_body_z_=0;
-  plan_wheel_offset_=body_vx_=body_vz_=0;
+  plan_wheel_offset_=0;
   plan_contact_wait_s_=0;
+  flight_elapsed_s_=0.F;
+  nominal_flight_s_=static_cast<float>(
+      2.0 * std::sqrt(2.0 * config_.target_apex_height_m / config_.gravity_m_s2));
+  flight_start_pose_=rest_pose_;
+  rest_pose_latched_=false;
   last_velocity_=start_velocity_={};
 }
 void JumpController::abort(const char* reason) { enter(Phase::Fault,reason); }
@@ -133,11 +165,10 @@ const char* JumpController::safetyFault(const Input& in, bool check_dt) const {
       std::isfinite(in.ground_speed_m_s);
   for(float q:in.position_rad) finite=finite&&std::isfinite(q);
   for(float q:in.velocity_rad_s) finite=finite&&std::isfinite(q);
-  if(config_.plan) finite=finite&&std::isfinite(in.body_x_m)&&std::isfinite(in.body_z_m);
   if (!finite||!in.sensors_fresh||!in.contacts_fresh||in.stop||!in.eligible) return "safety_or_stale";
   if (in.operator_driving) return "operator_drive";
   if (std::abs(in.pitch_rad)>config_.max_pitch_rad) return "pitch_limit";
-  for (auto h:{0,3}) if (in.position_rad[h]<-.65F || in.position_rad[h]>1.10F ||
+  for (auto h:{0,3}) if (in.position_rad[h]<-.65F || in.position_rad[h]>1.25F ||
       in.position_rad[h+1]<-1.75F || in.position_rad[h+1]>.30F) return "measured_joint_travel";
   return nullptr;
 }
@@ -146,13 +177,24 @@ JumpController::Output JumpController::update(const Input& in) {
   const char* fault=safetyFault(in);
   const bool grounded=in.left_contact&&in.right_contact;
   const bool safe=fault==nullptr;
+  if (safe && grounded && std::abs(in.pitch_rad)<.15F &&
+      std::abs(in.pitch_rate_rad_s)<.3F && !in.operator_driving) grounded_+=in.dt_s;
+  else grounded_=0;
+  if (!rest_pose_latched_ && safe && grounded && !in.operator_driving &&
+      std::abs(in.pitch_rad)<.15F && std::abs(in.pitch_rate_rad_s)<.3F &&
+      grounded_>=config_.grounded_duration_s) {
+    // Do not latch during paused-startup/zeroed encoder samples.  The
+    // supported launch stance is an encoder observation, and may be the
+    // platform's settled sagged stance; wait for a complete stable dwell
+    // before accepting it as the reference for this jump.
+    rest_pose_=in.position_rad;
+    rest_pose_[2]=rest_pose_[5]=0.F;
+    rest_pose_latched_=true;
+  }
   bool neutral=true;
   const auto& rest=rest_pose_;
   for(auto i:{0,1,3,4}) neutral=neutral&&std::abs(in.position_rad[i]-rest[i])<.08F&&
       std::abs(in.velocity_rad_s[i])<.3F;
-  if (safe && grounded && std::abs(in.pitch_rad)<.15F &&
-      std::abs(in.pitch_rate_rad_s)<.3F && !in.operator_driving) grounded_+=in.dt_s;
-  else grounded_=0;
   if(active() && fault) abort(fault);
   if(!config_.enabled) {reason_="disabled";}
   else if(trigger&&(phase_==Phase::Idle||phase_==Phase::Complete)) {
@@ -163,20 +205,13 @@ JumpController::Output JumpController::update(const Input& in) {
       last_velocity_=start_velocity_={};
       thrust_finished_={};
       plan_time_s_=0.F;
-      previous_body_x_=in.body_x_m;previous_body_z_=in.body_z_m;
-      body_vx_=body_vz_=0;
       plan_contact_wait_s_=0;
+      flight_elapsed_s_=0.F;
       lost_contact_=landed_=settled_=crouch_contact_lost_=0;airborne_=false;takeoff_com_=apex_com_=0;
       enter(Phase::Crouch,"preparing");
     }
   }
   if(active()) {
-    if(config_.plan) {
-      const float gain=in.dt_s/(.015F+in.dt_s);
-      body_vx_+=gain*(float((in.body_x_m-previous_body_x_)/in.dt_s)-body_vx_);
-      body_vz_+=gain*(float((in.body_z_m-previous_body_z_)/in.dt_s)-body_vz_);
-      previous_body_x_=in.body_x_m;previous_body_z_=in.body_z_m;
-    }
     if(config_.plan && phase_!=Phase::Crouch) {
       if(phase_==Phase::Flight) {
         const float touchdown=config_.plan->thrust_duration_s+config_.plan->flight_duration_s;
@@ -185,11 +220,16 @@ JumpController::Output JumpController::update(const Input& in) {
       } else plan_time_s_+=in.dt_s;
     }
     elapsed_+=in.dt_s;
+    if (phase_==Phase::Flight) flight_elapsed_s_+=in.dt_s;
     if(grounded) last_ground_com_=in.com_z_m;
     lost_contact_=!in.left_contact&&!in.right_contact?lost_contact_+in.dt_s:0;
     if(phase_==Phase::Crouch) {
       crouch_contact_lost_=grounded?0:crouch_contact_lost_+in.dt_s;
       if(crouch_contact_lost_>=config_.contact_debounce_s) abort("contact_lost_before_thrust");
+      else if(std::abs(in.pitch_rad)>config_.crouch_max_pitch_rad)
+        abort("crouch_pitch_limit");
+      else if(std::abs(in.pitch_rate_rad_s)>config_.crouch_max_pitch_rate_rad_s)
+        abort("crouch_pitch_rate_limit");
       else if(grounded && elapsed_>=config_.crouch_duration_s) {
         float error=0;
         for(auto i:{0,1,3,4}) error=std::max(error,std::abs(in.position_rad[i]-target_[i]));
@@ -203,7 +243,6 @@ JumpController::Output JumpController::update(const Input& in) {
         }
         if(plan_ready&&error<config_.tracking_tolerance_rad && std::abs(in.pitch_rate_rad_s)<.3F) {
           if(config_.plan) {
-            plan_origin_x_=in.body_x_m-config_.plan->samples[0].base_x_m;
             plan_wheel_offset_=.5F*(in.position_rad[2]+in.position_rad[5])-
                 config_.plan->samples[0].wheel_position_rad;
           }
@@ -212,10 +251,17 @@ JumpController::Output JumpController::update(const Input& in) {
             (config_.plan?config_.plan_preparation_wait_s:2.F)) abort("crouch_tracking_timeout");
       }
     } else if(phase_==Phase::Thrust) {
-      if(lost_contact_>=config_.contact_debounce_s) {
+      // A short unloading gap is not takeoff.  Require FlightObserver's
+      // confirmed ballistic phase so a tipping wheel/body transient cannot
+      // enter tuck and report a false jump.
+      const bool bilateral_support=in.left_contact&&in.right_contact;
+      if(config_.require_bilateral_thrust&&!in.ballistic&&!bilateral_support) {
+        abort("bilateral_support_lost_before_takeoff");
+      } else if(lost_contact_>=config_.contact_debounce_s && in.ballistic) {
         airborne_=true;takeoff_com_=last_ground_com_;apex_com_=in.com_z_m;
         start_=config_.smooth_phase_transitions?last_command_:in.position_rad;
         start_velocity_=last_velocity_;
+        flight_start_pose_=start_;
         target_=neutralPose(config_.landing_knee_rad);enter(Phase::Flight,"measured_takeoff");
       } else if(elapsed_>config_.max_thrust_s) abort("no_takeoff");
     } else if(phase_==Phase::Flight) {
@@ -257,7 +303,22 @@ JumpController::Output JumpController::update(const Input& in) {
   Output out;out.phase=phase_;out.reason=reason_;out.owns_pose=active();out.stop_motors=phase_==Phase::Fault;
   out.ready=config_.enabled&&safe&&neutral&&grounded_>=config_.grounded_duration_s&&
       (phase_==Phase::Idle||phase_==Phase::Complete);
-  out.balance_wheels=phase_!=Phase::Flight;out.airborne_seen=airborne_;out.phase_elapsed_s=elapsed_;
+  out.grounded_dwell_s=grounded_;
+  out.stance_neutral=neutral;
+  out.input_safe=safe;
+  out.stance_position_error_rad=0.F;
+  out.stance_velocity_error_rad_s=0.F;
+  for (auto i : {0, 1, 3, 4}) {
+    out.stance_position_error_rad=std::max(
+        out.stance_position_error_rad, std::abs(in.position_rad[i]-rest[i]));
+    out.stance_velocity_error_rad_s=std::max(
+        out.stance_velocity_error_rad_s, std::abs(in.velocity_rad_s[i]));
+  }
+  // Wheel MPC is useful while grounded, but during the leg impulse it adds a
+  // second actuator path and can exchange pitch momentum with the body.  A
+  // jump thrust owns the wheels at zero until the observer confirms flight.
+  out.balance_wheels=phase_!=Phase::Flight && phase_!=Phase::Thrust;
+  out.airborne_seen=airborne_;out.phase_elapsed_s=elapsed_;
   if(phase_==Phase::Thrust&&config_.thrust_wheel_control) {
     out.override_wheel_speed=true;
     out.wheel_speed_rad_s=config_.thrust_wheel_speed_m_s/geometry::wheel_radius_m;
@@ -281,11 +342,11 @@ JumpController::Output JumpController::update(const Input& in) {
     out.velocity_rad_s={ref.hip_velocity_rad_s,ref.knee_velocity_rad_s,0,
                        ref.hip_velocity_rad_s,ref.knee_velocity_rad_s,0};
     const std::array<float,12> error{
-      float(in.body_x_m-plan_origin_x_)-ref.base_x_m,float(in.body_z_m)-ref.base_z_m,
+      0.F,0.F,
       in.pitch_rad-ref.pitch_rad,.5F*(in.position_rad[0]+in.position_rad[3])-ref.hip_rad,
       .5F*(in.position_rad[1]+in.position_rad[4])-ref.knee_rad,
       .5F*(in.position_rad[2]+in.position_rad[5])-plan_wheel_offset_-ref.wheel_position_rad,
-      body_vx_-ref.base_vx_m_s,body_vz_-ref.base_vz_m_s,in.pitch_rate_rad_s-ref.pitch_rate_rad_s,
+      0.F,0.F,in.pitch_rate_rad_s-ref.pitch_rate_rad_s,
       .5F*(in.velocity_rad_s[0]+in.velocity_rad_s[3])-ref.hip_velocity_rad_s,
       .5F*(in.velocity_rad_s[1]+in.velocity_rad_s[4])-ref.knee_velocity_rad_s,
       .5F*(in.velocity_rad_s[2]+in.velocity_rad_s[5])-ref.wheel_velocity_rad_s};
@@ -308,7 +369,10 @@ JumpController::Output JumpController::update(const Input& in) {
       const float carrier=in.pitch_rate_rad_s+.5F*(in.velocity_rad_s[0]+
           in.velocity_rad_s[1]+in.velocity_rad_s[3]+in.velocity_rad_s[4]);
       // Match rolling contact speed before impact; the plant retains torque limits.
-      const float rolling=std::clamp(body_vx_/geometry::wheel_radius_m-carrier,
+      // No absolute body velocity is observable in the contract.  The
+      // sensor-only plan may still carry a relative wheel reference, but it
+      // must not close a hidden world-velocity loop.
+      const float rolling=std::clamp(-carrier,
                                     -41.887902F,41.887902F);
       out.wheel_speed_rad_s+=(rolling-out.wheel_speed_rad_s)*blend;
     }
@@ -327,9 +391,29 @@ JumpController::Output JumpController::update(const Input& in) {
     if(phase_==Phase::Crouch) duration=config_.crouch_duration_s;
     if(phase_==Phase::Thrust) duration=config_.thrust_duration_s;
     if(phase_==Phase::Settle) duration=config_.settle_duration_s;
-    out.position_rad=blend(start_,target_,smooth(elapsed_/duration));
-    if(config_.smooth_phase_transitions&&(phase_==Phase::Flight||phase_==Phase::Land))
-      out.position_rad=hermite(start_,start_velocity_,target_,elapsed_,duration);
+    if (phase_==Phase::Flight) {
+      // Biological-style airborne sequence: first retract the legs to create
+      // clearance, hold the tuck through the ballistic apex, then actively
+      // extend before the sensor-only touchdown window.  The clock is
+      // anchored at measured support loss; no world height or pose is used.
+      const auto tuck=neutralPose(config_.flight_tuck_knee_rad);
+      const float extension_start=std::max(
+          config_.flight_tuck_duration_s, nominal_flight_s_-config_.prelanding_lead_s);
+      if (elapsed_<=config_.flight_tuck_duration_s) {
+        out.position_rad=blend(flight_start_pose_,tuck,
+            smooth(elapsed_/config_.flight_tuck_duration_s));
+      } else if (elapsed_<extension_start) {
+        out.position_rad=tuck;
+      } else {
+        out.position_rad=blend(tuck,target_,
+            smooth((elapsed_-extension_start)/config_.prelanding_lead_s));
+        out.prelanding_active=true;
+      }
+    } else {
+      out.position_rad=blend(start_,target_,smooth(elapsed_/duration));
+      if(config_.smooth_phase_transitions&&phase_==Phase::Land)
+        out.position_rad=hermite(start_,start_velocity_,target_,elapsed_,duration);
+    }
     if(phase_==Phase::Land&&config_.landing_compression) {
       const auto compressed=neutralPose(config_.compression_knee_rad);
       if(elapsed_<config_.compression_duration_s)
@@ -339,8 +423,21 @@ JumpController::Output JumpController::update(const Input& in) {
       else out.position_rad=blend(compressed,target_,
           smooth((elapsed_-config_.compression_duration_s)/config_.landing_duration_s));
     }
+    float command_speed_limit=config_.max_joint_speed_rad_s;
+    if (phase_==Phase::Crouch) {
+      // Reduce the counter-movement when the IMU sees growing pitch motion.
+      // This is intentionally conservative: encoder joint rates are
+      // observable, but full inverse-dynamics cancellation is not reliable
+      // with the MPU6500 + six-encoder hardware contract alone.
+      const float rate_ratio=std::clamp(
+          std::abs(in.pitch_rate_rad_s)/config_.crouch_max_pitch_rate_rad_s,
+          0.F,1.F);
+      const float scale=1.F-rate_ratio*(1.F-config_.crouch_min_speed_scale);
+      command_speed_limit=std::min(config_.crouch_joint_speed_rad_s,
+                                   config_.max_joint_speed_rad_s*scale);
+    }
     if(phase_==Phase::Crouch||phase_==Phase::Thrust||phase_==Phase::Settle) {
-      const float delta=config_.max_joint_speed_rad_s*in.dt_s;
+      const float delta=command_speed_limit*in.dt_s;
       const float knee=std::clamp(out.position_rad[1],last_command_[1]-delta,last_command_[1]+delta);
       out.position_rad=neutralPose(knee);
     }
@@ -352,7 +449,7 @@ JumpController::Output JumpController::update(const Input& in) {
     }
     if (phase_==Phase::Thrust) for(auto h:{0,3})
       out.position_rad[h]=std::clamp(out.position_rad[h]+
-          config_.thrust_hip_offset_rad*smooth(elapsed_/config_.thrust_duration_s),-.6F,1.05F);
+          config_.thrust_hip_offset_rad*smooth(elapsed_/config_.thrust_duration_s),-.6F,1.2F);
     if (phase_==Phase::Flight &&
         (config_.flight_hip_rate_kp>0 || config_.flight_hip_rate_kd>0)) {
       // Integrating the hip reference avoids a fixed-pose spring cancelling
@@ -361,7 +458,7 @@ JumpController::Output JumpController::update(const Input& in) {
           config_.flight_hip_rate_kd*in.pitch_rate_rad_s,
           -config_.max_joint_speed_rad_s,config_.max_joint_speed_rad_s);
       for (auto h:{0,3}) out.position_rad[h]=std::clamp(
-          last_command_[h]+rate*in.dt_s,-.6F,1.05F);
+          last_command_[h]+rate*in.dt_s,-.6F,1.2F);
     }
     if (config_.landing_world_frame && phase_==Phase::Flight) {
       // Rotate COM-to-axle geometry into the ground frame. A body-neutral pose
@@ -375,9 +472,9 @@ JumpController::Output JumpController::update(const Input& in) {
       }
     }
     for(auto i:{0,1,3,4}) {
-      const float delta=config_.max_joint_speed_rad_s*in.dt_s;
+      const float delta=command_speed_limit*in.dt_s;
       if(config_.smooth_phase_transitions)
-        out.position_rad[i]=std::clamp(out.position_rad[i],i==0||i==3?-.6F:-1.6F,i==0||i==3?1.05F:.2F);
+        out.position_rad[i]=std::clamp(out.position_rad[i],i==0||i==3?-.6F:-1.6F,i==0||i==3?1.2F:.2F);
       out.position_rad[i]=std::clamp(out.position_rad[i],last_command_[i]-delta,last_command_[i]+delta);
       out.velocity_rad_s[i]=(out.position_rad[i]-last_command_[i])/in.dt_s;
       if(config_.smooth_phase_transitions&&elapsed_==0.F&&
@@ -393,7 +490,10 @@ JumpController::Output JumpController::update(const Input& in) {
         out.feedforward_nm[h+1]=gain*config_.plan_prep_knee_torque_nm;
       }
     }
-    if(phase_==Phase::Thrust && (in.left_contact||in.right_contact)) {
+    const bool thrust_support = config_.require_bilateral_thrust
+        ? (in.left_contact&&in.right_contact)
+        : (in.left_contact||in.right_contact);
+    if(phase_==Phase::Thrust && thrust_support) {
       for(int side=0;side<2;++side) {
         if(!(side==0?in.left_contact:in.right_contact)) continue;
         const int h=side*3,k=h+1;
@@ -416,7 +516,7 @@ JumpController::Output JumpController::update(const Input& in) {
           thrust_finished_[side]=thrust_finished_[side]||
               in.position_rad[k]>=config_.extension_knee_rad;
           out.velocity_rad_s[k]=thrust_finished_[side]?0.F:config_.max_joint_speed_rad_s;
-          if (thrust_finished_[side]) {
+          if (thrust_finished_[side] && !config_.hold_thrust_after_extension) {
             // Release is one-way within this jump, including contact flicker.
             out.feedforward_nm[h]=out.feedforward_nm[k]=0.F;
           }
@@ -438,6 +538,8 @@ JumpController::Output JumpController::update(const Input& in) {
   out.takeoff_com_z_m=takeoff_com_;out.apex_com_z_m=apex_com_;
   out.plan_elapsed_s=plan_time_s_;
   out.apex_gain_m=airborne_?std::max(0.,apex_com_-takeoff_com_):0;
+  out.target_apex_height_m=config_.target_apex_height_m;
+  out.flight_time_s=flight_elapsed_s_;
   return out;
 }
 }
