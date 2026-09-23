@@ -7,8 +7,8 @@
 #include <cstdint>
 #include <stdexcept>
 
-#include "robot_control/MotorFrameCodec.hpp"
-#include "robot_control/MotorTransport.hpp"
+#include "robot_hal/MotorFrameCodec.hpp"
+#include "robot_hal/MotorTransport.hpp"
 
 // Fake drivers standing in for the real GDS68 (leg) and BL4820M12 (wheel)
 // hardware in the native sim. Native runner code must talk to these the same

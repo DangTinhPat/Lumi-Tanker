@@ -3,7 +3,7 @@
 #include "robot_control/EmbeddedController.hpp"
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/ImuStateEstimator.hpp"
-#include "robot_control/MotorFrameCodec.hpp"
+#include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_control/WholeBodyModel.hpp"
 #include "SimActuatorBus.hpp"
 

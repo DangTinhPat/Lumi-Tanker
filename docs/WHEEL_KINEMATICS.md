@@ -291,7 +291,7 @@ the provisional assignment of four motor masses to the body remain assumptions.
 
 Analyzed baseline used a superseded mass allocation; its numerical hop estimates
 are historical and are not current-model sizing evidence. Current native-model
-mass is documented in `src/tap_mujoco/model/PHYSICS.md`. Gravity 9.81 m/s^2,
+mass is documented in `src/tap_sim/model/PHYSICS.md`. Gravity 9.81 m/s^2,
 leg command limit
 3 Nm per joint, joint damping 1 Nms/rad, position gain 40 Nm/rad, and pose slew
 0.4 rad/s. The 12 Nm URDF effort field does not make the node command 12 Nm.

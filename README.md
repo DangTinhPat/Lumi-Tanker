@@ -5,9 +5,9 @@ MJCF và GUI native là các thành phần chính.
 
 Model chính:
 
-- MJCF: [`src/tap_mujoco/model/tap_robot.xml`](src/tap_mujoco/model/tap_robot.xml)
-- CAD manifest: [`src/tap_mujoco/model/rb_cad_manifest.json`](src/tap_mujoco/model/rb_cad_manifest.json)
-- Physics/inertia: [`src/tap_mujoco/model/PHYSICS.md`](src/tap_mujoco/model/PHYSICS.md)
+- MJCF: [`src/tap_sim/model/tap_robot.xml`](src/tap_sim/model/tap_robot.xml)
+- CAD manifest: [`src/tap_sim/model/rb_cad_manifest.json`](src/tap_sim/model/rb_cad_manifest.json)
+- Physics/inertia: [`src/tap_sim/model/PHYSICS.md`](src/tap_sim/model/PHYSICS.md)
 - STEP nguồn: [`LAP RAP ROBOT R1 ver 170926.stp`](LAP%20RAP%20ROBOT%20R1%20ver%20170926.stp)
 
 Model dùng 7 link, free root, 6 hinge joint theo thứ tự `[LH, LK, LW, RH,
@@ -20,15 +20,15 @@ Build và kiểm tra:
 cmake -S . -B build/native -DBUILD_TESTING=ON
 cmake --build build/native -j2
 ctest --test-dir build/native --output-on-failure
-python3 src/tap_mujoco/scripts/validate_model.py \
-  --model src/tap_mujoco/model/tap_robot.xml
+python3 src/tap_sim/scripts/validate_model.py \
+  --model src/tap_sim/model/tap_robot.xml
 ```
 
 Chạy native runner:
 
 ```bash
 build/native/bin/tap_mujoco_native \
-  --model src/tap_mujoco/model/tap_robot.xml --run-for 5
+  --model src/tap_sim/model/tap_robot.xml --run-for 5
 ```
 
 GUI native:

@@ -41,7 +41,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR
                  torque_residual_estimator_tests station_keeper_tests
                  deep_squat_tests jump_tests jump_quality_tests wheel_frame_tests
                  landing_reflex_tests landing_impedance_tests landing_controller_tests
-                 whole_body_stance_tests motor_frame_codec_tests)
+                 whole_body_stance_tests)
       add_executable(${test} ../tests/${test}.cpp)
       target_link_libraries(${test} PRIVATE tap_control_core)
       if(MSVC)

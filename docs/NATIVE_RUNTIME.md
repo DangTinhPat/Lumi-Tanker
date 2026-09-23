@@ -29,7 +29,7 @@ model.
 The sensor-only landing setup is exercised by the native contract test:
 
 ```bash
-build/native/bin/tap_mujoco_native --model src/tap_mujoco/model/tap_robot.xml \
+build/native/bin/tap_mujoco_native --model src/tap_sim/model/tap_robot.xml \
   --rate 3000 --landing-30cm --run-for 0.8
 ```
 

@@ -1,7 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
-#include "robot_control/MotorFrameCodec.hpp"
+#include "robot_hal/MotorFrameCodec.hpp"
 
 using namespace robot_control::motor_frame;
 

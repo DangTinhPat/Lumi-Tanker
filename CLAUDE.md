@@ -1,7 +1,7 @@
 # Native TAP workspace notes
 
 This repository is the native MuJoCo simulation for the RB R1 robot.
-The canonical model is `src/tap_mujoco/model/tap_robot.xml`, generated from
+The canonical model is `src/tap_sim/model/tap_robot.xml`, generated from
 the supplied STEP assembly and detailed STL assets. The controller core is
 portable C++17 in `src/tap_control/core`; the native runner owns the MuJoCo
 physics, sensor shaping and actuator loop. `src/gui` is an optional Tk/3-D
@@ -25,7 +25,7 @@ Run the native simulation or dashboard:
 
 ```bash
 build/native/bin/tap_mujoco_native \
-  --model src/tap_mujoco/model/tap_robot.xml --run-for 5
+  --model src/tap_sim/model/tap_robot.xml --run-for 5
 python3 tools/tap_native_gui.py --rate 3000
 ```
 
@@ -35,5 +35,5 @@ of visual geometry, joint origins and provisional mass/inertia estimates.
 Keep visual STL detail separate from primitive collision envelopes.
 
 Relevant native references are `README.md`, `docs/NATIVE_RUNTIME.md`,
-`src/tap_mujoco/model/PHYSICS.md` and the checked-in CAD manifest. Preserve
+`src/tap_sim/model/PHYSICS.md` and the checked-in CAD manifest. Preserve
 the protected project contracts in `docs/RULES.md` and `architecture.md`.

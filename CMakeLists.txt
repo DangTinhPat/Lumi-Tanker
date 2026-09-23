@@ -5,5 +5,6 @@ project(tap_native LANGUAGES CXX)
 # dependency; the robot model and simulator are native MuJoCo assets.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 include(CTest)
+add_subdirectory(src/tap_control/hal)
 add_subdirectory(src/tap_control/core)
-add_subdirectory(src/tap_mujoco)
+add_subdirectory(src/tap_sim)

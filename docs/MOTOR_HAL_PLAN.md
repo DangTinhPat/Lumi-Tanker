@@ -2,7 +2,7 @@
 
 Bản kế hoạch, chưa có dòng code nào được viết. Rút ra từ `docs/actuatal_driver/*`
 đối chiếu với code thực tế trong `src/tap_control/core` và
-`src/tap_mujoco/native_runner.cpp`. Mọi con số đều kèm file:line.
+`src/tap_sim/native/native_runner.cpp`. Mọi con số đều kèm file:line.
 
 Không cho phép vận hành phần cứng, nạp firmware, hay cấp lệnh động cơ thật.
 Rule 4 (`docs/RULES.md`) giữ nguyên: sim là môi trường kiểm chứng, ESP32-S3
@@ -307,7 +307,7 @@ chứng theo `architecture.md` §8.
 CAN 1 Mbps, bánh 400 RPM có tải, bảng mapping §1 — tất cả đã chốt.
 
 **Phase 1 — `MotorFrameCodec`, test trên host. XONG.**
-`src/tap_control/core/include/robot_control/MotorFrameCodec.hpp` (pure,
+`src/tap_control/hal/include/robot_hal/MotorFrameCodec.hpp` (pure,
 allocation-free) + `src/tap_control/tests/motor_frame_codec_tests.cpp`.
 37/37 checks pass, mọi vector đều bit-exact với ví dụ trong hai file doc
 driver (MIT worked example, quickstart 3-khung, 5 khung UART có checksum).
@@ -317,7 +317,7 @@ round-to-nearest (`12.5*65535/25=32767.5` → doc lấy `32767`) - code khớp
 
 **Phase 2 — `SimGds68` + `SimBl4820`. XONG**, gộp chung với Phase 3 do quy
 mô nhỏ hơn dự kiến (đủ đơn giản để triển khai và nối luôn trong một lượt).
-`src/tap_mujoco/SimActuatorBus.hpp`: `SimGds68Joint` (máy trạng thái
+`src/tap_sim/drivers/SimActuatorBus.hpp`: `SimGds68Joint` (máy trạng thái
 IDLE/CLOSED_LOOP, PD nội bộ đúng công thức GDS68 §4, từ chối MIT trước
 CLOSED_LOOP) và `SimBl4820Wheel` (Torque Enable/Disable, cửa sổ settle
 20 ms có DROP thật, servo vận tốc nội bộ dạng bậc 1).

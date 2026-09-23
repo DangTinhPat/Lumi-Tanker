@@ -61,7 +61,7 @@ class NativeBackend:
             if self.running:
                 return
             runner = self.runner_path()
-            model = self.root / "src/tap_mujoco/model/tap_robot.xml"
+            model = self.root / "src/tap_sim/model/tap_robot.xml"
             self.process = subprocess.Popen(
                 [str(runner), "--model", str(model), "--rate", str(self.rate_hz), "--realtime"],
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

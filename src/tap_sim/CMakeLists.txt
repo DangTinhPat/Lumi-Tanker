@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(tap_mujoco_native LANGUAGES CXX)
+project(tap_sim_native LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -32,12 +32,18 @@ endif()
 if(NOT TARGET tap_control_core)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tap_control/core tap_control_core_build)
 endif()
+if(NOT TARGET tap_control_hal)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tap_control/hal tap_control_hal_build)
+endif()
 
-add_executable(tap_mujoco_native native_runner.cpp)
+add_executable(tap_mujoco_native native/native_runner.cpp)
 target_compile_features(tap_mujoco_native PRIVATE cxx_std_17)
 target_compile_options(tap_mujoco_native PRIVATE -Wall -Wextra -Wpedantic)
-target_include_directories(tap_mujoco_native PRIVATE "${MUJOCO_ROOT}/include")
-target_link_libraries(tap_mujoco_native PRIVATE tap_control_core "${MUJOCO_LIBRARY}" Threads::Threads dl)
+target_include_directories(tap_mujoco_native PRIVATE
+  "${MUJOCO_ROOT}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/drivers")
+target_link_libraries(tap_mujoco_native PRIVATE
+  tap_control_core tap_control_hal "${MUJOCO_LIBRARY}" Threads::Threads dl)
 set_target_properties(tap_mujoco_native PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
 
 include(CTest)
@@ -47,24 +53,27 @@ install(DIRECTORY model DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/validate_model.py
   scripts/mujoco_sensor_actuator_backend.py
-  native_runner_contract_test.py
-  native_runner_lifecycle_test.py
-  native_drive_stop_guard_test.py
-  native_stop_balance_test.py
-  native_leg_speed_loop_test.py
-  native_neutral_balance_test.py
-  native_assist_mechanism_test.py
-  native_yaw_station_test.py
-  native_posture_transition_test.py
-  native_dance_skill_test.py
+  tests/native_runner_contract_test.py
+  tests/native_runner_lifecycle_test.py
+  tests/native_drive_stop_guard_test.py
+  tests/native_stop_balance_test.py
+  tests/native_leg_speed_loop_test.py
+  tests/native_neutral_balance_test.py
+  tests/native_assist_mechanism_test.py
+  tests/native_yaw_station_test.py
+  tests/native_posture_transition_test.py
+  tests/native_dance_skill_test.py
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   enable_testing()
-  add_executable(tap_mujoco_sim_actuator_bus_tests sim_actuator_bus_tests.cpp)
+  add_executable(tap_mujoco_sim_actuator_bus_tests tests/sim_actuator_bus_tests.cpp)
   target_compile_features(tap_mujoco_sim_actuator_bus_tests PRIVATE cxx_std_17)
   target_compile_options(tap_mujoco_sim_actuator_bus_tests PRIVATE -Wall -Wextra -Wpedantic)
-  target_link_libraries(tap_mujoco_sim_actuator_bus_tests PRIVATE tap_control_core)
+  target_include_directories(tap_mujoco_sim_actuator_bus_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/drivers")
+  target_link_libraries(tap_mujoco_sim_actuator_bus_tests PRIVATE
+    tap_control_core tap_control_hal)
   add_test(NAME tap_mujoco_sim_actuator_bus
            COMMAND tap_mujoco_sim_actuator_bus_tests)
   add_test(
@@ -84,73 +93,73 @@ if(BUILD_TESTING)
   add_test(
     NAME tap_mujoco_native_runner_contract
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_runner_contract_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_runner_contract_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_runner_lifecycle
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_runner_lifecycle_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_runner_lifecycle_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_drive_stop_guard
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_drive_stop_guard_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_drive_stop_guard_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_neutral_balance
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_neutral_balance_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_neutral_balance_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_stop_balance
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_stop_balance_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_stop_balance_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_leg_speed_loop
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_leg_speed_loop_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_leg_speed_loop_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_assist_mechanism
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_assist_mechanism_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_assist_mechanism_test.py
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_yaw_station
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_yaw_station_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_yaw_station_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_posture_transition
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_posture_transition_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_posture_transition_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_dance_skill
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_dance_skill_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_dance_skill_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml
             --duration-s 120)
   add_test(
     NAME tap_mujoco_native_landing_cmf
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_landing_contract_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_landing_contract_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
     NAME tap_mujoco_native_multirate_cmf
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/native_multirate_cmf_test.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_multirate_cmf_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   # These tests own a native runner and sensor clock. Prevent a parallel CTest

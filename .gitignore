@@ -12,5 +12,5 @@ __pycache__/
 *.stp
 *.STP
 *.rar
-src/tap_mujoco/model/assets/*.stl
-src/tap_mujoco/model/assets/*.STL
+src/tap_sim/model/assets/*.stl
+src/tap_sim/model/assets/*.STL
