@@ -3,6 +3,11 @@
 #include "robot_control/GeneratedGeometry.hpp"
 
 namespace robot_control {
+namespace geometry {
+// MPU6500 mount in the body frame; must match `mpu6500_site` in tap_robot.xml.
+inline constexpr float imu_offset_x_m = 0.0F;
+inline constexpr float imu_offset_z_m = 0.020F;
+}  // namespace geometry
 
 // Exact planar FK from the seven current CAD-link inertials. Both legs use
 // native +Y axes. No polynomial fit or mirrored Upkie joint convention.
@@ -61,6 +66,18 @@ class WholeBodyModel {
     bool feasible = false;
   };
   [[nodiscard]] static LegHeight legHeight(float hip, float knee) noexcept;
+
+  // World-frame (horizontal, vertical) velocity of the IMU point seen through
+  // one supported leg: rolling axle plus the pose-dependent lever arm. Inputs
+  // are gyro pitch rate and that leg's hip/knee/wheel encoder states only.
+  struct PlanarVelocity {
+    float horizontal_m_s = 0.0F;
+    float vertical_m_s = 0.0F;
+  };
+  [[nodiscard]] static PlanarVelocity imuVelocityThroughLeg(
+      float pitch, float pitch_rate, float hip, float knee, float hip_rate,
+      float knee_rate, float wheel_rate,
+      float wheel_radius_m = geometry::wheel_radius_m) noexcept;
 
   // Analytic derivative of the symmetric CAD pose's COM offset relative to
   // the mean wheel axle.  This is used by the embedded stance trim instead of

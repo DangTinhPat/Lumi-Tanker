@@ -22,13 +22,17 @@ void ImuStateEstimator::reset() noexcept {
   seed_count_ = 0;
   seeded_ = false;
   impact_until_s_ = 0.0F;
+  pitch_lagged_rad_ = 0.0F;
+  accel_lagged_ = {};
+  kinematic_velocity_ = {};
+  kinematic_accel_ = {};
+  kinematic_initialized_ = false;
 }
 
 ImuStateEstimator::Output ImuStateEstimator::update(
     const std::array<float, 3>& accel, const std::array<float, 3>& gyro,
     float dt_s, float now_s, float commanded_accel, bool pose_changing,
-    bool quiet_hint, float measured_body_accel,
-    bool measured_body_accel_valid) noexcept {
+    bool quiet_hint, KinematicVelocity imu_velocity) noexcept {
   Output out;
   if (!finite3(accel) || !finite3(gyro) || !std::isfinite(dt_s) ||
       dt_s <= 0.0F || !std::isfinite(now_s)) {
@@ -78,6 +82,9 @@ ImuStateEstimator::Output ImuStateEstimator::update(
     p_[0][0] = std::max(config_.initial_angle_variance, 1.0e-8F);
     p_[0][1] = p_[1][0] = 0.0F;
     p_[1][1] = std::max(config_.initial_bias_variance, 1.0e-10F);
+    pitch_lagged_rad_ = pitch_rad_;
+    accel_lagged_ = {seed_sum_[0] / n, seed_sum_[2] / n};
+    kinematic_initialized_ = false;
     seeded_ = true;
     out.seeded = true;
     out.pitch_rad = pitch_rad_;
@@ -89,11 +96,49 @@ ImuStateEstimator::Output ImuStateEstimator::update(
 
   const float body_accel_limit =
       std::max(config_.body_accel_limit_m_s2, 0.0F);
-  const bool measured_accel_valid = measured_body_accel_valid &&
-      std::isfinite(measured_body_accel);
-  float body_accel = measured_accel_valid
-      ? std::clamp(measured_body_accel, -body_accel_limit, body_accel_limit)
-      : 0.0F;
+  const float tau = std::max(config_.kinematic_velocity_filter_tau_s, 0.0F);
+  const float lag_alpha = std::clamp(dt / (tau + dt), 0.0F, 1.0F);
+
+  const bool measured_accel_valid = imu_velocity.valid &&
+      std::isfinite(imu_velocity.horizontal_m_s) &&
+      std::isfinite(imu_velocity.vertical_m_s);
+  if (!measured_accel_valid) {
+    // Decay with the accelerometer's matched lag: the lagged specific force
+    // still contains the acceleration that was just being compensated.
+    kinematic_initialized_ = false;
+    for (auto& value : kinematic_accel_) value -= lag_alpha * value;
+  } else {
+    const std::array<float, 2> velocity{imu_velocity.horizontal_m_s,
+                                        imu_velocity.vertical_m_s};
+    if (!kinematic_initialized_) {
+      // Start from the first delayed encoder packet. A startup difference
+      // would turn the sensor latency edge into a false impact.
+      kinematic_velocity_ = velocity;
+      kinematic_accel_ = {};
+      kinematic_initialized_ = true;
+    } else {
+      const auto previous_velocity = kinematic_velocity_;
+      // Differentiating quantised encoder velocity directly amplifies its
+      // 500 Hz noise by 1/dt. Filter velocity first; its derivative is then
+      // the same one-pole lag as the accelerometer branch below.
+      for (std::size_t i = 0; i < 2; ++i) {
+        kinematic_velocity_[i] += lag_alpha *
+            (velocity[i] - kinematic_velocity_[i]);
+        kinematic_accel_[i] = std::clamp(
+            (kinematic_velocity_[i] - previous_velocity[i]) / dt,
+            -body_accel_limit, body_accel_limit);
+      }
+    }
+  }
+  // World (horizontal, vertical) IMU acceleration projected into body x/z.
+  const float c = std::cos(pitch_rad_);
+  const float s = std::sin(pitch_rad_);
+  float body_accel = std::clamp(
+      c * kinematic_accel_[0] - s * kinematic_accel_[1],
+      -body_accel_limit, body_accel_limit);
+  const float body_accel_z = std::clamp(
+      s * kinematic_accel_[0] + c * kinematic_accel_[1],
+      -body_accel_limit, body_accel_limit);
   // Keep the MPC command as a small model feed-forward term. If the encoder
   // path is valid it nudges the measured value; it never replaces it. This
   // prevents actuator delay/slip from closing an acceleration->tilt positive
@@ -106,40 +151,58 @@ ImuStateEstimator::Output ImuStateEstimator::update(
   } else if (!measured_accel_valid && std::isfinite(commanded_accel) &&
              std::abs(commanded_accel) <=
                  std::max(config_.accel_command_gate_m_s2, 0.0F)) {
-    body_accel = std::clamp(commanded_accel, -body_accel_limit,
+    body_accel = std::clamp(body_accel + commanded_accel, -body_accel_limit,
                             body_accel_limit);
   }
+  // Gate each raw sample before it enters the matched filter; otherwise the
+  // filter would smear one implausible packet into a plausible-looking tilt.
+  bool accel_sample_plausible = false;
+  {
+    const float raw_x = accel[0] - body_accel;
+    const float raw_z = accel[2] - body_accel_z;
+    const float raw_mag =
+        std::sqrt(raw_x * raw_x + accel[1] * accel[1] + raw_z * raw_z);
+    const float raw_innovation = std::atan2(-raw_x, raw_z) - pitch_rad_;
+    accel_sample_plausible = std::isfinite(raw_innovation) &&
+        std::abs(raw_innovation) <=
+            std::max(config_.accel_max_innovation_rad, 0.0F) &&
+        std::abs(raw_mag - config_.gravity_m_s2) <=
+            std::max(config_.accel_max_deviation_m_s2, 0.0F);
+    if (accel_sample_plausible) {
+      accel_lagged_[0] += lag_alpha * (accel[0] - accel_lagged_[0]);
+      accel_lagged_[1] += lag_alpha * (accel[2] - accel_lagged_[1]);
+    }
+  }
   out.body_accel_x_m_s2 = body_accel;
-  out.accel_tilt_x_m_s2 = accel[0] - body_accel;
+  out.accel_tilt_x_m_s2 = accel_lagged_[0] - body_accel;
   out.body_accel_compensation_valid = measured_accel_valid;
 
-  // Both signals use the signed body-X convention of the MPU6500 adapter.
-  // Subtracting the measured translational acceleration removes specific
-  // force caused by wheel motion before extracting the gravity direction.
+  // Both signals use the signed body-X/Z convention of the MPU6500 adapter.
+  // Subtracting the kinematic acceleration of the IMU point removes the
+  // specific force caused by wheel motion, body rotation about the axle and
+  // leg articulation before extracting the gravity direction.
   const float corrected_accel_x = out.accel_tilt_x_m_s2;
-  const float measured_pitch = std::atan2(-corrected_accel_x, accel[2]);
+  const float corrected_accel_z = accel_lagged_[1] - body_accel_z;
+  const float measured_pitch = std::atan2(-corrected_accel_x, corrected_accel_z);
   const float corrected_mag = std::sqrt(
       corrected_accel_x * corrected_accel_x + accel[1] * accel[1] +
-      accel[2] * accel[2]);
+      corrected_accel_z * corrected_accel_z);
   const float deviation = std::abs(corrected_mag - config_.gravity_m_s2);
-  // A wheel acceleration estimate is useful to explain specific force only
-  // while it is small enough for the reduced sensor model to be trustworthy.
-  // During a wheel catch the wheel can accelerate underneath a nearly still
-  // body; treating that actuator motion as IMU translational acceleration is
-  // worse than temporarily relying on the gyro. This gate is deliberately
-  // bounded and sensor-only, not a simulator contact shortcut.
-  const bool dynamic_accel_gate = measured_accel_valid &&
-      std::abs(body_accel) > 0.35F;
-  const bool force_valid = corrected_mag >= config_.seed_min_accel_m_s2 &&
+  const float trust_scale =
+      std::max(config_.kinematic_accel_trust_scale_m_s2, 1.0e-3F);
+  const float dynamic_ratio =
+      std::hypot(body_accel, body_accel_z) / trust_scale;
+  const float dynamic_trust = 1.0F / (1.0F + dynamic_ratio * dynamic_ratio);
+  const bool force_valid = accel_sample_plausible &&
+      corrected_mag >= config_.seed_min_accel_m_s2 &&
       corrected_mag <= config_.seed_max_accel_m_s2 &&
       deviation <= std::max(config_.accel_max_deviation_m_s2, 0.0F) &&
       std::abs(gyro[1]) <= std::max(config_.accel_max_pitch_rate_rad_s, 0.0F) &&
-      !dynamic_accel_gate &&
       (measured_accel_valid ||
        std::abs(commanded_accel) <=
            std::max(config_.accel_command_gate_m_s2, 0.0F));
   out.accel_tilt_valid = force_valid;
-  const float innovation = measured_pitch - pitch_rad_;
+  const float innovation = measured_pitch - pitch_lagged_rad_;
   const bool innovation_valid = std::isfinite(innovation) &&
       std::abs(innovation) <=
           std::max(config_.accel_max_innovation_rad, 0.0F);
@@ -162,23 +225,24 @@ ImuStateEstimator::Output ImuStateEstimator::update(
 
   const float rate = gyro[1] - gyro_bias_;
   pitch_rad_ += dt * rate;
+  pitch_lagged_rad_ += lag_alpha * (pitch_rad_ - pitch_lagged_rad_);
   p_[0][0] += dt * (dt * p_[1][1] - p_[0][1] - p_[1][0] + config_.q_angle);
   p_[0][1] -= dt * p_[1][1];
   p_[1][0] -= dt * p_[1][1];
   p_[1][1] += config_.q_bias * dt;
 
-  // During a leg transaction the accelerometer is allowed to report its
-  // diagnostic tilt channel, but it must not correct the integrated attitude.
-  // A dynamic sample can have a gravity-like magnitude while its direction is
-  // dominated by leg/wheel acceleration; applying the Kalman innovation here
-  // creates a false multi-radian fall in one packet.
-  if (force_valid && innovation_valid && !pose_changing) {
+  // Leg articulation is part of the kinematic model, so a leg transaction
+  // only lowers accelerometer trust; the innovation gate still rejects a
+  // gravity-like sample whose direction is implausible.
+  out.accel_trust = force_valid && innovation_valid ? dynamic_trust : 0.0F;
+  if (force_valid && innovation_valid) {
     const float deadband = 0.4F;
     const float excess = std::max(0.0F, deviation - deadband);
     const float trust = (pose_changing ||
                          std::abs(gyro[1]) > config_.accel_max_pitch_rate_rad_s)
                             ? config_.accel_trust_gain : 0.0F;
-    const float r = config_.r_measure * (1.0F + trust * excess * excess);
+    const float r = config_.r_measure * (1.0F + trust * excess * excess) /
+        std::max(dynamic_trust, 1.0e-3F);
     const float s = p_[0][0] + r;
     if (s > 1.0e-9F && std::isfinite(s)) {
       const float k0 = p_[0][0] / s;
@@ -191,6 +255,7 @@ ImuStateEstimator::Output ImuStateEstimator::update(
       const float p10 = p_[1][0];
       const float p11 = p_[1][1];
       pitch_rad_ += k0 * innovation;
+      pitch_lagged_rad_ += k0 * innovation;
       // The covariance path remains useful for uncertainty tracking, but its
       // default Q/R pair is intentionally conservative. A fixed complementary
       // correction gives a predictable phase budget at the plant's observed
@@ -200,10 +265,11 @@ ImuStateEstimator::Output ImuStateEstimator::update(
       const float confidence = 1.0F / (1.0F + deviation * deviation);
       const float correction_gain =
           std::max(config_.accel_correction_gain_hz, 0.0F) *
-          confidence;
+          confidence * dynamic_trust;
       const float correction_alpha = std::clamp(
           1.0F - std::exp(-correction_gain * dt), 0.0F, 1.0F);
       pitch_rad_ += correction_alpha * innovation;
+      pitch_lagged_rad_ += correction_alpha * innovation;
       gyro_bias_ += k1 * innovation;
       // A stationary accelerometer provides a weak absolute attitude
       // reference. Integrate only its low-frequency innovation into the gyro

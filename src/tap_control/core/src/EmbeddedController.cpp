@@ -474,7 +474,15 @@ LqrBalancer::Output EmbeddedController::runBalance(
     lqr_.reanchorPosition(state.wheel.position_m);
     height_motion_endpoint_anchor_m_ = state.wheel.position_m;
   }
+  // A zero DRIVE command first enters a braking transient.  Do not hold the
+  // pre-stop position during that transient: wheel inertia would carry the
+  // robot past the release point and the position state would then pull it
+  // visibly backward.  The quiet station latch re-anchors and enables this
+  // position state after capture; posture motion keeps it enabled throughout.
+  const bool position_anchor_active = station_hold_active_ ||
+      posture_motion_active;
   lqr_.setPositionAnchorHold(config_.lqr.position_anchor_hold &&
+                              position_anchor_active &&
                               !posture_motion_needs_station_reanchor_ &&
                               station_reanchor_cooldown_s_ <= 0.0F);
   if (height_motion_endpoint_reached_ && station_reanchor_cooldown_s_ <= 0.0F) {

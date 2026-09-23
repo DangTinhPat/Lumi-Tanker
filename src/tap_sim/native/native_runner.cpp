@@ -110,10 +110,6 @@ constexpr unsigned kDanceLowHeightCycles = 1U;
 // capture margin indefinitely.  1.8 rad remains above the regression's
 // 1.5-rad presentation requirement; after that the skill holds station.
 constexpr float kDanceYawBudgetRad = 1.7F;
-// Wheel-ground acceleration is only a proxy for the IMU body's translational
-// acceleration. Project it conservatively; feeding the full value creates a
-// false tilt signal whenever the low-torque wheel servo catches station drift.
-constexpr float kWheelAccelToBodyAccelScale = 0.40F;
 
 struct Options {
   std::string model;
@@ -425,15 +421,12 @@ class NativeRunner {
     odometry_velocity_m_s_.fill(0.0F);
     odometry_velocity_filtered_m_s_.fill(0.0F);
     odometry_velocity_initialized_ = false;
-    wheel_accel_initialized_ = false;
-    wheel_accel_estimate_m_s2_ = 0.0F;
-    previous_wheel_velocity_m_s_ = 0.0F;
-    previous_wheel_velocity_stamp_s_ = 0.0;
     odometry_previous_joints_.fill(0.0F);
     odometry_previous_pitch_ = 0.0F;
     body_accel_x_m_s2_ = 0.0F;
     accel_tilt_x_m_s2_ = 0.0F;
     body_accel_compensation_valid_ = false;
+    accel_trust_ = 0.0F;
     raw_accel_.fill(0.0F);
     feedback_.fill(0.0F);
     leg_feedback_position_.fill(0.0F);
@@ -861,16 +854,13 @@ class NativeRunner {
     auto imu_config = ImuStateEstimator::Config{};
     imu_config.bias_learning_gain = 0.10F;
     imu_config.bias_innovation_gain_hz = 0.03F;
-    // The dynamic-force gate in ImuStateEstimator disables this path during
-    // wheel catches. The higher base gain removes estimator phase lag while
-    // the force/deviation confidence gates still reject transient correction.
+    // The kinematic dynamic-acceleration trust in ImuStateEstimator scales
+    // this gain down during wheel catches and leg motion.
     imu_config.accel_correction_gain_hz = 5.0F;
     // The native actuator model currently saturates the MPC command well
     // before it realizes the requested ground acceleration. Do not feed that
-    // open-loop request back into the attitude estimator; the encoder-derived
-    // wheel acceleration is used only as the conservative proxy configured at
-    // the sensor boundary. The core keeps the feed-forward knob for a hardware
-    // HAL with a measured body-acceleration channel.
+    // open-loop request back into the attitude estimator; the encoder/gyro
+    // kinematic IMU velocity is the measured compensation.
     imu_config.commanded_accel_blend = 0.0F;
     imu_estimator_.setConfig(imu_config);
     accel_id_ = mj_name2id(model_, mjOBJ_SENSOR, "mpu6500_accel");
@@ -1015,6 +1005,28 @@ class NativeRunner {
     }
   }
 
+  // Rolling-contact kinematics hold only under the sensor-derived support
+  // hypothesis; in flight the accelerometer falls back to gyro integration.
+  ImuStateEstimator::KinematicVelocity imuKinematicVelocity(float gyro_rate) const {
+    ImuStateEstimator::KinematicVelocity out;
+    if (!imu_seeded_ || last_encoder_stamp_s_ <= 0.0 ||
+        !controller_.flightEstimate().support_contact) {
+      return out;
+    }
+    const float pitch_rate = gyro_rate - state_.imu.gyro_bias_rad_s;
+    const auto& q = state_.joints.position_rad;
+    const auto& qd = state_.joints.velocity_rad_s;
+    for (const std::size_t hip : {std::size_t{0}, std::size_t{3}}) {
+      const auto leg = robot_control::WholeBodyModel::imuVelocityThroughLeg(
+          state_.imu.pitch_rad, pitch_rate, q[hip], q[hip + 1], qd[hip],
+          qd[hip + 1], qd[hip + 2]);
+      out.horizontal_m_s += 0.5F * leg.horizontal_m_s;
+      out.vertical_m_s += 0.5F * leg.vertical_m_s;
+    }
+    out.valid = true;
+    return out;
+  }
+
   void consumeSensors() {
     while (!imu_queue_.empty() && imu_queue_.front().ready_s <= sim_time_s_ + 1.0e-12) {
       const ImuSample sample = imu_queue_.front();
@@ -1053,9 +1065,7 @@ class NativeRunner {
           !controller_.heightMotionSettling();
       const auto estimate = imu_estimator_.update(sample.accel, sample.gyro, dt,
           static_cast<float>(sample.stamp_s), 0.0F, pose_changing,
-          stance_quiet, kWheelAccelToBodyAccelScale *
-              wheel_accel_estimate_m_s2_,
-          wheel_accel_initialized_);
+          stance_quiet, imuKinematicVelocity(sample.gyro[1]));
       imu_seeded_ = estimate.seeded;
       imu_tilt_valid_ = estimate.accel_tilt_valid;
       if (estimate.valid) {
@@ -1072,6 +1082,7 @@ class NativeRunner {
         body_accel_x_m_s2_ = estimate.body_accel_x_m_s2;
         accel_tilt_x_m_s2_ = estimate.accel_tilt_x_m_s2;
         body_accel_compensation_valid_ = estimate.body_accel_compensation_valid;
+        accel_trust_ = estimate.accel_trust;
       }
       ++imu_sequence_;
       state_.imu_sample_sequence = imu_sequence_;
@@ -1080,29 +1091,6 @@ class NativeRunner {
     while (!encoder_queue_.empty() && encoder_queue_.front().ready_s <= sim_time_s_ + 1.0e-12) {
       const EncoderSample sample = encoder_queue_.front();
       encoder_queue_.pop_front();
-      const float wheel_velocity = robot_control::geometry::wheel_radius_m *
-          0.5F * (sample.velocity[2] + sample.velocity[5]);
-      if (wheel_accel_initialized_ &&
-          sample.stamp_s > previous_wheel_velocity_stamp_s_) {
-        const float dt = std::clamp(
-            static_cast<float>(sample.stamp_s - previous_wheel_velocity_stamp_s_),
-            1.0e-4F, 0.05F);
-        const float raw_accel = (wheel_velocity - previous_wheel_velocity_m_s_) /
-            dt;
-        // Encoder velocity is quantised/noisy at 500 Hz. This short bounded
-        // differentiator removes quantisation spikes without adding the
-        // long attitude lag that motivated this path.
-        constexpr float kWheelAccelerationFilterTauS = 0.012F;
-        const float alpha = std::clamp(
-            dt / (kWheelAccelerationFilterTauS + dt), 0.0F, 1.0F);
-        wheel_accel_estimate_m_s2_ += alpha * (
-            std::clamp(raw_accel, -4.0F, 4.0F) - wheel_accel_estimate_m_s2_);
-        wheel_accel_estimate_m_s2_ = std::clamp(
-            wheel_accel_estimate_m_s2_, -4.0F, 4.0F);
-      }
-      previous_wheel_velocity_m_s_ = wheel_velocity;
-      previous_wheel_velocity_stamp_s_ = sample.stamp_s;
-      wheel_accel_initialized_ = true;
       state_.joints.position_rad = sample.position;
       state_.joints.velocity_rad_s = sample.velocity;
       state_.joints.effort_nm = sample.effort;
@@ -1793,7 +1781,7 @@ class NativeRunner {
               << "|body_accel_x=" << body_accel_x_m_s2_
               << "|accel_tilt_x=" << accel_tilt_x_m_s2_
               << "|body_accel_comp_valid=" << body_accel_compensation_valid_
-              << "|wheel_ground_accel=" << wheel_accel_estimate_m_s2_
+              << "|accel_trust=" << accel_trust_
               << "|raw_gyro_y=" << raw_gyro_[1]
               << "|support_contact=" << flight.support_contact
               << "|support_unloading=" << flight.support_unloading
@@ -1960,10 +1948,7 @@ class NativeRunner {
   std::array<float, 2> odometry_position_m_{};
   std::array<float, 2> odometry_velocity_m_s_{};
   std::array<float, 2> odometry_velocity_filtered_m_s_{};
-  bool wheel_accel_initialized_ = false;
-  float wheel_accel_estimate_m_s2_ = 0.0F;
-  float previous_wheel_velocity_m_s_ = 0.0F;
-  double previous_wheel_velocity_stamp_s_ = 0.0;
+  float accel_trust_ = 0.0F;
   JointArray odometry_previous_joints_{};
   float odometry_previous_pitch_ = 0.0F;
   bool odometry_velocity_initialized_ = false;

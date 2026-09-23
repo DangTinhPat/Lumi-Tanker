@@ -397,7 +397,15 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
                               -config_.max_ground_velocity_m_s,
                               config_.max_ground_velocity_m_s);
   const float requested_forward = forward;
-  if (config_.target_velocity_slew_rate_m_s2 > 0.0F) {
+  const bool release_to_stop = std::abs(requested_forward) < 1.0e-3F &&
+      std::abs(target_forward_velocity_m_s_) >= 1.0e-3F;
+  if (release_to_stop) {
+    // Release is a deliberate zero-speed command.  The wheel acceleration is
+    // still bounded by max_ground_accel_m_s2, but retaining the old
+    // smoothed target would make the robot drive on after the operator stops.
+    forward = requested_forward;
+    command_accel_m_s2_ = 0.0F;
+  } else if (config_.target_velocity_slew_rate_m_s2 > 0.0F) {
     const float slew = config_.target_velocity_slew_rate_m_s2;
     if (config_.target_velocity_jerk_m_s3 > 0.0F) {
       // S-curve: bound the acceleration itself, then bound its rate of change.
@@ -479,7 +487,9 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   // control input instead of telemetry-only bookkeeping.
   const float station_reference = hold_station
       ? forward + station_gain_blend * (station_target - forward) : forward;
-  if (hold_station && config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
+  if (release_to_stop) {
+    station_velocity_reference_m_s_ = station_reference;
+  } else if (hold_station && config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
     float slew_rate = config_.station_hold_command_slew_rate_m_s2;
     const float max_step = slew_rate * dt;
     station_velocity_reference_m_s_ = std::clamp(

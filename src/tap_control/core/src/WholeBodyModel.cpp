@@ -92,6 +92,24 @@ WholeBodyModel::LegHeight WholeBodyModel::legHeight(float hip,
   return out;
 }
 
+WholeBodyModel::PlanarVelocity WholeBodyModel::imuVelocityThroughLeg(
+    float pitch, float pitch_rate, float hip, float knee, float hip_rate,
+    float knee_rate, float wheel_rate, float wheel_radius_m) noexcept {
+  const auto leg = legHeight(hip, knee);
+  const Point lever{geometry::imu_offset_x_m - leg.x_m,
+                    geometry::imu_offset_z_m - leg.height_m};
+  const Point lever_rate{
+      -(leg.d_x_d_hip * hip_rate + leg.d_x_d_knee * knee_rate),
+      -(leg.d_height_d_hip * hip_rate + leg.d_height_d_knee * knee_rate)};
+  const auto body = rotation(pitch);
+  const Point swing = derivative(lever, body);
+  const Point stretch = rotate(lever_rate, body);
+  const float axle_velocity =
+      wheel_radius_m * (pitch_rate + hip_rate + knee_rate + wheel_rate);
+  return {axle_velocity + pitch_rate * swing.x + stretch.x,
+          pitch_rate * swing.z + stretch.z};
+}
+
 WholeBodyModel::SymmetricComJacobian
 WholeBodyModel::symmetricComOffsetJacobian(float hip, float knee) noexcept {
   SymmetricComJacobian out{};

@@ -4,6 +4,14 @@
 
 namespace robot_control {
 
+// World-frame IMU-point velocity from gyro + encoders (see
+// WholeBodyModel::imuVelocityThroughLeg). Valid only while supported.
+struct ImuKinematicVelocity {
+  float horizontal_m_s = 0.0F;
+  float vertical_m_s = 0.0F;
+  bool valid = false;
+};
+
 // MPU6500-only pitch estimator.  This is deliberately a sensor adapter, not
 // a simulator adapter: it accepts only accelerometer and gyro samples and a
 // controller-known acceleration feed-forward.  MuJoCo pose/contact/qpos must
@@ -33,6 +41,13 @@ class ImuStateEstimator {
     // term, never the sole dynamic measurement.
     float body_accel_limit_m_s2 = 4.0F;
     float commanded_accel_blend = 0.15F;
+    // Filter encoder/gyro velocity before differentiating it. The resulting
+    // acceleration and accelerometer branches then get the same one-pole lag.
+    float kinematic_velocity_filter_tau_s = 0.02F;
+    // Accelerometer trust falls as 1/(1+(a_dyn/scale)^2): the larger the
+    // acceleration the kinematic model removed, the larger its possible
+    // residual (slip, compliance, lever-arm error).
+    float kinematic_accel_trust_scale_m_s2 = 1.5F;
     // Fixed-cost complementary correction keeps estimator phase lag bounded
     // without allocating or adding a larger state to the ESP32 path.
     float accel_correction_gain_hz = 55.0F;
@@ -84,7 +99,11 @@ class ImuStateEstimator {
     float body_accel_x_m_s2 = 0.0F;
     float accel_tilt_x_m_s2 = 0.0F;
     bool body_accel_compensation_valid = false;
+    // Continuous 0..1 weight applied to the accelerometer attitude correction.
+    float accel_trust = 0.0F;
   };
+
+  using KinematicVelocity = ImuKinematicVelocity;
 
   ImuStateEstimator() = default;
   explicit ImuStateEstimator(Config config) : config_(config) {}
@@ -101,12 +120,16 @@ class ImuStateEstimator {
                               float commanded_ground_accel_m_s2 = 0.0F,
                               bool pose_changing = false,
                               bool quiet_hint = false,
-                              float measured_body_accel_m_s2 = 0.0F,
-                              bool measured_body_accel_valid = false) noexcept;
+                              KinematicVelocity imu_velocity = {}) noexcept;
 
  private:
   Config config_{};
   float pitch_rad_ = 0.0F;
+  float pitch_lagged_rad_ = 0.0F;
+  std::array<float, 2> accel_lagged_{};
+  std::array<float, 2> kinematic_velocity_{};
+  std::array<float, 2> kinematic_accel_{};
+  bool kinematic_initialized_ = false;
   float gyro_bias_ = 0.0F;
   float p_[2][2] = {{0.0F, 0.0F}, {0.0F, 0.0F}};
   std::array<float, 3> seed_sum_{};
