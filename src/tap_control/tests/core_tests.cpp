@@ -139,11 +139,32 @@ void lifecycleTests() {
         "disable has immediate stop priority");
 }
 
+void fallGuardTests() {
+  EmbeddedController::Config config;
+  config.lqr.fall_pitch_rad = 0.55F;
+  config.state_machine.enable_cycles = 1;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.joints.position_rad = config.stand_up.stand_pose_rad;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  (void)controller.update(state, command);
+  state.imu.pitch_rad = 0.60F;
+  const auto output = controller.update(state, command);
+  check(controller.mode() == ControlMode::Fallen && safeStop(output),
+        "supported over-pitch latches Fallen and safe-stops");
+}
+
 }  // namespace
 
 int main() {
   geometryTests();
   lqrTests();
   lifecycleTests();
+  fallGuardTests();
   return failures == 0 ? 0 : 1;
 }

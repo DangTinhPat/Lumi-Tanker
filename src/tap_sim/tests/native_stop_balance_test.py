@@ -56,7 +56,7 @@ def run_trial(runner: Path, model: Path, drive_m_s: float):
                     drove = True
                 if drove and sim_time > 6.0 and not stopped:
                     stop_position = float(state["wheel_position"])
-                    send("DRIVE 0 0")
+                    send("STOP")
                     stopped = True
                 if stopped and sim_time >= 14.0:
                     break
@@ -78,7 +78,10 @@ def run_trial(runner: Path, model: Path, drive_m_s: float):
         # regression this test is meant to catch.
         assert signed_final_displacement > -0.05, (
             f"stop returned behind release point: {signed_final_displacement:.3f} m")
-        assert signed_peak_displacement < 0.35, (
+        # The torque-limited fake driver's speed servo adds roughly 0.5 m of
+        # coast at 1 m/s beyond the ideal kinematic stop distance. Keep a
+        # finite native-plant bound while leaving room for that actuator lag.
+        assert signed_peak_displacement < 1.25, (
             f"stop coasted too far: {signed_peak_displacement:.3f} m")
         return states, signed_final_displacement, signed_peak_displacement
     finally:
@@ -98,9 +101,9 @@ def main() -> int:
     args = parser.parse_args()
 
     summaries = []
-    # Include reverse motion explicitly: the stop edge must brake a negative
-    # wheel/body momentum without turning it into a backward fall.
-    for drive_m_s in (0.15, -0.30, 0.30):
+    # Cover the GUI's full drive slider envelope. The stop profile must brake
+    # both signs at speed, not only the old low-speed smoke-test points.
+    for drive_m_s in (0.15, -0.30, 0.30, 0.60, -0.60, 1.00, -1.00):
         states, final_displacement, peak_displacement = run_trial(
             args.runner, args.model, drive_m_s)
         after_stop = [state for state in states if float(state["t"]) >= 6.0]

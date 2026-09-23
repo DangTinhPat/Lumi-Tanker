@@ -74,6 +74,7 @@ class NativeDashboard:
         self.estop = False
         self.drive = (0.0, 0.0)
         self._drive_button_active = False
+        self._drive_stop_latched = True
         self.dance_active = False
         self.show_started_s = None
         self._posture_send_job = None
@@ -414,6 +415,8 @@ class NativeDashboard:
                 return
             self._cancel_pending_posture()
             self.stop_skill()
+        if forward != 0.0 or yaw != 0.0:
+            self._drive_stop_latched = False
         self.drive = (forward * float(self.speed.get()), yaw * float(self.yaw.get()))
 
     def _drive_press(self, forward: float, yaw: float):
@@ -429,6 +432,7 @@ class NativeDashboard:
         self._drive_button_active = False
         self.stop_skill()
         self.drive = (0.0, 0.0)
+        self._drive_stop_latched = True
         self.backend.command_stop()
 
     def _posture_capture_ready(self):
@@ -648,7 +652,7 @@ class NativeDashboard:
             pose = self._show_pose(time.monotonic() - self.show_started_s)
             self.backend.command_pose(*pose)
         elif (self.enabled and self.backend.running and not self.estop and
-              not self.dance_active):
+              not self.dance_active and not self._drive_stop_latched):
             self.backend.command_drive(*self.drive)
         self.root.after(20, self.tick)
 

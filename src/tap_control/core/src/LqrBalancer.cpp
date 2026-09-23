@@ -397,14 +397,38 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
                               -config_.max_ground_velocity_m_s,
                               config_.max_ground_velocity_m_s);
   const float requested_forward = forward;
-  const bool release_to_stop = std::abs(requested_forward) < 1.0e-3F &&
+  const bool stop_command_active = std::abs(requested_forward) < 1.0e-3F &&
       std::abs(target_forward_velocity_m_s_) >= 1.0e-3F;
-  if (release_to_stop) {
-    // Release is a deliberate zero-speed command.  The wheel acceleration is
-    // still bounded by max_ground_accel_m_s2, but retaining the old
-    // smoothed target would make the robot drive on after the operator stops.
-    forward = requested_forward;
-    command_accel_m_s2_ = 0.0F;
+  if (stop_command_active) {
+    const float normal_slew = std::max(
+        config_.target_velocity_slew_rate_m_s2, 0.0F);
+    const float stop_slew = config_.stop_velocity_slew_rate_m_s2 > 0.0F
+        ? config_.stop_velocity_slew_rate_m_s2 : normal_slew;
+    if (stop_slew <= 0.0F) {
+      forward = requested_forward;
+      command_accel_m_s2_ = 0.0F;
+    } else {
+      const float desired_accel = target_forward_velocity_m_s_ > 0.0F
+          ? -stop_slew : stop_slew;
+      float stop_accel = desired_accel;
+      if (config_.stop_velocity_jerk_m_s3 > 0.0F) {
+        const float jerk_step = config_.stop_velocity_jerk_m_s3 * dt;
+        stop_accel = std::clamp(
+            desired_accel, command_accel_m_s2_ - jerk_step,
+            command_accel_m_s2_ + jerk_step);
+      }
+      const float next = target_forward_velocity_m_s_ + stop_accel * dt;
+      const bool crossed_zero = (target_forward_velocity_m_s_ > 0.0F &&
+                                 next <= 0.0F) ||
+          (target_forward_velocity_m_s_ < 0.0F && next >= 0.0F);
+      if (crossed_zero) {
+        forward = requested_forward;
+        command_accel_m_s2_ = 0.0F;
+      } else {
+        forward = next;
+        command_accel_m_s2_ = stop_accel;
+      }
+    }
   } else if (config_.target_velocity_slew_rate_m_s2 > 0.0F) {
     const float slew = config_.target_velocity_slew_rate_m_s2;
     if (config_.target_velocity_jerk_m_s3 > 0.0F) {
@@ -487,7 +511,7 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   // control input instead of telemetry-only bookkeeping.
   const float station_reference = hold_station
       ? forward + station_gain_blend * (station_target - forward) : forward;
-  if (release_to_stop) {
+  if (stop_command_active) {
     station_velocity_reference_m_s_ = station_reference;
   } else if (hold_station && config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
     float slew_rate = config_.station_hold_command_slew_rate_m_s2;

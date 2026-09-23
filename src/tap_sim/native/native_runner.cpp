@@ -536,9 +536,18 @@ class NativeRunner {
     lqr.wheel_velocity_reference_from_measured = true;
     lqr.target_velocity_slew_rate_m_s2 = 0.30F;
     lqr.target_velocity_jerk_m_s3 = 1.0F;
+    // Releasing DRIVE uses a faster but still torque-feasible profile. The
+    // 0.65 factor leaves pitch-capture margin below the two-wheel torque cap;
+    // both speed and acceleration remain continuous at the command edge.
+    const float brake_capacity_m_s2 = std::min(
+        wheel_torque_accel_m_s2, lqr.wheel_ground_mu * lqr.gravity_m_s2);
+    lqr.stop_velocity_slew_rate_m_s2 = 0.65F * brake_capacity_m_s2;
+    lqr.stop_velocity_jerk_m_s3 = 4.0F;
     lqr.target_yaw_slew_rate_rad_s2 = 1.0F;
     lqr.yaw_rate_feedback_kp = 1.0F;
-    lqr.fall_pitch_rad = 1.1F;
+    // Fail safe before the supported floor-side posture observed in the
+    // native model (~0.69 rad).
+    lqr.fall_pitch_rad = 0.55F;
     // Let the leg-side gimbal absorb the small supported pitch error. The
     // wheel LQR remains the fast catch controller for larger transients.
     lqr.wheel_pitch_feedback_scale = 0.70F;

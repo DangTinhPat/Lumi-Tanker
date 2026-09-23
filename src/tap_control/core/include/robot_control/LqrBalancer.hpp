@@ -68,6 +68,11 @@ class LqrBalancer {
     float wheel_ground_mu = 1.0F;
     bool wheel_velocity_reference_from_measured = false;
     float target_velocity_slew_rate_m_s2 = 0.0F;
+    // Stop-specific reference profile. Zero falls back to the normal target
+    // slew/jerk values; a nonzero value lets an operator release brake faster
+    // without stepping the velocity target or the LQR acceleration demand.
+    float stop_velocity_slew_rate_m_s2 = 0.0F;
+    float stop_velocity_jerk_m_s3 = 0.0F;
     // Jerk limit for the velocity command. A pure rate limit bounds how fast
     // the SPEED may change but lets the ACCELERATION step - so an operator
     // pressing a button steps the demanded acceleration from 0 to the slew
