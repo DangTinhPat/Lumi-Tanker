@@ -49,6 +49,7 @@ install(PROGRAMS
   scripts/mujoco_sensor_actuator_backend.py
   native_runner_contract_test.py
   native_runner_lifecycle_test.py
+  native_drive_stop_guard_test.py
   native_stop_balance_test.py
   native_leg_speed_loop_test.py
   native_neutral_balance_test.py
@@ -60,6 +61,12 @@ install(PROGRAMS
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(tap_mujoco_sim_actuator_bus_tests sim_actuator_bus_tests.cpp)
+  target_compile_features(tap_mujoco_sim_actuator_bus_tests PRIVATE cxx_std_17)
+  target_compile_options(tap_mujoco_sim_actuator_bus_tests PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(tap_mujoco_sim_actuator_bus_tests PRIVATE tap_control_core)
+  add_test(NAME tap_mujoco_sim_actuator_bus
+           COMMAND tap_mujoco_sim_actuator_bus_tests)
   add_test(
     NAME tap_mujoco_model_contract
     COMMAND ${Python3_EXECUTABLE}
@@ -84,6 +91,12 @@ if(BUILD_TESTING)
     NAME tap_mujoco_native_runner_lifecycle
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/native_runner_lifecycle_test.py
+            --runner $<TARGET_FILE:tap_mujoco_native>
+            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
+  add_test(
+    NAME tap_mujoco_native_drive_stop_guard
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/native_drive_stop_guard_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
@@ -145,6 +158,7 @@ if(BUILD_TESTING)
   set_tests_properties(
     tap_mujoco_native_runner_contract
     tap_mujoco_native_runner_lifecycle
+    tap_mujoco_native_drive_stop_guard
     tap_mujoco_native_neutral_balance
     tap_mujoco_native_stop_balance
     tap_mujoco_native_leg_speed_loop

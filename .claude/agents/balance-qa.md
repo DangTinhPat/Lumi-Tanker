@@ -59,11 +59,28 @@ both directions and from several starting states:
 
 Landing and jumping are out of scope; do not judge or report on them.
 
-**Drift while performing an action must stay within about 3 cm.** Measure it
-from the encoder-derived `wheel_position` in the STATE stream. Distinguish net
-drift from oscillation: compute both the peak-to-peak envelope and the net rate.
-A near-zero net rate with large instantaneous velocity is a limit cycle, and you
-must report its frequency and amplitude, not call it drift.
+**Drift limits depend on what the robot is doing.** Two tiers, and you must say
+which one you are judging against:
+
+- **Balanced state - 3 cm.** The robot is balancing without changing shape:
+  standing still, forward or reverse drive, yaw in place, stop from speed.
+- **Transforming state - under 8 cm.** The body is changing height or posture:
+  a height change, whether standing or while driving, and the dance action,
+  which cycles height.
+
+Measure drift from the encoder-derived `wheel_position` in the STATE stream, and
+only for actions that are not supposed to translate. For an action that travels
+on purpose, that range is the intended distance and says nothing about drift -
+judge those by deviation from the commanded path or by post-stop settling, and
+say which you used.
+
+Distinguish net drift from oscillation: report both the peak-to-peak envelope
+and the net rate. A near-zero net rate with large instantaneous velocity is a
+limit cycle, and you must report its frequency and amplitude rather than calling
+it drift. The two have different causes and different fixes.
+
+A result that clears a threshold on one seed and misses it on another has not
+met the criterion. Report the spread, not the best run.
 
 **Visible motion at rest is a failure.** The operator's standard is what the eye
 sees. Quantify it: amplitude, peak velocity and dominant frequency.

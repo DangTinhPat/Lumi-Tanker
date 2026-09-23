@@ -26,12 +26,13 @@ NATURAL_BODY_HEIGHT_M = 0.1484350374792
 # runner still rejects any target that cannot be reached from the live encoder
 # seed, and reports the rejection through telemetry.
 MIN_BODY_HEIGHT_M = 0.140
-MAX_BODY_HEIGHT_M = 0.245
 # The 0.200 m target is the best short native trial so far (not a long-duration
 # station-hold certification). The lower slider bound remains the FK/CAD
 # envelope for inspection; the native core still performs the live feasibility
 # and capture checks before starting the path.
 BEST_TESTED_BODY_HEIGHT_M = 0.200
+# The high endpoint is the native FK/CAD envelope, not a knee-stop command.
+MAX_BODY_HEIGHT_M = 0.245
 
 
 def _posture_to_height(position: float) -> float:
@@ -72,14 +73,13 @@ class NativeDashboard:
         self.enabled = False
         self.estop = False
         self.drive = (0.0, 0.0)
+        self._drive_button_active = False
         self.dance_active = False
         self.show_started_s = None
         self._posture_send_job = None
         self._posture_drag_active = False
         self._posture_last_sent_height = None
         self._posture_send_period_ms = 120
-        self._pending_height = None
-        self._pending_pose = None
         self._posture_quiet_since = None
         self._show_waiting = False
         self._status_window = None
@@ -97,10 +97,6 @@ class NativeDashboard:
         self._build()
         self._bind_keys()
         self.tick()
-        # The native dashboard is an operator panel, not a process manager.
-        # Start one fresh simulation automatically so the visible controls are
-        # limited to driving and posture selection.
-        self.root.after(100, self._auto_start)
 
     def _style(self):
         style = ttk.Style()
@@ -120,6 +116,8 @@ class NativeDashboard:
         header = ttk.Frame(outer)
         header.pack(fill="x")
         ttk.Label(header, text="TAP robot · native MuJoCo", font=("", 16, "bold")).pack(side="left")
+        self.sim_button = ttk.Button(header, text="Start SIM", command=self.toggle)
+        self.sim_button.pack(side="right", padx=(8, 0))
         self.mode = tk.Label(header, text=" offline ", bg="#333", fg=FG, padx=12, pady=4)
         self.mode.pack(side="right")
         toolbar = ttk.Frame(outer, style="Card.TFrame", padding=10)
@@ -139,11 +137,19 @@ class NativeDashboard:
         self.speed_readout = tk.StringVar(value="0.30 m/s")
         pad = ttk.Frame(drive, style="Card.TFrame")
         pad.pack(pady=4)
-        buttons = (("▲", 0, 1, 1, 0), ("◄", 1, 0, 0, 1), ("■", 1, 1, 0, 0),
+        buttons = (("▲", 0, 1, 1, 0), ("◄", 1, 0, 0, 1),
                    ("►", 1, 2, 0, -1), ("▼", 2, 1, -1, 0))
         for text, row, col, forward, yaw in buttons:
-            command = self.stop_drive if text == "■" else lambda f=forward, y=yaw: self.set_drive(f, y)
-            ttk.Button(pad, text=text, width=4, command=command).grid(row=row, column=col, padx=2, pady=2)
+            button = ttk.Button(pad, text=text, width=4)
+            button.grid(row=row, column=col, padx=2, pady=2)
+            button.bind(
+                "<ButtonPress-1>",
+                lambda _event, f=forward, y=yaw: self._drive_press(f, y),
+            )
+            button.bind("<ButtonRelease-1>", self._drive_release)
+        # Catch a release outside the button so a lost pointer-up cannot leave
+        # the simulated robot driving indefinitely.
+        self.root.bind("<ButtonRelease-1>", self._drive_release, add="+")
         speed_row = ttk.Frame(drive, style="Card.TFrame")
         speed_row.pack(fill="x", pady=(6, 0))
         ttk.Label(speed_row, textvariable=self.speed_readout,
@@ -153,6 +159,8 @@ class NativeDashboard:
                  command=self._speed_preview, bg=CARD, fg=FG,
                  troughcolor="#3a4050", highlightthickness=0, bd=0,
                  length=150).pack(fill="x")
+        ttk.Button(drive, text="Reset mô phỏng", command=self.reset).pack(
+            fill="x", pady=(4, 0))
 
         posture = ttk.LabelFrame(toolbar, text="Chiều cao thân", style="Card.TLabelframe", padding=10)
         posture.grid(row=0, column=1, sticky="nsew")
@@ -321,17 +329,6 @@ class NativeDashboard:
             self.root.bind(f"<KeyRelease-{key}>", lambda _: self.stop_drive())
         self.root.bind("<Escape>", lambda _: self.emergency_stop())
 
-    def _auto_start(self):
-        if self.backend.running:
-            return
-        try:
-            self.estop = False
-            self.backend.start()
-            self.enable()
-        except Exception as exc:
-            self.backend.log.append(f"ERROR|dashboard={exc}")
-            self.viewer_status.set(f"Không khởi động được native runner: {exc}")
-
     def toggle(self):
         try:
             if self.backend.running:
@@ -356,8 +353,6 @@ class NativeDashboard:
             self.viewer_status.set(f"Lỗi native runner: {exc}")
 
     def _cancel_pending_posture(self):
-        self._pending_height = None
-        self._pending_pose = None
         self._posture_quiet_since = None
         self._show_waiting = False
 
@@ -410,14 +405,31 @@ class NativeDashboard:
 
     def set_drive(self, forward: float, yaw: float):
         if self.enabled and not self.estop:
+            fields = self.backend.telemetry
+            drive_ready = (fields.get("mode") == "Balance" and
+                           fields.get("station_eligible") == "1" and
+                           fields.get("station_capture_ready") == "1")
+            if (forward != 0.0 or yaw != 0.0) and not drive_ready:
+                self.backend.log.append("DRIVE_BLOCKED|reason=station_not_ready")
+                return
             self._cancel_pending_posture()
             self.stop_skill()
-            self.drive = (forward * float(self.speed.get()), yaw * float(self.yaw.get()))
+        self.drive = (forward * float(self.speed.get()), yaw * float(self.yaw.get()))
+
+    def _drive_press(self, forward: float, yaw: float):
+        self._drive_button_active = True
+        self.set_drive(forward, yaw)
+
+    def _drive_release(self, _event=None):
+        if self._drive_button_active:
+            self._drive_button_active = False
+            self.stop_drive()
 
     def stop_drive(self):
+        self._drive_button_active = False
         self.stop_skill()
         self.drive = (0.0, 0.0)
-        self.backend.command_drive(0.0, 0.0)
+        self.backend.command_stop()
 
     def _posture_capture_ready(self):
         fields = self.backend.telemetry
@@ -465,24 +477,10 @@ class NativeDashboard:
         if not self.backend.running or not self.enabled or self.estop:
             return
         self.stop_skill()
-        self._pending_height = None
-        self._pending_pose = tuple(pose)
-        self._posture_quiet_since = None
-
-    def _service_pending_posture(self):
-        if self._pending_height is None and self._pending_pose is None:
-            return
-        if not self._posture_quiet_for_action():
-            return
-        if self._pending_height is not None:
-            value = self._pending_height
-            self._pending_height = None
-            self.backend.command_height(float(value))
-            self._posture_last_sent_height = value
-        elif self._pending_pose is not None:
-            pose = self._pending_pose
-            self._pending_pose = None
-            self.backend.command_pose(*pose)
+        # POSE is an operator override. Queueing it behind the station latch
+        # made the buttons appear dead during a height transition; the native
+        # planner now cancels/retargets the active posture smoothly.
+        self.backend.command_pose(*tuple(pose))
         self._posture_quiet_since = None
 
     def _posture_preview(self, value):
@@ -556,8 +554,6 @@ class NativeDashboard:
         # Send the latest target immediately.  The native core already owns
         # the adaptive capture/pending gate; duplicating that gate in Tk made
         # a button wait for station_hold after a previous pose had ended.
-        self._pending_pose = None
-        self._pending_height = None
         self.backend.command_height(value)
         self._posture_last_sent_height = value
         self._posture_quiet_since = None
@@ -620,13 +616,22 @@ class NativeDashboard:
     def tick(self):
         self.backend.drain()
         fields = self.backend.telemetry
+        if (self._posture_last_sent_height is not None and
+                (fields.get("height_rejected") == "1" or
+                 (fields.get("height_request") == "0" and
+                  fields.get("height_motion") == "0" and
+                  fields.get("height_settled") == "0"))):
+            # A rejected/interrupted transaction must be retryable with the
+            # same preset; otherwise the UI silently deduplicates the click.
+            self._posture_last_sent_height = None
         mode = fields.get("mode", "offline")
+        self.sim_button.configure(text="Stop SIM" if self.backend.running else "Start SIM")
         self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop") else WARN)
         self.viewer_status.set(
             "MuJoCo 3-D viewer connected" if self.backend.viewer_running
             else "MuJoCo 3-D viewer closed (control process may still be running)"
             if self.backend.running else
-            "MuJoCo 3-D viewer opens when Launch MuJoCo is pressed")
+            "Nhấn Start SIM để mở MuJoCo 3-D viewer")
         self.telemetry.set(
             f"t={fields.get('t', '--')} s   pitch={fields.get('pitch', '--')} rad   pitch_rate={fields.get('pitch_rate', '--')} rad/s\n"
             f"phase={fields.get('flight', '--')}   airborne={fields.get('airborne', '--')}   touchdown={fields.get('touchdown', '--')}   torque_valid={fields.get('torque_valid', '--')}\n"
@@ -639,7 +644,6 @@ class NativeDashboard:
             self._show_waiting = False
             self.show_started_s = time.monotonic()
             self._posture_quiet_since = None
-        self._service_pending_posture()
         if self.show_started_s is not None and self.backend.running and self.enabled and not self.estop:
             pose = self._show_pose(time.monotonic() - self.show_started_s)
             self.backend.command_pose(*pose)
@@ -656,7 +660,7 @@ class NativeDashboard:
 
 def parse_options(argv=None):
     parser = argparse.ArgumentParser(description="TAP native MuJoCo dashboard")
-    parser.add_argument("--rate", type=int, choices=(2000, 3000, 4000), default=2000)
+    parser.add_argument("--rate", type=int, choices=(2000, 3000, 4000), default=3000)
     return parser.parse_args(argv)
 
 

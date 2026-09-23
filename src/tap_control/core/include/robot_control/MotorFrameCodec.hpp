@@ -222,6 +222,13 @@ inline std::int16_t wheelRadPerSecToRawSpeed(float rad_s) {
   if (rpm < static_cast<float>(-kWheelRawSpeedLimit)) rpm = static_cast<float>(-kWheelRawSpeedLimit);
   return static_cast<std::int16_t>(rpm + (rpm >= 0.0F ? 0.5F : -0.5F));
 }
+inline std::uint16_t wheelRadToRawPosition(float rad) {
+  if (!std::isfinite(rad)) return 0;
+  constexpr float kTwoPi = 2.0F * 3.14159265358979323846F;
+  float wrapped = std::fmod(rad, kTwoPi);
+  if (wrapped < 0.0F) wrapped += kTwoPi;
+  return static_cast<std::uint16_t>(wrapped * 1024.0F / kTwoPi);
+}
 inline float wheelRawSpeedToRadPerSec(std::int16_t raw) {
   return static_cast<float>(raw) * 2.0F * 3.14159265358979323846F / 60.0F;
 }
@@ -288,6 +295,64 @@ struct DxlParsed {
   std::array<std::uint8_t, kDxlPresentLen> payload{};
   std::uint8_t payload_len = 0;
 };
+
+struct DxlWrite {
+  bool ok = false;
+  std::uint8_t id = 0;
+  std::uint8_t address = 0;
+  std::array<std::uint8_t, 8> data{};
+  std::uint8_t data_len = 0;
+};
+
+struct DxlRead {
+  bool ok = false;
+  std::uint8_t id = 0;
+  std::uint8_t address = 0;
+  std::uint8_t length = 0;
+};
+
+// Validates and decodes a host write packet. Keeping this in the shared codec
+// lets the simulator and a real transport reject the same malformed frames.
+inline DxlWrite parseDxlWrite(const DxlFrame& frame) {
+  DxlWrite out;
+  if (frame.len < 7 || frame.len > frame.bytes.size() ||
+      frame.bytes[0] != 0xFF || frame.bytes[1] != 0xFF ||
+      frame.bytes[4] != kDxlInsWrite ||
+      static_cast<std::size_t>(frame.bytes[3]) + 4U != frame.len) {
+    return out;
+  }
+  const std::uint8_t param_n = static_cast<std::uint8_t>(frame.bytes[3] - 2U);
+  if (param_n < 1 || param_n - 1U > out.data.size() ||
+      static_cast<std::size_t>(6U + param_n) != frame.len) return out;
+  const std::uint8_t expect = detail::dxlChecksum(
+      frame.bytes[2], frame.bytes[3], frame.bytes[4], frame.bytes.data() + 5,
+      param_n);
+  if (frame.bytes[frame.len - 1U] != expect) return out;
+  out.ok = true;
+  out.id = frame.bytes[2];
+  out.address = frame.bytes[5];
+  out.data_len = static_cast<std::uint8_t>(param_n - 1U);
+  for (std::uint8_t i = 0; i < out.data_len; ++i) out.data[i] = frame.bytes[6U + i];
+  return out;
+}
+
+inline DxlRead parseDxlRead(const DxlFrame& frame) {
+  DxlRead out;
+  if (frame.len != 8 || frame.bytes[0] != 0xFF || frame.bytes[1] != 0xFF ||
+      frame.bytes[4] != kDxlInsRead || frame.bytes[3] != 4) {
+    return out;
+  }
+  const std::uint8_t params[2] = {frame.bytes[5], frame.bytes[6]};
+  if (frame.bytes[7] != detail::dxlChecksum(
+          frame.bytes[2], frame.bytes[3], frame.bytes[4], params, 2)) {
+    return out;
+  }
+  out.ok = true;
+  out.id = frame.bytes[2];
+  out.address = frame.bytes[5];
+  out.length = frame.bytes[6];
+  return out;
+}
 
 // Parses a motor->host response, INCLUDING the firmware's quirk of echoing
 // [LEN, INS, ADDR] of the request before the real data (WHEEL §3). Handles

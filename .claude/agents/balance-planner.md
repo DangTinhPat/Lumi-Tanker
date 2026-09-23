@@ -39,6 +39,11 @@ that makes a symptom disappear leaves the defect in place for the next caller.
 Guards are acceptable as defence in depth *alongside* the real fix, never instead
 of it, and a guard must be observable so that it reports rather than absorbs.
 
+**Know which drift tier applies.** Balanced states - standing, driving, yaw in
+place, stopping - allow 3 cm. Transforming states, where the body changes height
+or posture, allow under 8 cm. Judging an action against the wrong tier either
+invents a defect or hides one.
+
 **Adaptive over tuned.** The goal is a robot that behaves correctly across poses,
 speeds and heights, not one tuned to pass a fixed list. When you propose a
 constant, say what physical quantity sets it and whether it should instead be

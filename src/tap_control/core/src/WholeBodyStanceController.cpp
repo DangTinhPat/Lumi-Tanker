@@ -88,7 +88,7 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
     const RobotState& state, const JointArray& base_target,
     const WholeBodyModel::Result& body, bool allow, float dt_s,
     bool allow_static_com, bool allow_vmc,
-    float velocity_error_m_s) noexcept {
+    float velocity_error_m_s, bool allow_speed_loop) noexcept {
   Output output{};
   output.target = base_target;
 
@@ -133,11 +133,24 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
        state.joints.velocity_rad_s[right_knee]);
   const float com_x_rate = com_jacobian.d_com_offset_x_d_hip * hip_rate +
       com_jacobian.d_com_offset_x_d_knee * knee_rate;
+  const float com_z_rate =
+      com_jacobian.d_com_above_axle_d_hip * hip_rate +
+      com_jacobian.d_com_above_axle_d_knee * knee_rate;
+  const float com_line_x = body.com_offset_x_m;
+  const float com_line_z = std::max(body.com_above_axle_m, 0.02F);
+  const float line_denominator = std::max(
+      com_line_x * com_line_x + com_line_z * com_line_z, 1.0e-6F);
+  // d/dt atan2(x, z) = (z*x_dot - x*z_dot)/(x²+z²).  This is the
+  // body-frame CoM-line state owned by the leg suspension; IMU body pitch is
+  // deliberately left to LQR and must not enter this VMC loop.
+  const float com_line_rate =
+      (com_line_z * com_x_rate - com_line_x * com_z_rate) /
+      line_denominator;
   const bool vmc_requested = config_.vmc_enabled && allow_vmc;
   const bool vmc_safety_ok =
-      std::abs(state.imu.pitch_rad) <=
+      std::abs(body.com_line_angle_rad) <=
           std::max(config_.vmc_max_pitch_rad, 0.0F) &&
-      std::abs(state.imu.pitch_rate_rad_s) <=
+      std::abs(com_line_rate) <=
           std::max(config_.vmc_max_pitch_rate_rad_s, 0.0F);
   if (vmc_requested && vmc_safety_ok) {
     vmc_safety_scale_ = 1.0F;
@@ -173,8 +186,8 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
     // The leg gimbal owns the small supported body-pitch band. The wheel LQR
     // remains the fast catch controller outside that band; this VMC path is
     // deliberately bounded and therefore cannot replace the wheel catch.
-    const float virtual_pitch = state.imu.pitch_rad;
-    const float virtual_pitch_rate = state.imu.pitch_rate_rad_s;
+    const float virtual_pitch = body.com_line_angle_rad;
+    const float virtual_pitch_rate = com_line_rate;
     // The leg/body gravity feed-forward is applied once at the actuator
     // boundary. Do not add the same live gravity moment to the impedance
     // torque: with stiffness_ratio ~= 1 it would double the pendulum's
@@ -219,7 +232,7 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
   const float gravity_ff = std::max(config_.gravity_m_s2, 0.1F);
   const float v_err = std::isfinite(velocity_error_m_s) ? velocity_error_m_s : 0.0F;
   const float tau = std::max(config_.speed_loop_tau_s, 0.0F);
-  const bool loop_on = tau > 0.0F;
+  const bool loop_on = allow_speed_loop && tau > 0.0F;
 
   // Inertial lead from the live pose - one pendulum time constant.
   const float mass_ff = std::max(geometry::total_mass_kg, 0.01F);
@@ -228,8 +241,17 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
       std::max(mass_ff * gravity_ff * com_height, 1.0e-6F);
   const float tau_j = std::sqrt(inertia_ff / gravity_stiffness_ff);
   output.speed_loop_lead_s = tau_j;
-  const float raw_rate = (v_err - previous_velocity_error_m_s_) / dt;
-  previous_velocity_error_m_s_ = v_err;
+  const float raw_rate = loop_on
+      ? (v_err - previous_velocity_error_m_s_) / dt : 0.0F;
+  if (!loop_on) {
+    // The leg speed loop is an optional actuator owner, not a hidden state
+    // owner that survives stop, yaw-only or height-only posture states.
+    previous_velocity_error_m_s_ = v_err;
+    velocity_error_rate_m_s2_ = 0.0F;
+    speed_loop_integral_m_ = 0.0F;
+  } else {
+    previous_velocity_error_m_s_ = v_err;
+  }
   const float rate_alpha = std::clamp(
       std::max(config_.speed_loop_filter_hz, 0.0F) * dt, 0.0F, 1.0F);
   velocity_error_rate_m_s2_ += rate_alpha *
@@ -264,15 +286,16 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
   } else {
     speed_loop_integral_m_ = 0.0F;
   }
-  const float com_target = release_scale *
-      (com_gain * led_error + speed_loop_integral_m_);
+  const float com_target = loop_on ? release_scale *
+      (com_gain * led_error + speed_loop_integral_m_) : 0.0F;
   output.speed_loop_com_m = com_target;
 
   Vec2 speed_task{};
   if (!loop_on ||
       !solveWeightedSymmetricTask(
           com_jacobian, leg, com_target, 1.0F, 0.0F,
-          config_.height_position_weight, config_.axle_position_weight,
+          config_.height_position_weight,
+          config_.axle_position_weight,
           config_.symmetric_task_damping, speed_task)) {
     speed_task = {};
   }
@@ -357,7 +380,8 @@ WholeBodyStanceController::Output WholeBodyStanceController::update(
   // A supported body pitch means the axle is displaced in the body frame.
   // Give that small geometric error to the legs; otherwise the only actuator
   // that can react to pitch is the wheel and the robot translates to balance.
-  // The natural axle coordinate is retained so this task is zero at neutral.
+  // The native pitch/leg convention maps this body-frame correction with the
+  // positive sign below; the closed-loop model contract tests this mapping.
   const float desired_axle_x = natural_leg.x_m + axle_height * std::sin(body_pitch);
   const float axle_pitch_error = std::clamp(
       desired_axle_x - leg.x_m,

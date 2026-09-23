@@ -47,6 +47,12 @@ def main() -> int:
     quiet = [state for state in states if float(state["t"]) >= 10.0]
     assert quiet
     assert max(abs(float(state["lqr_velocity"])) for state in quiet) < 0.11
+    # A settled zero-command hold must not inject a second position-derived
+    # velocity target into the LQR; that feedback loop was the source of the
+    # visible pitch limit cycle.
+    assert max(abs(float(state["station_velocity_target"])) for state in quiet) < 1.0e-5
+    assert max(abs(float(state["pitch"])) for state in quiet) < 0.03
+    assert max(abs(float(state["pitch_rate"])) for state in quiet) < 0.12
     quiet_positions = [float(state["wheel_position"]) for state in quiet]
     # Catch transients may use the full LQR authority; once settled, the
     # adaptive station loop must keep the sensor-derived position envelope

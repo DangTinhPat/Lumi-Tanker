@@ -151,6 +151,7 @@ class LqrBalancer {
   void reanchorPosition(float ground_position_m) noexcept;
   void movePositionAnchorToward(float ground_position_m, float alpha) noexcept;
   void clearForwardVelocityReference() noexcept;
+  void setStationVelocityReference(float velocity_m_s) noexcept;
   void setLandingVelocitySeed(float velocity_m_s) noexcept;
 
   [[nodiscard]] Output update(const RobotState& state,
@@ -163,6 +164,9 @@ class LqrBalancer {
   }
 
   void setComHeight(float com_height_m);
+  void setStationPositionMode(bool high_gain) noexcept {
+    station_position_high_gain_ = high_gain;
+  }
   void setPositionAnchorHold(bool enabled) noexcept {
     config_.position_anchor_hold = enabled;
   }
@@ -206,6 +210,7 @@ class LqrBalancer {
   float active_length_m_ = 0.24F;
   GainVec gain_{};
   GainVec station_gain_{};
+  GainVec posture_station_gain_{};
   float commanded_ground_velocity_m_s_ = 0.0F;
   float station_gain_quiet_elapsed_s_ = 0.0F;
   float station_gain_blend_ = 0.0F;
@@ -215,6 +220,7 @@ class LqrBalancer {
   float target_yaw_rate_rad_s_ = 0.0F;
   float command_accel_m_s2_ = 0.0F;
   bool station_velocity_decay_enabled_ = true;
+  bool station_position_high_gain_ = false;
   bool posture_motion_active_ = false;
   float ground_position_target_m_ = 0.0F;
   float station_origin_position_m_ = 0.0F;

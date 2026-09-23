@@ -17,7 +17,7 @@ class WholeBodyStanceController {
     // target, not as an instantaneous joint command.
     float com_position_gain = 0.20F;
     // Small task-space lead/damping term. It prevents the slow leg trim from
-    // continuing to push while station MPC is already returning the support
+    // continuing to push while station LQR is already returning the support
     // point; zero disables this optional term.
     float com_velocity_damping_s = 0.02F;
     float roll_position_gain = 0.25F;
@@ -27,7 +27,7 @@ class WholeBodyStanceController {
     // the wheels to translate during a posture transition.
     float height_position_weight = 1.0F;
     // Contact-point fore/aft preservation is a soft null-space preference.
-    // Station MPC owns translation; a large value here suppresses the COM
+    // Station LQR owns translation; a large value here suppresses the COM
     // task and recreates the old axle_x=constant lock.
     float axle_position_weight = 0.10F;
     float symmetric_task_damping = 1.0e-5F;
@@ -141,7 +141,8 @@ class WholeBodyStanceController {
                               float dt_s,
                               bool allow_static_com = true,
                               bool allow_vmc = true,
-                              float velocity_error_m_s = 0.0F) noexcept;
+                              float velocity_error_m_s = 0.0F,
+                              bool allow_speed_loop = false) noexcept;
 
   [[nodiscard]] const Output& lastOutput() const noexcept { return last_output_; }
   // The held trim is needed when a posture transaction snapshots an actuator

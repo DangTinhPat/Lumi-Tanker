@@ -162,17 +162,18 @@ class EmbeddedController {
     float pose_max_joint_velocity_rad_s = 0.0F;
     float pose_max_duration_s = 12.0F;
     float height_min_duration_s = 2.5F;
+    float height_reached_tolerance_m = 0.0005F;
     float height_max_rate_m_s = 0.018F;
     float height_lowering_rate_m_s = 0.018F;
     float height_max_duration_s = 16.0F;
     // Adaptive task pacing: when the sensor-derived capture distance grows
     // during a height change, spend the next samples recovering balance
     // instead of continuing to move the legs into a larger disturbance.
-    float height_capture_slowdown_min_scale = 0.12F;
+  float height_capture_slowdown_min_scale = 0.12F;
     // Pause an active height path when capture distance leaves the safe
-    // envelope; the same MPC station loop must recover before the legs move
-    // again. Zero disables this transaction guard for legacy callers.
-    float height_capture_pause_distance_m = 0.0F;
+  // envelope; the same MPC station loop must recover before the legs move
+  // again. Zero disables this transaction guard for legacy callers.
+  float height_capture_pause_distance_m = 0.0F;
     // Do not hold a paused partial pose forever. A stalled transaction is
     // rejected and retried from the current safe actuator target after the
     // station loop has recovered.
@@ -229,10 +230,9 @@ class EmbeddedController {
   [[nodiscard]] bool poseMotionActive() const noexcept {
     return joint_motion_.active();
   }
+  void requestStationaryStop(float ground_position_m,
+                             bool floor_contact = true) noexcept;
   [[nodiscard]] bool heightMotionActive() const noexcept {
-    // This is the public HEIGHT transaction state.  The station re-anchor
-    // cooldown is an internal handoff guard, not unfinished leg motion; if it
-    // leaked here the native IPC request could never retire.
     return height_motion_active_;
   }
   [[nodiscard]] bool heightMotionSettling() const noexcept {
@@ -255,6 +255,12 @@ class EmbeddedController {
   }
   [[nodiscard]] float heightMotionDurationS() const noexcept {
     return height_motion_duration_s_;
+  }
+  [[nodiscard]] float heightMotionStartM() const noexcept {
+    return height_motion_start_m_;
+  }
+  [[nodiscard]] float heightMotionTargetM() const noexcept {
+    return height_motion_target_m_;
   }
   [[nodiscard]] float fallPitchThresholdRad() const noexcept {
     return state_machine_.fallPitchRad();
@@ -280,12 +286,18 @@ class EmbeddedController {
   [[nodiscard]] bool stationEligible() const noexcept {
     return station_eligible_;
   }
+  [[nodiscard]] bool stationHoldActive() const noexcept {
+    return station_hold_active_;
+  }
   [[nodiscard]] const WholeBodyModel::Result& wholeBodyState() const noexcept {
     return last_whole_body_;
   }
   [[nodiscard]] const WholeBodyStanceController::Output& wholeBodyStanceState()
       const noexcept {
     return last_whole_body_stance_;
+  }
+  [[nodiscard]] const JointArray& wholeBodyStanceCorrection() const noexcept {
+    return whole_body_stance_.correction();
   }
   [[nodiscard]] float balancePitchRef() const noexcept {
     return balance_pitch_ref_rad_;
@@ -419,6 +431,7 @@ class EmbeddedController {
   float posture_settle_dwell_s_ = 0.0F;
   bool station_hold_active_ = false;
   float station_reanchor_cooldown_s_ = 0.0F;
+  float stationary_stop_hold_s_ = 0.0F;
   bool yaw_only_handoff_done_ = false;
   bool station_eligible_ = false;
   float station_capture_distance_m_ = 0.0F;

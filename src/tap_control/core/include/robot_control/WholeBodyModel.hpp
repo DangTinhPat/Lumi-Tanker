@@ -96,6 +96,19 @@ class WholeBodyModel {
       float knee_min_rad = geometry::native_knee_min_rad,
       float knee_max_rad = geometry::native_knee_max_rad) noexcept;
 
+  // Solve a symmetric height while moving the whole-body CoM to a requested
+  // fore/aft offset from the axle.  The height path uses a continuously
+  // interpolated COM target so the endpoint is CoM-neutral without a task
+  // discontinuity at the current loaded pose.
+  [[nodiscard]] static SymmetricPose solveSymmetricComHeight(
+      float body_height_m, float com_target_x_m = 0.0F,
+      float hip_seed_rad = geometry::neutral_hip_rad,
+      float knee_seed_rad = geometry::neutral_knee_rad,
+      float hip_min_rad = geometry::native_hip_min_rad,
+      float hip_max_rad = geometry::native_hip_max_rad,
+      float knee_min_rad = geometry::native_knee_min_rad,
+      float knee_max_rad = geometry::native_knee_max_rad) noexcept;
+
   // Solve a symmetric pose at a specified knee angle.  It is used to derive
   // the admissible height range from the same FK and to avoid GUI-side
   // geometry copies.

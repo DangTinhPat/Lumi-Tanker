@@ -153,7 +153,10 @@ int main() {
   WholeBodyStanceController guarded_vmc(vmc_config);
   const auto guarded_start = guarded_vmc.update(
       vmc_state, base, vmc_body, true, 0.002F);
-  vmc_state.imu.pitch_rate_rad_s = 2.0F;
+  // Trigger the independent CoM-line-rate safety gate. Body pitch rate alone
+  // must not release a VMC loop that no longer owns body pitch.
+  vmc_state.joints.velocity_rad_s[0] = 4.0F;
+  vmc_state.joints.velocity_rad_s[3] = 4.0F;
   auto guarded_end = guarded_start;
   for (int i = 0; i < 40; ++i) {
     guarded_end = guarded_vmc.update(
@@ -164,8 +167,9 @@ int main() {
             std::abs(guarded_end.vmc_pitch_torque_nm) < 1.0e-4F,
         "VMC safety latch ramps torque to zero");
 
-  // The leg VMC owns the small supported body-pitch band. A centered COM line
-  // therefore still produces a bounded body-pitch restoring torque.
+  // The leg VMC owns the body-frame CoM-line band. A centered CoM line must
+  // therefore stay quiet even when the IMU body pitch is non-zero; LQR owns
+  // that separate state through the wheels.
   WholeBodyModel::Result line_balanced = natural;
   line_balanced.com_above_axle_m = 0.200F;
   line_balanced.com_offset_x_m = 0.0F;
@@ -176,17 +180,19 @@ int main() {
   WholeBodyStanceController line_vmc(vmc_config);
   const auto line_output = line_vmc.update(
       line_state, base, line_balanced, true, 0.002F);
-  check(line_output.vmc_pitch_torque_nm < 0.0F,
-        "VMC opposes body pitch when the COM line is centered");
+  check(std::abs(line_output.vmc_pitch_torque_nm) < 1.0e-4F,
+        "VMC stays quiet when body pitch is non-zero but COM line is centered");
 
-  // The leg-side damper also opposes supported body-pitch rate.
+  // The leg-side damper responds to CoM-line rate, not body-pitch rate.
   RobotState rate_state = line_state;
   rate_state.imu.pitch_rate_rad_s = 0.40F;
+  rate_state.joints.velocity_rad_s[0] = 0.10F;
+  rate_state.joints.velocity_rad_s[3] = 0.10F;
   WholeBodyStanceController rate_vmc(vmc_config);
   const auto rate_output = rate_vmc.update(
       rate_state, base, line_balanced, true, 0.002F);
-  check(rate_output.vmc_pitch_torque_nm < line_output.vmc_pitch_torque_nm,
-        "VMC damps body-pitch rate when COM-line rate is zero");
+  check(rate_output.vmc_pitch_torque_nm < 0.0F,
+        "VMC damps COM-line rate independently of body-pitch rate");
 
   line_balanced.com_offset_x_m = -0.010F;
   line_balanced.com_line_angle_rad = std::atan2(
@@ -196,8 +202,31 @@ int main() {
   line_error_state.imu.pitch_rate_rad_s = 0.0F;
   const auto line_error_output = line_vmc.update(
       line_error_state, base, line_balanced, true, 0.002F);
-  check(std::abs(line_error_output.vmc_pitch_torque_nm) < 1.0e-4F,
-        "body-pitch VMC stays quiet when body pitch is centered");
+  check(line_error_output.vmc_pitch_torque_nm > 0.0F,
+        "VMC opposes COM-line error when body pitch is centered");
+
+  // The leg speed loop is an explicit Drive owner. A velocity error alone
+  // must not make a stationary height/station update move the legs.
+  WholeBodyStanceController::Config speed_config = config;
+  speed_config.speed_loop_tau_s = 0.50F;
+  speed_config.speed_loop_filter_hz = 100.0F;
+  speed_config.speed_loop_max_rate_rad_s = 10.0F;
+  WholeBodyStanceController speed_controller(speed_config);
+  const auto speed_disabled = speed_controller.update(
+      state, base, natural, true, 0.01F, true, false, 0.20F);
+  check(std::abs(speed_disabled.speed_loop_hip_rad) < 1.0e-7F &&
+            std::abs(speed_disabled.speed_loop_com_m) < 1.0e-7F,
+        "leg speed loop stays disabled without explicit Drive ownership");
+  const auto speed_enabled = speed_controller.update(
+      state, base, natural, true, 0.01F, true, false, 0.20F, true);
+  check(std::abs(speed_enabled.speed_loop_hip_rad) > 1.0e-6F &&
+            std::abs(speed_enabled.speed_loop_com_m) > 1.0e-6F,
+        "leg speed loop engages only when explicitly owned");
+  const auto speed_released = speed_controller.update(
+      state, base, natural, true, 0.01F, true, false, 0.20F, false);
+  check(std::abs(speed_released.speed_loop_hip_rad) <
+            std::abs(speed_enabled.speed_loop_hip_rad),
+        "leg speed correction releases smoothly after Drive ownership ends");
 
   // Regression for the original COM-loop identity: a measured equilibrium
   // pitch must not be fed back as the stance target. With a non-zero COM

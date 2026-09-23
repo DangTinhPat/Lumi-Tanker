@@ -1,10 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 
 #include "robot_control/MotorFrameCodec.hpp"
+#include "robot_control/MotorTransport.hpp"
 
 // Fake drivers standing in for the real GDS68 (leg) and BL4820M12 (wheel)
 // hardware in the native sim. Native runner code must talk to these the same
@@ -110,6 +114,7 @@ class SimBl4820Wheel {
     std::uint8_t motor_id = 1;
     float max_torque_nm = 0.13F;
     // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
+    // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
     // picked stiff enough to saturate at a small velocity error (~43 mrad/s)
     // so the servo behaves close to the old direct torque/acceleration path
     // for the small per-tick corrections MPC actually issues, rather than
@@ -133,12 +138,42 @@ class SimBl4820Wheel {
     torque_enabled_ = enable;
   }
 
+  bool onFrame(const motor_frame::DxlFrame& frame) {
+    const auto write = motor_frame::parseDxlWrite(frame);
+    if (!write.ok || write.id != cfg_.motor_id) return false;
+    if (write.address == motor_frame::kDxlTorqueEnableAddr &&
+        write.data_len == 1) {
+      onTorqueEnable(write.data[0] != 0);
+      return true;
+    }
+    if (write.address == motor_frame::kDxlMovingSpeedAddr &&
+        write.data_len == 2) {
+      const auto raw = static_cast<std::int16_t>(
+          static_cast<std::uint16_t>(write.data[0]) |
+          (static_cast<std::uint16_t>(write.data[1]) << 8));
+      return onMovingSpeedRaw(raw);
+    }
+    return false;
+  }
+
   // Returns false if the frame was dropped by the settle-window gate -
   // callers can use that to decide whether to retry.
   bool onMovingSpeed(float target_rad_s) {
     if (!torque_enabled_ || settle_remaining_s_ > 0.0F) return false;
     target_speed_rad_s_ = target_rad_s;
     return true;
+  }
+
+  bool onMovingSpeedRaw(std::int16_t raw) {
+    return onMovingSpeed(motor_frame::wheelRawSpeedToRadPerSec(raw));
+  }
+
+  motor_frame::DxlFrame buildPresentResponse(float position_rad,
+                                              float velocity_rad_s,
+                                              std::int16_t load_raw = 0) const {
+    return motor_frame::buildPresentResponse(
+        cfg_.motor_id, motor_frame::wheelRadToRawPosition(position_rad),
+        motor_frame::wheelRadPerSecToRawSpeed(velocity_rad_s), load_raw);
   }
 
   void step(float dt_s) {
@@ -164,6 +199,7 @@ class SimBl4820Wheel {
   bool torqueEnabled() const { return torque_enabled_; }
   float targetSpeedRadS() const { return target_speed_rad_s_; }
   bool settling() const { return settle_remaining_s_ > 0.0F; }
+  std::uint8_t motorId() const { return cfg_.motor_id; }
 
  private:
   float servoTorqueNm() const {
@@ -178,6 +214,127 @@ class SimBl4820Wheel {
   float target_speed_rad_s_ = 0.0F;
   float measured_vel_rad_s_ = 0.0F;
   float lagged_torque_nm_ = 0.0F;
+};
+
+// Frame-level simulator transport. NativeRunner uses the same send/receive
+// seam as a hardware backend; the only difference is that this transport
+// connects the decoded frames to MuJoCo's simulated driver state.
+class SimMotorTransport final : public motor_transport::Transport {
+ public:
+  static constexpr std::size_t kCanRxCapacity = 16;
+  static constexpr std::size_t kUartRxCapacity = 4;
+
+  SimMotorTransport()
+      : legs_{{SimGds68Joint({1, 3.0F}), SimGds68Joint({2, 3.0F}),
+               SimGds68Joint({3, 3.0F}), SimGds68Joint({4, 3.0F})}},
+        wheels_{{SimBl4820Wheel({1, 0.13F}), SimBl4820Wheel({1, 0.13F})}} {}
+
+  bool sendCan(std::uint16_t id,
+               const motor_frame::MitBytes& data) noexcept override {
+    const std::uint16_t node = id >> 5;
+    if (node < 1 || node > legs_.size()) return false;
+    legs_[node - 1].onFrame(id, data);
+    return true;
+  }
+
+  bool receiveCan(motor_transport::CanFrame& frame) noexcept override {
+    if (can_rx_count_ == 0) return false;
+    frame = can_rx_[can_rx_head_];
+    can_rx_head_ = (can_rx_head_ + 1U) % kCanRxCapacity;
+    --can_rx_count_;
+    return true;
+  }
+
+  bool sendUart(std::uint8_t bus,
+                const motor_frame::DxlFrame& frame) noexcept override {
+    if (bus >= wheels_.size()) return false;
+    const auto read = motor_frame::parseDxlRead(frame);
+    if (read.ok && read.id == wheels_[bus].motorId() &&
+        read.address == motor_frame::kDxlPresentAddr &&
+        read.length == motor_frame::kDxlPresentLen) {
+      return pushUart(bus, wheels_[bus].buildPresentResponse(
+          wheel_position_rad_[bus], wheel_velocity_rad_s_[bus]));
+    }
+    return wheels_[bus].onFrame(frame);
+  }
+
+  bool receiveUart(std::uint8_t bus,
+                   motor_frame::DxlFrame& frame) noexcept override {
+    if (bus >= wheels_.size() || uart_rx_count_[bus] == 0) return false;
+    frame = uart_rx_[bus][uart_rx_head_[bus]];
+    uart_rx_head_[bus] = (uart_rx_head_[bus] + 1U) % kUartRxCapacity;
+    --uart_rx_count_[bus];
+    return true;
+  }
+
+  bool isOpen() const noexcept override { return true; }
+  void close() noexcept override {}
+
+  void reset() {
+    for (std::size_t i = 0; i < legs_.size(); ++i) {
+      legs_[i] = SimGds68Joint({static_cast<std::uint8_t>(i + 1), 3.0F});
+    }
+    for (auto& wheel : wheels_) wheel = SimBl4820Wheel({1, 0.13F});
+    can_rx_head_ = 0;
+    can_rx_count_ = 0;
+    uart_rx_head_.fill(0);
+    uart_rx_count_.fill(0);
+    wheel_position_rad_.fill(0.0F);
+    wheel_velocity_rad_s_.fill(0.0F);
+  }
+
+  bool publishLegFeedback(std::size_t index, float position_rad,
+                          float velocity_rad_s, float torque_nm) noexcept {
+    if (index >= legs_.size()) return false;
+    motor_transport::CanFrame frame;
+    frame.id = motor_frame::canId(
+        static_cast<std::uint8_t>(index + 1U),
+        motor_frame::kMitControlCmdId);
+    frame.dlc = static_cast<std::uint8_t>(frame.data.size());
+    frame.data = legs_[index].buildFeedback(
+        position_rad, velocity_rad_s, torque_nm);
+    return pushCan(frame);
+  }
+
+  void setWheelMeasurement(std::size_t index, float position_rad,
+                           float velocity_rad_s) noexcept {
+    if (index >= wheels_.size()) return;
+    wheel_position_rad_[index] = position_rad;
+    wheel_velocity_rad_s_[index] = velocity_rad_s;
+  }
+
+  SimGds68Joint& leg(std::size_t index) { return legs_.at(index); }
+  SimBl4820Wheel& wheel(std::size_t index) { return wheels_.at(index); }
+  const SimBl4820Wheel& wheel(std::size_t index) const { return wheels_.at(index); }
+
+ private:
+  bool pushCan(const motor_transport::CanFrame& frame) noexcept {
+    if (can_rx_count_ >= kCanRxCapacity) return false;
+    const std::size_t tail = (can_rx_head_ + can_rx_count_) % kCanRxCapacity;
+    can_rx_[tail] = frame;
+    ++can_rx_count_;
+    return true;
+  }
+
+  bool pushUart(std::size_t bus, const motor_frame::DxlFrame& frame) noexcept {
+    if (bus >= wheels_.size() || uart_rx_count_[bus] >= kUartRxCapacity) return false;
+    const std::size_t tail =
+        (uart_rx_head_[bus] + uart_rx_count_[bus]) % kUartRxCapacity;
+    uart_rx_[bus][tail] = frame;
+    ++uart_rx_count_[bus];
+    return true;
+  }
+
+  std::array<SimGds68Joint, 4> legs_;
+  std::array<SimBl4820Wheel, 2> wheels_;
+  std::array<motor_transport::CanFrame, kCanRxCapacity> can_rx_{};
+  std::size_t can_rx_head_ = 0;
+  std::size_t can_rx_count_ = 0;
+  std::array<std::array<motor_frame::DxlFrame, kUartRxCapacity>, 2> uart_rx_{};
+  std::array<std::size_t, 2> uart_rx_head_{};
+  std::array<std::size_t, 2> uart_rx_count_{};
+  std::array<float, 2> wheel_position_rad_{};
+  std::array<float, 2> wheel_velocity_rad_s_{};
 };
 
 }  // namespace robot_control

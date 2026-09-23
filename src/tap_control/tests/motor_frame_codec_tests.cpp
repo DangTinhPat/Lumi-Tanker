@@ -100,6 +100,9 @@ int main() {
   check(std::abs(wheelRawPositionToRad(1023) - (2.0F * 3.14159265F * 1023.0F / 1024.0F)) < 1e-3F,
         "wheel position raw 1023 approaches 2*pi");
   check(std::abs(wheelRawPositionToRad(1024) - 0.0F) < 1e-6F, "wheel position wraps at 1024 (single-turn)");
+  check(wheelRadToRawPosition(0.0F) == 0, "wheel position 0 rad encodes as raw 0");
+  check(wheelRadToRawPosition(2.0F * 3.14159265358979323846F) == 0,
+        "wheel position wraps at one revolution when encoding");
 
   // --- Response parsing, including the quirk 3-byte echo (WHEEL §3).
   {
@@ -116,6 +119,15 @@ int main() {
     const DxlFrame ack = buildWriteAck(1, 3, kDxlMovingSpeedAddr);
     const auto parsed = parseDxlResponse(ack.bytes.data(), ack.len);
     check(parsed.ok && parsed.payload_len == 0, "write ack parses with zero real payload");
+  }
+  {
+    const auto write = parseDxlWrite(buildMovingSpeed(1, rpm200));
+    check(write.ok && write.id == 1 && write.address == kDxlMovingSpeedAddr &&
+              write.data_len == 2 && write.data[0] == 0xC8 && write.data[1] == 0x00,
+          "Moving Speed command parses back at the wire boundary");
+    DxlFrame corrupted = buildMovingSpeed(1, rpm200);
+    corrupted.bytes[corrupted.len - 1] ^= 0x01U;
+    check(!parseDxlWrite(corrupted).ok, "corrupted write checksum is rejected");
   }
   {
     // Corrupted checksum must be rejected, not silently accepted.

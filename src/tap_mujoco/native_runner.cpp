@@ -38,6 +38,7 @@ using robot_control::MotorCommand;
 using robot_control::RobotState;
 using robot_control::WholeBodyModel;
 namespace motor_frame = robot_control::motor_frame;
+namespace motor_transport = robot_control::motor_transport;
 
 constexpr std::array<int, 6> kJointQpos = {7, 8, 9, 10, 11, 12};
 constexpr std::array<int, 6> kJointQvel = {6, 7, 8, 9, 10, 11};
@@ -72,7 +73,10 @@ constexpr float kNativeDriveCommandLimitMps = 1.00F;
 // rather than the driver's fresh local one; it is a correction on top of the
 // diagonal, so the lag costs far less than leaving the coupling out.
 constexpr float kLegTaskStiffnessForeAftNPerM = 4618.0F;
-constexpr float kLegTaskStiffnessVerticalNPerM = 800.0F;
+// The wheel contact reaction is part of the supported leg load.  800 N/m
+// left a 4--5 mm model/contact residual with no restoring authority, so the
+// knee slowly collapsed even though the gravity term had the right sign.
+constexpr float kLegTaskStiffnessVerticalNPerM = 3000.0F;
 // Keep the dance inside the already tested posture envelope.  The runner
 // chooses only the next target; EmbeddedController owns each height path.
 // Keep differential-wheel demand below the plant's low-torque capture margin.
@@ -318,7 +322,8 @@ class NativeRunner {
       const float delta_angle = pitch_delta +
           (state_.joints.position_rad[hip] - odometry_previous_joints_[hip]) +
           (state_.joints.position_rad[knee] - odometry_previous_joints_[knee]) +
-          (state_.joints.position_rad[wheel] - odometry_previous_joints_[wheel]);
+          (state_.joints.position_rad[wheel] -
+           odometry_previous_joints_[wheel]);
       const float current_offset = axleForwardOffset(
           pitch, state_.joints.position_rad[hip],
           state_.joints.position_rad[knee]);
@@ -431,6 +436,11 @@ class NativeRunner {
     body_accel_compensation_valid_ = false;
     raw_accel_.fill(0.0F);
     feedback_.fill(0.0F);
+    leg_feedback_position_.fill(0.0F);
+    leg_feedback_velocity_.fill(0.0F);
+    wheel_feedback_position_previous_.fill(0.0F);
+    wheel_feedback_position_unwrapped_.fill(0.0F);
+    wheel_feedback_position_seeded_.fill(false);
     feedback_clock_.fill(0.0F);
     imu_bias_accel_.fill(0.0F);
     imu_bias_gyro_.fill(0.0F);
@@ -462,9 +472,7 @@ class NativeRunner {
     // above - a real re-power would too, and a stale CLOSED_LOOP/torque
     // target surviving a sim reset would be a false positive nothing else
     // catches.
-    for (std::size_t i = 0; i < leg_drivers_.size(); ++i)
-      leg_drivers_[i] = robot_control::SimGds68Joint({static_cast<std::uint8_t>(i + 1), 3.0F});
-    for (auto& drv : wheel_drivers_) drv = robot_control::SimBl4820Wheel({1, 0.13F});
+    motor_transport_.reset();
     dance_active_ = false;
     dance_started_s_ = sim_time_s_;
     dance_direction_ = 1.0F;
@@ -533,8 +541,8 @@ class NativeRunner {
     lqr.max_ground_accel_m_s2 = std::min(1.40F, wheel_torque_accel_m_s2);
     lqr.wheel_ground_mu = 0.8F;
     lqr.wheel_velocity_reference_from_measured = true;
-    lqr.target_velocity_slew_rate_m_s2 = 0.60F;
-    lqr.target_velocity_jerk_m_s3 = 4.0F;
+    lqr.target_velocity_slew_rate_m_s2 = 0.30F;
+    lqr.target_velocity_jerk_m_s3 = 1.0F;
     lqr.target_yaw_slew_rate_rad_s2 = 1.0F;
     lqr.yaw_rate_feedback_kp = 1.0F;
     lqr.fall_pitch_rad = 1.1F;
@@ -557,17 +565,17 @@ class NativeRunner {
     lqr.velocity_cost_scale = 300.0F;
     lqr.pitch_rate_cost_scale = 40.0F;
     lqr.input_cost_scale = 10.0F;
-    lqr.station_position_cost_scale = 100.0F;
+    lqr.station_position_cost_scale = 200.0F;
     lqr.station_pitch_cost_scale = 400.0F;
     lqr.station_velocity_cost_scale = 300.0F;
     lqr.station_pitch_rate_cost_scale = 40.0F;
     lqr.station_input_cost_scale = 10.0F;
-    lqr.station_gain_pitch_start_rad = 0.15F;
-    lqr.station_gain_pitch_quiet_rad = 0.02F;
-    lqr.station_gain_rate_start_rad_s = 0.80F;
-    lqr.station_gain_rate_quiet_rad_s = 0.08F;
-    lqr.station_gain_entry_dwell_s = 0.25F;
-    lqr.station_gain_transition_s = 0.30F;
+    lqr.station_gain_pitch_start_rad = 0.12F;
+    lqr.station_gain_pitch_quiet_rad = 0.05F;
+    lqr.station_gain_rate_start_rad_s = 0.60F;
+    lqr.station_gain_rate_quiet_rad_s = 0.20F;
+    lqr.station_gain_entry_dwell_s = 0.10F;
+    lqr.station_gain_transition_s = 0.20F;
     lqr.station_pitch_return_gain_rad_per_m_s = 0.0F;
     lqr.station_pitch_return_max_rad = 0.0F;
     lqr.riccati_iterations = 80U;
@@ -587,9 +595,14 @@ class NativeRunner {
     // current CAD plant profile keeps raw rate in the fast MPC until the
     // corrected-rate adoption trial clears all posture/stop envelopes.
     lqr.use_bias_corrected_pitch_rate = false;
-    lqr.station_hold_gain_hz = 15.0F;
+    // The station return is an outer position loop around the same LQR.  A
+    // 15 Hz return gain drove the bounded target straight into +/-0.10 m/s
+    // on encoder quantisation, then reversed it every few hundred ms.  Keep
+    // the return inside the measured wheel damping envelope so the body does
+    // not trade a few millimetres of odometry for visible pitch chatter.
+    lqr.station_hold_gain_hz = 5.0F;
     lqr.station_hold_yaw_return = true;
-    lqr.station_hold_max_v = 0.10F;
+    lqr.station_hold_max_v = 0.06F;
     lqr.station_posture_hold_max_v = 0.25F;
     // Keep the integrated station command inside the posture envelope. The
     // live capture schedule still decides when this ceiling is approached;
@@ -643,6 +656,10 @@ class NativeRunner {
     cfg.station_capture_filter_period_s = 0.08F;
     cfg.station_settle_dwell_s = 0.35F;
     cfg.posture_settle_dwell_s = 0.25F;
+    // A posture path starts only after the wheel capture transient has mostly
+    // decayed; otherwise the leg motion and the retained wheel velocity add
+    // instead of sharing the same stationary anchor.
+    cfg.posture_settle_wheel_velocity_m_s = 0.03F;
     cfg.height_pending_timeout_s = 2.0F;
     cfg.posture_reanchor_settle_s = 0.50F;
     // Riccati iterations are fixed and bounded; no online optimizer or
@@ -664,18 +681,24 @@ class NativeRunner {
     cfg.pose_change_duration_s = 2.5F;
     cfg.pose_max_joint_velocity_rad_s = 0.18F;
     cfg.pose_max_duration_s = 16.0F;
-    cfg.height_min_duration_s = 3.0F;
-    cfg.height_max_rate_m_s = 0.006F;
-    cfg.height_lowering_rate_m_s = 0.006F;
+    cfg.height_min_duration_s = 5.0F;
+    cfg.height_max_rate_m_s = 0.012F;
+    cfg.height_lowering_rate_m_s = 0.012F;
     cfg.height_max_duration_s = 16.0F;
     cfg.height_capture_slowdown_min_scale = 0.02F;
-    cfg.height_capture_pause_distance_m = 0.050F;
-    cfg.height_capture_abort_s = 0.75F;
+    // Allow the final extension near the straight-leg branch to finish while
+    // LQR is still inside its recoverable pitch envelope.  Pausing at 50 mm
+    // froze the path around 0.237 m and then rejected a valid 0.245 m target.
+    cfg.height_capture_pause_distance_m = 0.080F;
+    cfg.height_capture_abort_s = 8.00F;
+    // The fake driver has a steady-state load sag near the straight-leg and
+    // natural branches; settle within 25 mm after the quiet-rate dwell.
+    cfg.height_reached_tolerance_m = 0.025F;
     // LQR owns measured body pitch through the wheels. WBC/VMC owns only the
     // body-frame COM line through the leg Jacobian.
     cfg.whole_body_compensation = false;
     cfg.whole_body_pitch_gain = 1.0F;
-    cfg.height_whole_body_compensation = false;
+    cfg.height_whole_body_compensation = true;
     cfg.height_whole_body_pitch_gain = cfg.whole_body_pitch_gain;
     // The legs are the fast sagittal body suspension. Its dimensionless gains
     // are scheduled from the live COM height inside the stance controller;
@@ -684,9 +707,9 @@ class NativeRunner {
     cfg.whole_body_stance.vmc_enabled = true;
     // Leave gravity to the wheel MPC. VMC is damping-only until the two
     // loops have separate physical state variables and model contracts.
-    cfg.whole_body_stance.vmc_stiffness_ratio = 0.15F;
+    cfg.whole_body_stance.vmc_stiffness_ratio = 0.20F;
     // Keep the COM-line damper below the saturation-prone old profile.
-    cfg.whole_body_stance.vmc_damping_ratio = 0.35F;
+    cfg.whole_body_stance.vmc_damping_ratio = 0.70F;
     // Give the fast leg damper most of the provisional joint envelope.  The
     // inner position servo and gravity feed-forward still retain 20% headroom;
     // a 40% VMC cap was reached before the wheels could catch a real transient.
@@ -924,9 +947,62 @@ class NativeRunner {
       EncoderSample sample;
       sample.stamp_s = sim_time_s_;
       sample.ready_s = sim_time_s_ + 0.002;
+      motor_transport::CanFrame can_feedback;
+      while (motor_transport_.receiveCan(can_feedback)) {
+        const std::uint8_t node = static_cast<std::uint8_t>(can_feedback.id >> 5);
+        const std::uint8_t command = static_cast<std::uint8_t>(can_feedback.id & 0x1FU);
+        if (node < 1 || node > 4 || command != motor_frame::kMitControlCmdId ||
+            can_feedback.dlc != can_feedback.data.size()) {
+          continue;
+        }
+        const auto feedback = motor_frame::unpackMitFeedback(can_feedback.data);
+        if (feedback.node_id != node) continue;
+        const std::size_t leg = static_cast<std::size_t>(node - 1U);
+        leg_feedback_position_[leg] = feedback.pos_rad;
+        leg_feedback_velocity_[leg] = feedback.vel_rad_s;
+        feedback_[leg] = feedback.torque_nm;
+      }
       for (std::size_t i = 0; i < 6; ++i) {
-        const float p = sensorValue(pos_sensor_id_[i]);
-        const float v = sensorValue(vel_sensor_id_[i]);
+        float p = sensorValue(pos_sensor_id_[i]);
+        float v = sensorValue(vel_sensor_id_[i]);
+        if (i == 0 || i == 1 || i == 3 || i == 4) {
+          const std::size_t leg = i < 2 ? i : i - 1;
+          p = leg_feedback_position_[leg];
+          v = leg_feedback_velocity_[leg];
+        } else {
+          const std::size_t side = i == 2 ? 0 : 1;
+          motor_transport_.setWheelMeasurement(side, p, v);
+          motor_transport_.sendUart(
+              static_cast<std::uint8_t>(side),
+              motor_frame::buildReadPresent(
+                  motor_transport_.wheel(side).motorId()));
+          motor_frame::DxlFrame response;
+          if (!motor_transport_.receiveUart(
+                  static_cast<std::uint8_t>(side), response)) {
+            continue;
+          }
+          const auto parsed = motor_frame::parseDxlResponse(
+              response.bytes.data(), response.len);
+          const auto present = motor_frame::parsePresentPayload(parsed);
+          if (present.valid) {
+            const float wrapped = motor_frame::wheelRawPositionToRad(
+                present.position_raw);
+            if (!wheel_feedback_position_seeded_[side]) {
+              wheel_feedback_position_unwrapped_[side] = wrapped;
+              wheel_feedback_position_seeded_[side] = true;
+            } else {
+              constexpr float kPi = 3.14159265358979323846F;
+              constexpr float kTwoPi = 2.0F * kPi;
+              float delta = wrapped - wheel_feedback_position_previous_[side];
+              while (delta > kPi) delta -= kTwoPi;
+              while (delta < -kPi) delta += kTwoPi;
+              wheel_feedback_position_unwrapped_[side] += delta;
+            }
+            wheel_feedback_position_previous_[side] = wrapped;
+            p = wheel_feedback_position_unwrapped_[side];
+            v = motor_frame::wheelRawSpeedToRadPerSec(present.speed_raw);
+          }
+        }
         const float pq = (i == 2 || i == 5) ? 0.0061359F : 0.0003835F;
         sample.position[i] = quantize(p + normal(0.00035F), pq);
         sample.velocity[i] = quantize(v + normal(0.012F), 0.02F);
@@ -1111,7 +1187,14 @@ class NativeRunner {
         feedback_clock_[i] += dt;
         if (feedback_clock_[i] >= 0.002) {
           feedback_clock_[i] = std::fmod(feedback_clock_[i], 0.002);
-          feedback_[i] = std::clamp(leg_state_[i] + feedback_bias_[i] + normal(0.03F), -11.0F, 11.0F);
+          const int qpos = kJointQpos[i < 2 ? i : i + 1];
+          const int qvel = kJointQvel[i < 2 ? i : i + 1];
+          motor_transport_.publishLegFeedback(
+              i,
+              static_cast<float>(data_->qpos[qpos]),
+              static_cast<float>(data_->qvel[qvel]),
+              std::clamp(leg_state_[i] + feedback_bias_[i] + normal(0.03F),
+                         -11.0F, 11.0F));
         }
       }
     }
@@ -1122,7 +1205,7 @@ class NativeRunner {
     // any more, see docs/MOTOR_HAL_PLAN.md section 3 leak 1.
     for (std::size_t i = 0; i < 2; ++i) {
       const std::size_t j = i == 0 ? 2 : 5;
-      auto& drv = wheel_drivers_[i];
+      auto& drv = motor_transport_.wheel(i);
       drv.step(static_cast<float>(dt));
       const float velocity = static_cast<float>(data_->qvel[kJointQvel[j]]);
       const float torque = drv.computeTorqueNm(velocity);
@@ -1186,7 +1269,7 @@ class NativeRunner {
     // and section 4 ("SimGds68 phải mô phỏng những gì").
     for (std::size_t i = 0; i < 4; ++i) {
       const std::size_t j = i < 2 ? i : i + 1;
-      auto& drv = leg_drivers_[i];
+      auto& drv = motor_transport_.leg(i);
       if (enabled_) {
         // Set_Limits equivalent: a one-time bring-up value on real
         // hardware, not a per-tick channel in the MIT frame
@@ -1197,13 +1280,16 @@ class NativeRunner {
         // the hardware limit.
         drv.setTorqueLimitNm(std::max(motors.torque_nm[j], 0.1F));
         if (!was_enabled) {
-          drv.onFrame(motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                          motor_frame::kSetControllerModeCmdId),
-                      motor_frame::packSetControllerMode(motor_frame::kControlModePosition,
-                                                          motor_frame::kInputModeMit));
-          drv.onFrame(motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                          motor_frame::kSetAxisStateCmdId),
-                      motor_frame::packSetAxisState(motor_frame::kAxisStateClosedLoop));
+          motor_transport_.sendCan(
+              motor_frame::canId(static_cast<std::uint8_t>(i + 1),
+                                 motor_frame::kSetControllerModeCmdId),
+              motor_frame::packSetControllerMode(
+                  motor_frame::kControlModePosition,
+                  motor_frame::kInputModeMit));
+          motor_transport_.sendCan(
+              motor_frame::canId(static_cast<std::uint8_t>(i + 1),
+                                 motor_frame::kSetAxisStateCmdId),
+              motor_frame::packSetAxisState(motor_frame::kAxisStateClosedLoop));
         }
         // Live-pose stiffness matrix for this side. The diagonal rides the
         // MIT frame's Kp; the off-diagonal is the coupling the hardware
@@ -1224,15 +1310,18 @@ class NativeRunner {
             legKpNmPerRad(j, hip_q, knee_q, motors.kp_scale[j]),
             legKdNmPerRadS(j, hip_q, knee_q, motors.kd_scale[j]),
             motors.feedforward_nm[j] + cross_nm);
-        drv.onFrame(motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                        motor_frame::kMitControlCmdId), mit_bytes);
+        motor_transport_.sendCan(
+            motor_frame::canId(static_cast<std::uint8_t>(i + 1),
+                               motor_frame::kMitControlCmdId),
+            mit_bytes);
       } else {
         // disable = IDLE every tick, not silence: a driver with its own
         // watchdog does not guarantee it stops on silence alone (same
         // reasoning as the wheel Torque Disable path below).
-        drv.onFrame(motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                        motor_frame::kSetAxisStateCmdId),
-                    motor_frame::packSetAxisState(motor_frame::kAxisStateIdle));
+        motor_transport_.sendCan(
+            motor_frame::canId(static_cast<std::uint8_t>(i + 1),
+                               motor_frame::kSetAxisStateCmdId),
+            motor_frame::packSetAxisState(motor_frame::kAxisStateIdle));
       }
       leg_command_[i] = drv.computeTorqueNm(
           static_cast<float>(data_->qpos[kJointQpos[j]]),
@@ -1245,11 +1334,15 @@ class NativeRunner {
     // complete Moving Speed target with nothing else to add.
     for (std::size_t i = 0; i < 2; ++i) {
       const std::size_t j = i == 0 ? 2 : 5;
-      auto& drv = wheel_drivers_[i];
-      drv.onTorqueEnable(enabled_);
+      auto& drv = motor_transport_.wheel(i);
+      motor_transport_.sendUart(
+          static_cast<std::uint8_t>(i),
+          motor_frame::buildTorqueEnable(drv.motorId(), enabled_));
       if (enabled_) {
         const float target = std::clamp(motors.velocity_rad_s[j], -41.887902F, 41.887902F);
-        drv.onMovingSpeed(target);
+        motor_transport_.sendUart(
+            static_cast<std::uint8_t>(i),
+            motor_frame::buildMovingSpeed(drv.motorId(), target));
       }
     }
     last_command_s_ = sim_time_s_;
@@ -1435,6 +1528,11 @@ class NativeRunner {
       // an unobservable zero-pitch estimate from becoming a torque decision.
       command.request_enable = enable_request_ && imu_seeded_;
       command.request_disable = estop_ || disable_request_;
+      if (stationary_stop_request_) {
+        controller_.requestStationaryStop(
+            state_.wheel.position_m, state_.floor_contact);
+        stationary_stop_request_ = false;
+      }
       const MotorCommand motors = controller_.update(state_, command);
       // Wheel actuation authority travels ONLY through MotorCommand from
       // here on - see docs/MOTOR_HAL_PLAN.md section 3, leak 1. A real
@@ -1442,6 +1540,23 @@ class NativeRunner {
       // that reaches it is a Moving Speed target, so that is the only thing
       // applyMotorCommand may read for wheel intent.
       applyMotorCommand(motors);
+      const auto controllerBasePose = [&]() {
+        JointArray pose = controller_.lastOutput().position_rad;
+        const auto& correction = controller_.wholeBodyStanceCorrection();
+        for (const auto joint : {JointId::LeftHip, JointId::LeftKnee,
+                                 JointId::RightHip, JointId::RightKnee}) {
+          pose[static_cast<std::size_t>(joint)] -=
+              correction[static_cast<std::size_t>(joint)];
+        }
+        return pose;
+      };
+      // A fresh POSE overrides an in-flight HEIGHT transaction. Without
+      // clearing the level here, the old height request would restart as soon
+      // as the pose interpolation finished.
+      if (command_.request_pose_change && controller_.poseMotionActive()) {
+        command_.request_height_change = false;
+        height_request_started_ = false;
+      }
       // STAND_UP is an edge-triggered recovery request.  If it was sent while
       // the robot was already balancing, do not leave a stale level latched:
       // a later fall must require a fresh operator command.
@@ -1458,7 +1573,7 @@ class NativeRunner {
         // requested endpoint.  Preserve the controller's last safe actuator
         // pose when the adaptive transaction rejects that endpoint; otherwise
         // clearing HEIGHT on the next tick replays an unfinished pose jump.
-        command_.target_joint_position_rad = controller_.lastOutput().position_rad;
+        command_.target_joint_position_rad = controllerBasePose();
         // Make the rejected transaction retryable from the measured safe pose.
         // Keeping the requested endpoint here makes updateDanceCommand() see
         // no target change and strands the skill at a mid-height pose.
@@ -1474,12 +1589,17 @@ class NativeRunner {
       }
       if (command_.request_height_change && controller_.heightMotionActive()) {
         height_request_started_ = true;
-      } else if (command_.request_height_change && height_request_started_ &&
-                 !controller_.heightMotionActive()) {
+      } else if (command_.request_height_change &&
+                 controller_.heightMotionSettled() &&
+                 !controller_.heightMotionActive() &&
+                 (height_request_started_ ||
+                  (controller_.heightMotionSettled() &&
+                   std::abs(command_.target_body_height_m -
+                            controller_.heightMotionTargetM()) <= 1.0e-4F))) {
         // Latch the pose the core actually reached, so the posture hold that
         // follows the transaction is the robot's real pose rather than a
         // pre-solved endpoint it may never have arrived at.
-        command_.target_joint_position_rad = controller_.lastOutput().position_rad;
+        command_.target_joint_position_rad = controllerBasePose();
         command_.request_height_change = false;
         height_request_started_ = false;
       }
@@ -1555,10 +1675,36 @@ class NativeRunner {
       float forward = 0.0F;
       float yaw = 0.0F;
       stream >> forward >> yaw;
-      command_.target_forward_velocity_m_s = clampFinite(
+      forward = clampFinite(
           forward, -kNativeDriveCommandLimitMps,
           kNativeDriveCommandLimitMps);
-      command_.target_yaw_rate_rad_s = clampFinite(yaw, -0.8F, 0.8F);
+      yaw = clampFinite(yaw, -0.8F, 0.8F);
+      const bool motion_requested = std::abs(forward) > 1.0e-3F ||
+          std::abs(yaw) > 1.0e-3F;
+      const bool continuing_motion =
+          std::abs(command_.target_forward_velocity_m_s) > 1.0e-3F ||
+          std::abs(command_.target_yaw_rate_rad_s) > 1.0e-3F ||
+          command_.request_height_change;
+      const bool drive_ready =
+          continuing_motion ||
+          controller_.mode() == robot_control::ControlMode::Drive ||
+          controller_.mode() == robot_control::ControlMode::PoseChange ||
+          (controller_.mode() == robot_control::ControlMode::Balance &&
+           controller_.stationCaptureReady());
+      if (motion_requested && !drive_ready) {
+        command_.target_forward_velocity_m_s = 0.0F;
+        command_.target_yaw_rate_rad_s = 0.0F;
+        std::cout << "DRIVE_REJECTED|reason=station_not_ready" << std::endl;
+      } else {
+        command_.target_forward_velocity_m_s = forward;
+        command_.target_yaw_rate_rad_s = yaw;
+      }
+    }
+    else if (op == "STOP") {
+      stopDance();
+      command_.target_forward_velocity_m_s = 0.0F;
+      command_.target_yaw_rate_rad_s = 0.0F;
+      stationary_stop_request_ = true;
     }
     else if (op == "POSE") {
       stopDance();
@@ -1598,26 +1744,20 @@ class NativeRunner {
   bool setHeightTarget(float body_height_m) {
     if (!std::isfinite(body_height_m)) return false;
     // Command parsing can happen before the first delayed encoder packet. Use
-    // the documented natural ENABLE branch for validation; the core will
-    // re-solve from the measured seed when the height transaction starts.
+    // the documented natural ENABLE branch for validation; the core re-solves
+    // from the measured seed when the height transaction starts.
     const float hip_seed = robot_control::geometry::neutral_hip_rad;
     const float knee_seed = robot_control::geometry::neutral_knee_rad;
-    const auto pose = WholeBodyModel::solveSymmetricHeight(
-        body_height_m, hip_seed, knee_seed,
+    const auto pose = WholeBodyModel::solveSymmetricComHeight(
+        body_height_m, 0.0F, hip_seed, knee_seed,
         robot_control::geometry::native_hip_min_rad,
         robot_control::geometry::native_hip_max_rad,
         robot_control::geometry::native_knee_min_rad,
         robot_control::geometry::native_knee_max_rad);
     if (!pose.feasible) return false;
-    // The solve above is the feasibility gate and nothing more. Deliberately
-    // do NOT pre-load its endpoint into target_joint_position_rad: the core
-    // owns the leg target for the whole transaction, so writing the endpoint
-    // here leaves the command holding a pose the robot is not at and nobody
-    // is driving toward. That is harmless only while the transaction masks
-    // it, and becomes a step the instant any path stops masking - abort,
-    // timeout or rejection - which is how a stale endpoint turned into a
-    // ~0.6 rad knee jump mid-drive. The pose actually reached is latched at
-    // completion below instead.
+    // The solve above is only a feasibility gate. Do not preload its endpoint;
+    // the core owns the leg target for the whole transaction and latches the
+    // pose actually reached on completion.
     command_.target_body_height_m = body_height_m;
     command_.request_height_change = true;
     height_request_started_ = false;
@@ -1667,11 +1807,19 @@ class NativeRunner {
               << "|landing_drive_scale=" << controller_.landingDriveVelocityScale()
               << "|wheel_position=" << state_.wheel.position_m
               << "|wheel_velocity=" << state_.wheel.velocity_m_s
+              << "|joint_lh=" << state_.joints.position_rad[0]
+              << "|joint_lk=" << state_.joints.position_rad[1]
+              << "|joint_rh=" << state_.joints.position_rad[3]
+              << "|joint_rk=" << state_.joints.position_rad[4]
+              << "|joint_v_lh=" << state_.joints.velocity_rad_s[0]
+              << "|joint_v_lk=" << state_.joints.velocity_rad_s[1]
+              << "|joint_v_rh=" << state_.joints.velocity_rad_s[3]
+              << "|joint_v_rk=" << state_.joints.velocity_rad_s[4]
               << "|lqr_velocity=" << lqr.commanded_ground_velocity_m_s
               << "|lqr_velocity_reference=" << lqr.lqr_velocity_reference_m_s
               << "|station_velocity_target=" << lqr.station_velocity_target_m_s
               << "|lqr_anchor=" << lqr.target_ground_position_m
-              << "|station_hold=" << lqr.station_hold_active
+              << "|station_hold=" << controller_.stationHoldActive()
               << "|station_capture_distance=" << controller_.stationCaptureDistanceM()
               << "|station_capture_ready=" << controller_.stationCaptureReady()
               << "|station_dwell=" << controller_.stationDwellS()
@@ -1694,6 +1842,10 @@ class NativeRunner {
               << "|leg_ff_lk=" << output.feedforward_nm[1]
               << "|leg_ff_rh=" << output.feedforward_nm[3]
               << "|leg_ff_rk=" << output.feedforward_nm[4]
+              << "|target_lh=" << output.position_rad[0]
+              << "|target_lk=" << output.position_rad[1]
+              << "|target_rh=" << output.position_rad[3]
+              << "|target_rk=" << output.position_rad[4]
               << "|leg_cmd_lh=" << leg_command_[0]
               << "|leg_cmd_lk=" << leg_command_[1]
               << "|leg_cmd_rh=" << leg_command_[2]
@@ -1721,7 +1873,11 @@ class NativeRunner {
               << "|seen_ballistic=" << seen_ballistic_ << "|seen_touchdown=" << seen_touchdown_
               << "|height_request=" << command_.request_height_change
               << "|height_target=" << command_.target_body_height_m
+              << "|body_height=" << measuredBodyHeight()
+              << "|height_motion_start=" << controller_.heightMotionStartM()
+              << "|height_motion_target=" << controller_.heightMotionTargetM()
               << "|height_motion=" << controller_.heightMotionActive()
+              << "|height_settling=" << controller_.heightMotionSettling()
               << "|height_settled=" << controller_.heightMotionSettled()
               << "|height_pending=" << controller_.heightMotionPending()
               << "|height_pending_elapsed=" << controller_.heightPendingElapsedS()
@@ -1774,6 +1930,8 @@ class NativeRunner {
   std::array<float, 3> raw_gyro_{};
   std::array<float, 4> feedback_bias_{{0.08F, -0.04F, 0.03F, -0.06F}};
   std::array<float, 4> feedback_{};
+  std::array<float, 4> leg_feedback_position_{};
+  std::array<float, 4> leg_feedback_velocity_{};
   std::array<float, 4> feedback_clock_{};
   std::array<float, 4> leg_command_{};
   std::array<float, 4> applied_leg_torque_{};
@@ -1781,11 +1939,10 @@ class NativeRunner {
   // Fake drivers standing in for the real GDS68 (legs) / BL4820M12 (wheels)
   // bus hardware; see SimActuatorBus.hpp and docs/MOTOR_HAL_PLAN.md section 4.
   // Node ids/motor ids match the hardware map in that doc section 1.
-  std::array<robot_control::SimGds68Joint, 4> leg_drivers_{
-      robot_control::SimGds68Joint({1, 3.0F}), robot_control::SimGds68Joint({2, 3.0F}),
-      robot_control::SimGds68Joint({3, 3.0F}), robot_control::SimGds68Joint({4, 3.0F})};
-  std::array<robot_control::SimBl4820Wheel, 2> wheel_drivers_{
-      robot_control::SimBl4820Wheel({1, 0.13F}), robot_control::SimBl4820Wheel({1, 0.13F})};
+  robot_control::SimMotorTransport motor_transport_{};
+  std::array<float, 2> wheel_feedback_position_previous_{};
+  std::array<float, 2> wheel_feedback_position_unwrapped_{};
+  std::array<bool, 2> wheel_feedback_position_seeded_{};
   std::deque<ImuSample> imu_queue_;
   std::deque<EncoderSample> encoder_queue_;
   double sim_time_s_ = 0.0;
@@ -1824,6 +1981,7 @@ class NativeRunner {
   bool quit_ = false;
   bool stdin_closed_ = false;
   bool height_request_started_ = false;
+  bool stationary_stop_request_ = false;
   bool dance_active_ = false;
   double dance_started_s_ = 0.0;
   float dance_direction_ = 1.0F;

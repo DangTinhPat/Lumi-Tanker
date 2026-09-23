@@ -35,7 +35,7 @@ def main() -> int:
 
     process = subprocess.Popen(
         [str(args.runner), "--model", str(args.model), "--rate", "3000",
-         "--sensor-rate", "500", "--seed", "6814"],
+         "--sensor-rate", "500", "--seed", "6814", "--realtime"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1)
     assert process.stdin is not None and process.stdout is not None

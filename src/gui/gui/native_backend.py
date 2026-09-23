@@ -23,7 +23,7 @@ def workspace_root() -> Path:
 class NativeBackend:
     """Slow UI client; the native child owns the kHz control loop."""
 
-    def __init__(self, root: Optional[Path] = None, rate_hz: int = 2000):
+    def __init__(self, root: Optional[Path] = None, rate_hz: int = 3000):
         self.root = Path(root or workspace_root())
         self.rate_hz = int(rate_hz)
         self.process: Optional[subprocess.Popen[str]] = None
@@ -180,6 +180,9 @@ class NativeBackend:
     def command_drive(self, velocity: float, yaw_rate: float) -> None:
         if math.isfinite(velocity) and math.isfinite(yaw_rate):
             self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
+
+    def command_stop(self) -> None:
+        self.send("STOP")
 
     def command_pose(self, hip: float, knee: float,
                      right_hip: Optional[float] = None,

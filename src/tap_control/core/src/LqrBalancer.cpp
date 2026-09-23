@@ -190,6 +190,10 @@ void LqrBalancer::rebuildGain() {
       config_.station_position_cost_scale, config_.station_pitch_cost_scale,
       config_.station_velocity_cost_scale,
       config_.station_pitch_rate_cost_scale, config_.station_input_cost_scale);
+  posture_station_gain_ = solve_gain(
+      3.0F * config_.station_position_cost_scale,
+      config_.station_pitch_cost_scale, config_.station_velocity_cost_scale,
+      config_.station_pitch_rate_cost_scale, config_.station_input_cost_scale);
   last_debug_.riccati_iterations = iterations;
 }
 
@@ -241,6 +245,12 @@ void LqrBalancer::clearForwardVelocityReference() noexcept {
   target_forward_velocity_m_s_ = 0.0F;
 }
 
+void LqrBalancer::setStationVelocityReference(float velocity_m_s) noexcept {
+  if (std::isfinite(velocity_m_s)) {
+    station_velocity_reference_m_s_ = velocity_m_s;
+  }
+}
+
 void LqrBalancer::setLandingVelocitySeed(float velocity_m_s) noexcept {
   if (std::isfinite(velocity_m_s)) {
     landing_velocity_seed_m_s_ = velocity_m_s;
@@ -263,7 +273,12 @@ float LqrBalancer::stationReturnVelocity(const RobotState& state,
                                           float forward_target,
                                           float& capture_distance) const noexcept {
   capture_distance = 0.0F;
-  if (!hold_station) return forward_target;
+  // During a settled zero-command hold the Riccati position state is the
+  // station controller.  Feeding a second position-derived velocity target
+  // into that same LQR creates a limit cycle around encoder quantisation.
+  // Keep the bounded return target for posture capture, where leg motion can
+  // legitimately move the support point.
+  if (!hold_station || !posture_motion_active_) return forward_target;
   const float omega = std::sqrt(std::max(config_.gravity_m_s2, 0.1F) /
                                 std::max(active_length_m_, 0.02F));
   const float position_error = state.wheel.position_m - ground_position_target_m_;
@@ -303,8 +318,10 @@ float LqrBalancer::solveGroundAcceleration(
     const StateVec& state, float station_gain_blend) const noexcept {
   float sum = 0.0F;
   const float blend = std::clamp(station_gain_blend, 0.0F, 1.0F);
+  const GainVec& station_gain = station_position_high_gain_
+      ? posture_station_gain_ : station_gain_;
   for (int i = 0; i < kStateDim; ++i) {
-    const float gain = gain_[i] + blend * (station_gain_[i] - gain_[i]);
+    const float gain = gain_[i] + blend * (station_gain[i] - gain_[i]);
     sum += gain * state[i];
   }
   return -sum;
@@ -379,6 +396,7 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   float forward = clampFinite(command.target_forward_velocity_m_s,
                               -config_.max_ground_velocity_m_s,
                               config_.max_ground_velocity_m_s);
+  const float requested_forward = forward;
   if (config_.target_velocity_slew_rate_m_s2 > 0.0F) {
     const float slew = config_.target_velocity_slew_rate_m_s2;
     if (config_.target_velocity_jerk_m_s3 > 0.0F) {
@@ -389,7 +407,18 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       command_accel_m_s2_ = std::clamp(wanted,
                                        command_accel_m_s2_ - jerk_step,
                                        command_accel_m_s2_ + jerk_step);
-      forward = target_forward_velocity_m_s_ + command_accel_m_s2_ * dt;
+      const float next = target_forward_velocity_m_s_ +
+          command_accel_m_s2_ * dt;
+      // The acceleration state is only a slew limiter. Without this crossing
+      // guard it keeps integrating after the requested speed is reached, so a
+      // steady 0.3 m/s command becomes a repeating 0.26..0.34 m/s target.
+      if ((requested_forward - target_forward_velocity_m_s_) *
+              (requested_forward - next) <= 0.0F) {
+        forward = requested_forward;
+        command_accel_m_s2_ = 0.0F;
+      } else {
+        forward = next;
+      }
     } else {
       const float max_step = slew * dt;
       forward = std::clamp(forward, target_forward_velocity_m_s_ - max_step,
@@ -451,7 +480,8 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   const float station_reference = hold_station
       ? forward + station_gain_blend * (station_target - forward) : forward;
   if (hold_station && config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
-    const float max_step = config_.station_hold_command_slew_rate_m_s2 * dt;
+    float slew_rate = config_.station_hold_command_slew_rate_m_s2;
+    const float max_step = slew_rate * dt;
     station_velocity_reference_m_s_ = std::clamp(
         station_reference,
         station_velocity_reference_m_s_ - max_step,
@@ -518,7 +548,6 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   commanded_ground_velocity_m_s_ = clampFinite(commanded_ground_velocity_m_s_,
                                                -config_.max_ground_velocity_m_s,
                                                config_.max_ground_velocity_m_s);
-
   last_debug_ = DebugState{};
   last_debug_.commanded_ground_velocity_m_s = commanded_ground_velocity_m_s_;
   last_debug_.lqr_velocity_reference_m_s = velocity_target;

@@ -78,6 +78,9 @@ float EmbeddedController::updateBalancePitchRef(const RobotState& state,
                                                const ControlCommand& command) {
   constexpr auto lk = static_cast<std::size_t>(JointId::LeftKnee);
   constexpr auto rk = static_cast<std::size_t>(JointId::RightKnee);
+  const bool static_com_geometry_valid =
+      std::abs(state.joints.position_rad[lk]) +
+          std::abs(state.joints.position_rad[rk]) > 0.70F;
   // Keep the MPC's inverted-pendulum arm matched to the live CoM height, so a
   // squat (shorter, faster pendulum) does not slowly diverge. Inert at the
   // straight-leg stance.
@@ -108,7 +111,8 @@ float EmbeddedController::updateBalancePitchRef(const RobotState& state,
       config_.whole_body_stance.enabled && state.floor_contact &&
       usesBalance(state_machine_.mode()) && !height_motion_pending_ &&
       !height_motion_active_ &&
-      !joint_motion_.active() && !stand_up_recovery;
+      !joint_motion_.active() && !stand_up_recovery &&
+      static_com_geometry_valid;
   // Do not make the WBC wait for pitch to already be at the target: that
   // would make the MPC pitch reference the very thing preventing the leg task
   // from correcting it. Once a supported, zero-drive station owns the local
@@ -120,7 +124,8 @@ float EmbeddedController::updateBalancePitchRef(const RobotState& state,
       stationary_command &&
       !height_motion_active_ && !height_motion_pending_ &&
       !joint_motion_.active() &&
-      station_hold_active_ && station_capture_ready_;
+      station_hold_active_ && station_capture_ready_ &&
+      static_com_geometry_valid;
   // Rolling Drive keeps the geometric pitch reference until the rolling
   // contact allocator exists.  The leg COM position task is deliberately
   // stationary-only; the Drive path retains VMC damping authority without
@@ -136,6 +141,7 @@ float EmbeddedController::updateBalancePitchRef(const RobotState& state,
       config_.whole_body_stance_owns_static_com &&
       config_.whole_body_stance.enabled && state.floor_contact &&
       stationary_command &&
+      static_com_geometry_valid &&
       station_reanchor_cooldown_s_ > 0.0F && station_capture_ready_;
   if ((leg_body_pitch_owner || config_.whole_body_compensation ||
        height_compensation ||
@@ -238,18 +244,18 @@ LqrBalancer::Output EmbeddedController::runBalance(
       std::abs(command.target_yaw_rate_rad_s) < 1.0e-3F;
   // The leg path owns the controller until its C2 endpoint. After that edge,
   // the station re-anchor cooldown handles the short estimator/MPC handoff.
-  const bool endpoint_handoff_active =
-      height_motion_endpoint_reached_ && !height_motion_settled_;
   const bool posture_motion_active =
       height_motion_active_ || height_motion_pending_ ||
-      joint_motion_.active() || endpoint_handoff_active;
+      joint_motion_.active() ||
+      (height_motion_endpoint_reached_ && !height_motion_settled_);
   const bool yaw_only_command = !zero_drive_command &&
       std::abs(command.target_forward_velocity_m_s) < 1.0e-3F &&
       std::abs(command.target_yaw_rate_rad_s) >= 1.0e-3F;
   const bool posture_station_mode =
       state_machine_.mode() == ControlMode::Balance ||
       state_machine_.mode() == ControlMode::PoseChange ||
-      (state_machine_.mode() == ControlMode::Drive && yaw_only_command);
+      (state_machine_.mode() == ControlMode::Drive &&
+       (yaw_only_command || zero_drive_command));
   // A dance/turn may rotate while the legs change height.  It is still a
   // station task in translation: release the yaw differential, not the
   // captured wheel-position anchor, while the posture path is active.
@@ -282,8 +288,18 @@ LqrBalancer::Output EmbeddedController::runBalance(
     // through a long, unstable correction to the pre-motion origin. Preserve
     // the measured velocity; only the position reference changes.
     station_dwell_s_ = 0.0F;
-    if (!config_.lqr.position_anchor_hold) {
-      lqr_.reanchorPosition(state.wheel.position_m);
+    // This is a transaction handoff, not a normal hold update.  Even when
+    // position_anchor_hold is enabled for the LQR, retaining the pre-pose
+    // anchor here makes the next pose pull the wheels back through the drift
+    // accumulated while the legs moved.
+    lqr_.reanchorPosition(state.wheel.position_m);
+    // Re-seed the outer station reference from the new zero-drive operating
+    // point without discarding the LQR's measured catch state. A drive stop
+    // still clears the commanded velocity explicitly.
+    if (zero_drive_command) {
+      lqr_.setStationVelocityReference(0.0F);
+    } else {
+      lqr_.clearForwardVelocityReference();
     }
     height_motion_endpoint_anchor_m_ = state.wheel.position_m;
     station_hold_active_ = config_.lqr.hold_station_during_pose &&
@@ -386,27 +402,17 @@ LqrBalancer::Output EmbeddedController::runBalance(
     station_dwell_s_ = 0.0F;
     station_hold_active_ = false;
   } else if (!station_hold_active_) {
-    if (posture_station_requested) {
-      station_hold_active_ = true;
-      station_dwell_s_ = 0.0F;
-      // The posture path is already gated by the settled station capture.
-      // Do not reset MPC here: reset() erases the velocity reference and
-      // warm-started solution exactly at the pose handoff, which creates a
-      // discontinuous wheel impulse. Height-start re-anchoring is handled at
-      // the transaction edge, while completion re-anchors only after the
-      // supported endpoint has been reached.
-    }
     station_dwell_s_ = parked_quiet ? station_dwell_s_ + state.dt_s : 0.0F;
-    if (!posture_station_requested && station_dwell_s_ <
+    if (station_dwell_s_ <
         std::max(config_.station_settle_dwell_s, 0.0F)) {
       // Still qualifying the local stationary state.
-    } else if (!posture_station_requested) {
+    } else {
       station_hold_active_ = true;
-      // The MPC already follows the measured wheel position while station
-      // hold is disarmed.  Do not call reset() on this edge: reset erases the
-      // decelerating velocity reference and can turn the final part of a stop
-      // into a fresh pitch impulse.  The next update simply freezes the
-      // already-local anchor at this settled sample.
+      // Capture the settled support point without resetting the LQR velocity
+      // state. A startup/stop catch may have moved the wheels before station
+      // hold qualified; returning to the pre-catch anchor would turn that
+      // harmless capture into a repeatable drift during the next skill.
+      lqr_.reanchorPosition(state.wheel.position_m);
     }
   } else if (height_motion_endpoint_reached_) {
     // Keep the endpoint station dwell metric available for diagnostics; the
@@ -447,13 +453,31 @@ LqrBalancer::Output EmbeddedController::runBalance(
   // or direct IMU-following here turns a harmless posture request into a wheel
   // impulse and makes the result depend on the exact command timing.
   const float pitch_ref = updateBalancePitchRef(state, command);
+  const bool stationary_height_transaction = zero_drive_command &&
+      (posture_motion_active || height_motion_active_ ||
+       (height_motion_endpoint_reached_ && !height_motion_settled_));
+  // Keep the posture station gain through the short endpoint handoff.  The
+  // gain family itself must not switch on the same tick as the leg owner;
+  // cooldown then gives the tall stance time to settle before normal station
+  // gains resume.
+  lqr_.setStationPositionMode(stationary_height_transaction);
   // The height path is task-space motion of the legs, not a request to drive
   // the robot across the floor. Keep the local anchor enabled while the
   // operator changes height; the live geometric pitch reference handles the
   // changing CoM. Completion re-anchors at the supported endpoint, so the
   // next posture does not pull through the previous transaction's catch.
-  lqr_.setPositionAnchorHold(config_.lqr.position_anchor_hold);
-  if (height_motion_endpoint_reached_) {
+  if (station_reanchor_cooldown_s_ > 0.0F) {
+    // Let the wheel catch residual endpoint momentum without spending it
+    // against the pre-settle support point. Re-seed the anchor from the live
+    // encoder during this short handoff; the first fixed anchor was captured
+    // before the loaded leg pose finished moving.
+    lqr_.reanchorPosition(state.wheel.position_m);
+    height_motion_endpoint_anchor_m_ = state.wheel.position_m;
+  }
+  lqr_.setPositionAnchorHold(config_.lqr.position_anchor_hold &&
+                              !posture_motion_needs_station_reanchor_ &&
+                              station_reanchor_cooldown_s_ <= 0.0F);
+  if (height_motion_endpoint_reached_ && station_reanchor_cooldown_s_ <= 0.0F) {
     // The leg endpoint can move the wheel odometry origin by a few centimetres.
     // Move the station target at the live pendulum bandwidth instead of
     // re-anchoring in one tick; the latter injects a position step into MPC.
@@ -483,6 +507,19 @@ LqrBalancer::Output EmbeddedController::runBalance(
 
 void EmbeddedController::resetBalance(float ground_position_m, bool floor_contact) {
   lqr_.reset(ground_position_m, floor_contact);
+}
+
+void EmbeddedController::requestStationaryStop(float ground_position_m,
+                                               bool floor_contact) noexcept {
+  // Do not reset a moving inverted pendulum: that removes the catch state at
+  // the exact instant it is needed and turns a stop into a fall. Let LQR brake
+  // from its measured velocity; only a quiet robot may discard its old anchor.
+  if (floor_contact && std::abs(lqr_.debugState().commanded_ground_velocity_m_s) <
+          0.05F) {
+    lqr_.reanchorPosition(ground_position_m);
+    lqr_.clearForwardVelocityReference();
+  }
+  stationary_stop_hold_s_ = 1.0F;
 }
 
 void EmbeddedController::setBalanceFallPitch(float fall_pitch_rad) noexcept {
@@ -653,9 +690,8 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   // state-machine and MPC decisions below use this local sensor-derived copy.
   RobotState state = input_state;
   ControlCommand command = input;
-  // Compute the CAD-backed body model once for this fresh sensor sample.  The
-  // same result feeds the pitch reference, MPC pendulum length and stance trim;
-  // recomputing it in each consumer only repeated the same FK/trigonometry.
+  // Keep the balance/WBC model on the fresh encoder pose. The measured model
+  // is the only geometry the actuator feedback has actually reached.
   last_whole_body_ = whole_body_.compute(
       state.joints.position_rad[left_hip], state.joints.position_rad[left_knee],
       state.joints.position_rad[right_hip], state.joints.position_rad[right_knee]);
@@ -666,8 +702,42 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
     // faster actuator loop.
     state.dt_s = std::clamp(state.imu.sample_dt_s, 1.0e-4F, 0.05F);
   }
+  bool pose_retarget = false;
+  if (command.request_pose_change && joint_motion_.active()) {
+    for (std::size_t i = 0; i < kJointCount; ++i) {
+      if (std::abs(command.target_joint_position_rad[i] -
+                   joint_motion_.target()[i]) > 1.0e-4F) {
+        pose_retarget = true;
+        break;
+      }
+    }
+  }
+  const bool pose_interrupt = command.request_pose_change &&
+      (height_motion_active_ || height_motion_pending_ ||
+       height_motion_endpoint_reached_ || pose_retarget);
+  if (pose_interrupt) {
+    // POSE is the operator's explicit override. Retire the task-space height
+    // owner at its last emitted pose, then let the same rate-limited planner
+    // take over. This makes a new button press effective mid-transition.
+    height_motion_active_ = false;
+    height_motion_endpoint_reached_ = false;
+    height_motion_settled_ = false;
+    height_motion_pending_ = false;
+    height_pending_anchor_captured_ = false;
+    height_pending_elapsed_s_ = 0.0F;
+    height_capture_pause_elapsed_s_ = 0.0F;
+    height_motion_rejected_ = false;
+    height_rejected_target_valid_ = false;
+    if (joint_motion_.active()) joint_motion_.reset(state.joints.position_rad);
+    posture_motion_needs_station_reanchor_ = false;
+    lqr_.reanchorPosition(state.wheel.position_m);
+    lqr_.clearForwardVelocityReference();
+    command.request_height_change = false;
+  }
   station_reanchor_cooldown_s_ = std::max(
       0.0F, station_reanchor_cooldown_s_ - std::max(state.dt_s, 0.0F));
+  stationary_stop_hold_s_ = std::max(
+      0.0F, stationary_stop_hold_s_ - std::max(state.dt_s, 0.0F));
   const bool posture_was_active =
       height_motion_active_ || joint_motion_.active() ||
       (height_motion_endpoint_reached_ && !height_motion_settled_);
@@ -679,6 +749,9 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   const float settle_pitch_error = std::abs(
       state.imu.pitch_rad - balance_pitch_ref_rad_);
   const float settle_pitch_rate = std::abs(state.imu.pitch_rate_rad_s);
+  const bool height_endpoint_settling =
+      height_motion_endpoint_reached_ && !height_motion_settled_ &&
+      !height_motion_active_;
   const bool yaw_only_posture_command =
       std::abs(command.target_forward_velocity_m_s) < 1.0e-3F &&
       std::abs(command.target_yaw_rate_rad_s) >= 1.0e-3F;
@@ -690,7 +763,8 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       (state_machine_.mode() == ControlMode::Drive &&
        yaw_only_posture_command);
   const bool posture_sensor_quiet =
-      !posture_was_active && !posture_motion_needs_station_reanchor_ &&
+      (!posture_was_active || height_endpoint_settling) &&
+      !posture_motion_needs_station_reanchor_ &&
       height_station_mode && state.floor_contact &&
       settle_pitch_rate <=
           std::max(config_.posture_settle_pitch_rate_rad_s, 0.0F) &&
@@ -699,9 +773,9 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
           std::max(config_.posture_settle_wheel_velocity_m_s, 0.0F) &&
       settle_pitch_rate <=
           std::max(config_.posture_settle_pitch_rate_rad_s, 0.0F);
-  if (posture_sensor_quiet) {
+  if (posture_sensor_quiet && !height_endpoint_settling) {
     posture_settle_dwell_s_ += settle_dt;
-  } else {
+  } else if (!height_endpoint_settling) {
     posture_settle_dwell_s_ = 0.0F;
   }
   // The GUI normally queues posture commands until this capture state is
@@ -723,7 +797,8 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       !posture_was_active &&
       height_station_mode && state.floor_contact &&
       settle_pitch_rate < 0.35F &&
-      std::abs(state.wheel.velocity_m_s) < 0.12F;
+      std::abs(state.wheel.velocity_m_s) <=
+          std::max(config_.posture_settle_wheel_velocity_m_s, 0.0F);
   const bool height_posture_sensor_quiet =
       (posture_quiet_bands && (!sequence_tracked || state.floor_contact)) ||
       (sequence_tracked && adaptive_capture_sensor_quiet);
@@ -744,13 +819,10 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
     // A new HEIGHT arriving on the completion edge may reuse the already
     // captured station state. The adaptive capture metric is stronger
     // evidence than waiting through another fixed re-anchor/dwell window.
-    const bool adaptive_capture_ready = station_eligible_ &&
-        height_posture_sensor_quiet && station_capture_ready_;
-    return adaptive_capture_ready ||
-        (height_posture_sensor_quiet &&
-         (!yaw_only_posture_command || station_capture_ready_) &&
-         posture_settle_dwell_s_ >=
-             std::max(config_.posture_settle_dwell_s, 0.0F));
+    return station_hold_active_ && height_posture_sensor_quiet &&
+        (!yaw_only_posture_command || station_capture_ready_) &&
+        posture_settle_dwell_s_ >=
+            std::max(config_.posture_settle_dwell_s, 0.0F);
   };
   if (!input.request_height_change) {
     height_motion_rejected_ = false;
@@ -817,8 +889,13 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       const auto planned = WholeBodyModel::legHeight(seed_hip, seed_knee);
       current_height = geometry::wheel_radius_m - planned.height_m;
     }
+    // Solve each named height on the canonical CAD branch, not from the
+    // previous endpoint.  Seeding natural from deep squat otherwise keeps
+    // Newton on the nearby deep solution and reports a natural target while
+    // leaving the knees visually deep.
     const auto target = WholeBodyModel::solveSymmetricHeight(
-        input.target_body_height_m, seed_hip, seed_knee,
+        input.target_body_height_m, geometry::neutral_hip_rad,
+        geometry::neutral_knee_rad,
         config_.hip_min_rad, config_.hip_max_rad,
         config_.knee_min_rad, config_.knee_max_rad);
     const float pending_timeout = std::max(config_.height_pending_timeout_s, 0.0F);
@@ -830,19 +907,50 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
         height_station_mode &&
         (!sequence_tracked || state.floor_contact) &&
         std::abs(state.imu.pitch_rate_rad_s) < 0.65F &&
-        std::abs(state.wheel.velocity_m_s) < 0.12F &&
+        std::abs(state.wheel.velocity_m_s) <=
+            std::max(config_.posture_settle_wheel_velocity_m_s, 0.0F) &&
         station_capture_ready_;
     const bool fallback_start_ready = pending_timeout_reached &&
         fallback_sensor_safe;
+    const bool height_start_gate = active_height_retarget ||
+        settled_height_retarget || regular_start_ready || fallback_start_ready;
+    const bool height_already_satisfied = !height_motion_active_ &&
+        std::abs(input.target_body_height_m - current_height) <=
+            // Endpoint load sag may be several millimetres in the fake
+            // driver, but that must not turn a real deep-squat request into a
+            // no-op. Keep the request-side deadband tight and reserve the
+            // larger configured tolerance for endpoint settling.
+            std::min(std::max(config_.height_reached_tolerance_m, 0.0F),
+                     0.0025F);
     if (target.feasible && std::isfinite(current_height) &&
-        (active_height_retarget || regular_start_ready || fallback_start_ready)) {
+        height_start_gate && height_already_satisfied) {
+      height_motion_active_ = false;
+      height_motion_pending_ = false;
+      height_motion_endpoint_reached_ = false;
+      height_motion_settled_ = true;
+      height_motion_rejected_ = false;
+      height_motion_target_m_ = input.target_body_height_m;
+      height_motion_start_m_ = current_height;
+      height_motion_elapsed_s_ = 0.0F;
+      height_motion_duration_s_ = 0.0F;
+      height_pending_anchor_captured_ = false;
+      height_pending_elapsed_s_ = 0.0F;
+    } else if (target.feasible && std::isfinite(current_height) &&
+               height_start_gate) {
       // A new height transaction starts from the current encoder odometry
       // origin. Reusing the previous transaction's anchor turns a harmless
       // posture request into a command to pull the robot back across the
       // floor before the legs have even moved.
-      if ((!height_motion_active_ || settled_height_retarget) &&
-          !config_.lqr.position_anchor_hold) {
+      if (!height_motion_active_ || settled_height_retarget) {
+        // A posture transaction owns a new local support point.  Reusing the
+        // previous station anchor would pull the wheels back through the
+        // displacement accumulated while the capture transient was settling.
         lqr_.reanchorPosition(state.wheel.position_m);
+        // The previous station/drive catch is no longer a valid feed-forward
+        // reference for this new geometry.  Seed the station reference from
+        // the measured wheel velocity so the handoff has no velocity step.
+        lqr_.clearForwardVelocityReference();
+        lqr_.setStationVelocityReference(state.wheel.velocity_m_s);
       }
       height_motion_active_ = true;
       height_motion_endpoint_reached_ = false;
@@ -883,11 +991,9 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
 
       // Precompute a C2 joint path once.  Start from the last actuator target
       // when it is valid, rather than replacing the gravity-supporting target
-      // with a sagged encoder sample.  A target equal to the sagged sample
-      // removes the PD preload at the exact height-command edge and lets the
-      // leg collapse before the squat path has moved.  The live encoders still
-      // seed the inverse-FK target and feasibility check above; this only
-      // preserves the active actuator hold through the transition edge.
+      // with a sagged encoder sample.  The live encoders still seed the
+      // inverse-FK feasibility check; this preserves the loaded actuator
+      // preload through the ownership handoff.
       height_path_[0] = state.joints.position_rad;
       if (last_output_.enable_motors) {
         bool command_seed_valid = true;
@@ -902,11 +1008,11 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
           }
         }
       }
-      const auto path_start_leg = WholeBodyModel::legHeight(
-          height_path_[0][left_hip], height_path_[0][left_knee]);
-      const float path_start_height = std::isfinite(path_start_leg.height_m)
-          ? geometry::wheel_radius_m - path_start_leg.height_m
-          : current_height;
+      // The actuator target may be above/below the loaded encoder pose.  The
+      // task trajectory must start at the measured body height; using the
+      // stale target height here makes a nearly-complete request replay a
+      // second squat and injects an avoidable support impulse.
+      const float path_start_height = current_height;
       // The actuator path is seeded from the last command, while the encoder
       // can still lag that command during a loaded transition.  Recompute the
       // transaction duration from the same emitted pose; otherwise the
@@ -929,6 +1035,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
               height_motion_duration_s_, config_.height_max_duration_s);
         }
       }
+      const auto& held_correction = whole_body_stance_.correction();
       float solve_hip = height_path_[0][left_hip];
       float solve_knee = height_path_[0][left_knee];
       for (std::size_t i = 1; i < kHeightPathSamples; ++i) {
@@ -943,9 +1050,9 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
         const float sample_height = path_start_height + blend *
             (height_motion_target_m_ - path_start_height);
         const auto sample = WholeBodyModel::solveSymmetricHeight(
-            sample_height, solve_hip, solve_knee,
-            config_.hip_min_rad, config_.hip_max_rad,
-            config_.knee_min_rad, config_.knee_max_rad);
+            sample_height, solve_hip, solve_knee, config_.hip_min_rad,
+            config_.hip_max_rad, config_.knee_min_rad,
+            config_.knee_max_rad);
         if (sample.feasible) {
           solve_hip = sample.hip_rad;
           solve_knee = sample.knee_rad;
@@ -962,10 +1069,22 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
           solve_hip = target.hip_rad;
           solve_knee = target.knee_rad;
         }
-        height_path_[i][left_hip] = solve_hip;
-        height_path_[i][left_knee] = solve_knee;
-        height_path_[i][right_hip] = solve_hip;
-        height_path_[i][right_knee] = solve_knee;
+        // The first emitted sample must be exactly the actuator-held pose.
+        // The task solve is symmetric, while the measured/held pose can have
+        // a small left-right and COM bias; assigning it directly at i=1
+        // creates a hidden joint step before the quintic path has moved.
+        height_path_[i][left_hip] = height_path_[0][left_hip] + blend *
+            (solve_hip - held_correction[left_hip] -
+             height_path_[0][left_hip]);
+        height_path_[i][left_knee] = height_path_[0][left_knee] + blend *
+            (solve_knee - held_correction[left_knee] -
+             height_path_[0][left_knee]);
+        height_path_[i][right_hip] = height_path_[0][right_hip] + blend *
+            (solve_hip - held_correction[right_hip] -
+             height_path_[0][right_hip]);
+        height_path_[i][right_knee] = height_path_[0][right_knee] + blend *
+            (solve_knee - held_correction[right_knee] -
+             height_path_[0][right_knee]);
         height_path_[i][left_wheel] = 0.0F;
         height_path_[i][right_wheel] = 0.0F;
       }
@@ -991,9 +1110,8 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       }
       if (height_target_changed) {
         height_pending_pose_ = last_output_.enable_motors
-            ? last_output_.position_rad
-            : state.joints.position_rad;
-          const auto& held_correction = whole_body_stance_.correction();
+            ? last_output_.position_rad : state.joints.position_rad;
+        const auto& held_correction = whole_body_stance_.correction();
         for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
           height_pending_pose_[joint] -= held_correction[joint];
         }
@@ -1071,17 +1189,29 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
         motion_dt *= std::clamp(conditioning * conditioning, 0.25F, 1.0F);
       }
     }
-    // During a live height path, wheel travel is a valid capture action and
-    // must not itself pause the leg trajectory.  The station metric includes
-    // anchor error for the post-endpoint return task; use only physical pitch
-    // capture energy while the path owns the posture.
-    const float height_capture_distance = std::isfinite(
-        posture_capture_distance_m_) ? posture_capture_distance_m_
-                                      : station_capture_distance_m_;
+    // A height path may let the wheels catch pitch, but it must stop adding
+    // leg motion once the support point itself has left the drift envelope.
+    // Use the larger physical-capture/anchor metric so a quiet pitch signal
+    // cannot hide a 2 cm translation from this supervisor.
+    const float physical_capture_distance = std::isfinite(
+        posture_capture_distance_m_) ? posture_capture_distance_m_ : 0.0F;
+    const float height_capture_distance = std::max(
+        physical_capture_distance, station_capture_distance_m_);
     const float capture_pause_distance = std::max(
         config_.height_capture_pause_distance_m, 0.0F);
-    const bool capture_paused = capture_pause_distance >= capture_margin &&
+    const bool capture_paused = capture_pause_distance > 0.0F &&
         height_capture_distance >= capture_pause_distance;
+    const auto left_live_leg = WholeBodyModel::legHeight(
+        state.joints.position_rad[left_hip],
+        state.joints.position_rad[left_knee]);
+    const auto right_live_leg = WholeBodyModel::legHeight(
+        state.joints.position_rad[right_hip],
+        state.joints.position_rad[right_knee]);
+    const float measured_live_height = geometry::wheel_radius_m - 0.5F *
+        (left_live_leg.height_m + right_live_leg.height_m);
+    const bool near_height_endpoint = std::isfinite(measured_live_height) &&
+        std::abs(measured_live_height - height_motion_target_m_) <=
+            std::max(config_.height_reached_tolerance_m, 0.0025F);
     if (capture_paused) {
       // Hold the current C2 pose. The wheel MPC is the only recovery owner;
       // resuming the leg path while the anchor error is growing merely feeds
@@ -1089,27 +1219,62 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       // The abort timeout is wall-clock sensor time, not task progress.  The
       // latter is deliberately slowed by conditioning/capture scheduling and
       // would let a stalled transaction live indefinitely.
-      height_capture_pause_elapsed_s_ += std::max(state.dt_s, 0.0F);
-      const float abort_after = std::max(config_.height_capture_abort_s, 0.0F);
-      if (abort_after > 0.0F &&
-          height_capture_pause_elapsed_s_ >= abort_after) {
+      if (near_height_endpoint) {
+        // The measured FK height is already inside the endpoint tolerance.
+        // Finish the transaction and let the endpoint dwell wait for capture;
+        // rejecting here made max -> natural/deep look like a failed button
+        // press even though the legs had reached the requested pose.
+        capture_aborted = true;
+        height_motion_active_ = false;
+        height_motion_endpoint_reached_ = true;
+        height_motion_settled_ = false;
+        height_motion_pending_ = false;
+        height_pending_pose_ = last_output_.enable_motors
+            ? last_output_.position_rad : state.joints.position_rad;
+        const auto& held = whole_body_stance_.correction();
+        for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
+          height_pending_pose_[joint] -= held[joint];
+        }
+        height_motion_endpoint_anchor_m_ = state.wheel.position_m;
+        station_dwell_s_ = 0.0F;
+        station_capture_filter_initialized_ = false;
+        height_capture_pause_elapsed_s_ = 0.0F;
+      } else {
+        height_capture_pause_elapsed_s_ += std::max(state.dt_s, 0.0F);
+        const float abort_after = std::max(config_.height_capture_abort_s, 0.0F);
+        if (abort_after > 0.0F &&
+            height_capture_pause_elapsed_s_ >= abort_after) {
         // A paused path that never recaptures is no longer a smooth
         // transition; it is a stale posture owner. Retire it at the last
         // actuator target and let the caller retry from that safe pose.
-        capture_aborted = true;
-        height_motion_active_ = false;
-        height_motion_endpoint_reached_ = false;
-        height_motion_settled_ = false;
-        height_capture_recovery_active_ = true;
-        height_motion_pending_ = false;
-        height_pending_anchor_captured_ = false;
-        height_pending_elapsed_s_ = 0.0F;
-        height_motion_rejected_ = true;
-        height_rejected_target_valid_ = true;
-        height_rejected_target_m_ = height_motion_target_m_;
-        height_capture_pause_elapsed_s_ = 0.0F;
-        command.target_joint_position_rad = last_output_.enable_motors
-            ? last_output_.position_rad : state.joints.position_rad;
+          capture_aborted = true;
+          height_motion_active_ = false;
+          height_motion_endpoint_reached_ = false;
+          height_motion_settled_ = false;
+          height_capture_recovery_active_ = true;
+          height_motion_pending_ = false;
+          height_pending_anchor_captured_ = false;
+          height_pending_elapsed_s_ = 0.0F;
+          height_motion_rejected_ = true;
+          height_rejected_target_valid_ = true;
+          height_rejected_target_m_ = height_motion_target_m_;
+          height_capture_pause_elapsed_s_ = 0.0F;
+          // Keep the handoff continuous when capture never returns.  The last
+          // output already includes stance correction; store the base pose so
+          // the correction is not applied twice on the next control pass.
+          if (config_.posture_abort_blend_s > 0.0F && last_output_.enable_motors) {
+            const auto& held = whole_body_stance_.correction();
+            posture_abort_pose_ = last_output_.position_rad;
+            for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
+              posture_abort_pose_[joint] -= held[joint];
+            }
+            posture_abort_blend_ = 1.0F;
+            command.target_joint_position_rad = posture_abort_pose_;
+          } else {
+            command.target_joint_position_rad = last_output_.enable_motors
+                ? last_output_.position_rad : state.joints.position_rad;
+          }
+        }
       }
       motion_dt = 0.0F;
     } else if (height_capture_distance > capture_margin) {
@@ -1154,6 +1319,32 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
         pose[i] = height_path_[lower][i] + blend *
             (height_path_[lower + 1][i] - height_path_[lower][i]);
       }
+      // Let the legs absorb a bounded support-point displacement while the
+      // height path is active.  The wheel anchor error is a translation task,
+      // not a pitch reference; solve it orthogonally to height so the capture
+      // correction does not create another squat/stand disturbance.
+      const float station_error = state.wheel.position_m -
+          lqr_.debugState().target_ground_position_m;
+      const float desired_axle_correction = std::clamp(
+          0.60F * station_error, -0.018F, 0.018F);
+      const auto apply_axle_capture = [&](std::size_t hip,
+                                           std::size_t knee) {
+        const auto leg = WholeBodyModel::legHeight(pose[hip], pose[knee]);
+        const float determinant = leg.d_x_d_hip * leg.d_height_d_knee -
+            leg.d_x_d_knee * leg.d_height_d_hip;
+        if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-6F) {
+          return;
+        }
+        const float delta_hip = desired_axle_correction *
+            leg.d_height_d_knee / determinant;
+        const float delta_knee = -desired_axle_correction *
+            leg.d_height_d_hip / determinant;
+        const float max_step = 0.35F * std::max(state.dt_s, 0.0F);
+        pose[hip] += std::clamp(delta_hip, -max_step, max_step);
+        pose[knee] += std::clamp(delta_knee, -max_step, max_step);
+      };
+      apply_axle_capture(left_hip, left_knee);
+      apply_axle_capture(right_hip, right_knee);
       height_motion_last_hip_rad_ = pose[left_hip];
       height_motion_last_knee_rad_ = pose[left_knee];
       command.target_joint_position_rad = pose;
@@ -1172,11 +1363,59 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
           station_dwell_s_ = 0.0F;
           station_capture_filter_initialized_ = false;
         }
+        height_pending_pose_ = pose;
         height_motion_active_ = false;
-        height_motion_settled_ = true;
+        // The C2 path has reached its target, but the loaded fake driver can
+        // still move the support point while the final joint target settles.
+        // Keep the endpoint in the settle phase so the station re-anchor is
+        // taken from the post-sag encoder position, not from this early edge.
+        height_motion_settled_ = false;
+        posture_settle_dwell_s_ = 0.0F;
       }
       }
     }
+  }
+  if (height_motion_endpoint_reached_ && !height_motion_settled_ &&
+      !height_motion_active_) {
+    const auto left_endpoint_leg = WholeBodyModel::legHeight(
+        state.joints.position_rad[left_hip],
+        state.joints.position_rad[left_knee]);
+    const auto right_endpoint_leg = WholeBodyModel::legHeight(
+        state.joints.position_rad[right_hip],
+        state.joints.position_rad[right_knee]);
+    const float measured_height = geometry::wheel_radius_m - 0.5F *
+        (left_endpoint_leg.height_m + right_endpoint_leg.height_m);
+    const float joint_rate = std::max({
+        std::abs(state.joints.velocity_rad_s[left_hip]),
+        std::abs(state.joints.velocity_rad_s[left_knee]),
+        std::abs(state.joints.velocity_rad_s[right_hip]),
+        std::abs(state.joints.velocity_rad_s[right_knee])});
+    const float endpoint_capture_tolerance = std::max(
+        std::max(config_.station_capture_margin_m, 0.0F),
+        std::max(config_.height_capture_pause_distance_m, 0.0F));
+    const bool endpoint_quiet = std::isfinite(measured_height) &&
+        // The C2 task path has already reached its requested FK endpoint.
+        // Do not re-gate retirement on loaded encoder sag here; that sag is
+        // exactly what the native endpoint tolerance models and otherwise
+        // leaves HEIGHT asserted indefinitely while the pose is already held.
+        joint_rate <= std::max(
+            2.0F * std::max(config_.posture_settle_pitch_rate_rad_s, 0.0F),
+            0.12F) &&
+        station_capture_distance_m_ <= endpoint_capture_tolerance;
+    if (endpoint_quiet) {
+      posture_settle_dwell_s_ += std::max(state.dt_s, 0.0F);
+    } else {
+      posture_settle_dwell_s_ = 0.0F;
+    }
+    if (posture_settle_dwell_s_ >=
+        std::max(config_.posture_settle_dwell_s, 0.0F)) {
+      height_motion_settled_ = true;
+      posture_settle_dwell_s_ = 0.0F;
+    }
+    // Keep the final C2 pose on the actuator path until the physical endpoint
+    // is quiet; the IPC request retires only after this dwell.
+    command.target_joint_position_rad = height_pending_pose_;
+    command.request_pose_change = false;
   }
   if (height_motion_pending_ && !height_motion_active_ &&
       last_output_.enable_motors) {
@@ -1191,7 +1430,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   command.target_joint_position_rad = standUpPose(command.target_joint_position_rad);
   if (command.request_pose_change && !joint_motion_.active() &&
       stand_up_stage_ == StandUpStage::Idle) {
-    if (posture_start_ready()) {
+    if (pose_interrupt || posture_start_ready()) {
       float pose_duration_s = config_.pose_change_duration_s;
       if (config_.pose_max_joint_velocity_rad_s > 0.0F) {
         float largest_delta_rad = 0.0F;
@@ -1210,7 +1449,15 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
                                      config_.pose_max_duration_s);
         }
       }
-      joint_motion_.startMove(state.joints.position_rad,
+      JointArray pose_start = state.joints.position_rad;
+      if (pose_interrupt && last_output_.enable_motors) {
+        pose_start = last_output_.position_rad;
+        const auto& held = whole_body_stance_.correction();
+        for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
+          pose_start[joint] -= held[joint];
+        }
+      }
+      joint_motion_.startMove(pose_start,
                               command.target_joint_position_rad,
                               pose_duration_s);
     } else if (last_output_.enable_motors) {
@@ -1398,6 +1645,14 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   const bool stationary_stance_request =
       std::abs(command.target_forward_velocity_m_s) < 0.01F &&
       std::abs(command.target_yaw_rate_rad_s) < 0.05F;
+  // Near max stand the knee Jacobian is close to its straight-leg singularity.
+  // Letting the slow COM integrator operate there turns tiny encoder/COM noise
+  // into a large symmetric trim, which moves the axle and makes the wheels
+  // chase pitch. Keep VMC damping, but leave static COM ownership to the LQR
+  // until both legs have enough bend for a well-conditioned task solve.
+  const bool static_com_geometry_valid =
+      std::abs(state.joints.position_rad[left_knee]) +
+          std::abs(state.joints.position_rad[right_knee]) > 0.70F;
   // The slow COM/body-pitch task is a grounded posture owner, not a
   // station-only trim. It may add a bounded correction during rolling Drive;
   // the dedicated C2 height trajectory remains the sole slow leg owner while
@@ -1406,8 +1661,9 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       config_.whole_body_stance_owns_static_com &&
       config_.whole_body_stance.enabled && state.floor_contact &&
       usesBalance(mode) && !height_motion_pending_ &&
-      !height_motion_active_ &&
-      !joint_motion_.active() && !height_capture_recovery_active_;
+      !height_motion_active_ && !joint_motion_.active() &&
+      !height_capture_recovery_active_ && stationary_stop_hold_s_ <= 0.0F &&
+      static_com_geometry_valid;
   const bool stationary_translation_request =
       std::abs(command.target_forward_velocity_m_s) < 0.01F;
   const float stance_commanded_velocity =
@@ -1446,6 +1702,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
            std::max(support_settle_window_s, 0.0F));
   const bool stance_vmc_allowed =
       config_.whole_body_stance.vmc_enabled &&
+      static_com_geometry_valid &&
       (mode == ControlMode::Balance || mode == ControlMode::Drive ||
        mode == ControlMode::PoseChange) &&
       posture_support_window &&
@@ -1498,15 +1755,32 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
                : ((height_motion_active_ || height_motion_pending_) ? 2.0F
                                                                     : 0.8F)) &&
       std::abs(state.imu.roll_rate_rad_s) < 0.8F;
-  // WBC owns only the body-frame COM line. LQR's live pitch state is
-  // deliberately not fed back into the leg task; the leg speed loop below
-  // takes the speed error, never pitch, for the same reason. The balance
-  // controller runs later in this tick, so this is last tick's value - one
-  // 3 kHz sample behind a signal that moves on the drive-command timescale.
+  // The leg speed loop is an explicit Drive owner. It must not run during a
+  // stationary height change or yaw-only turn, where the LQR already owns
+  // translation. Keep it alive through a zero-command braking transient:
+  // dropping the leg COM correction on the same sample as DRIVE->STOP leaves
+  // the wheels moving without the body-side speed-loop support and creates a
+  // large pitch impulse. Station hold takes ownership after capture completes.
+  const bool zero_drive_for_speed =
+      std::abs(command.target_forward_velocity_m_s) < 1.0e-3F &&
+      std::abs(command.target_yaw_rate_rad_s) < 1.0e-3F;
+  const float commanded_velocity_for_speed =
+      lqr_.debugState().commanded_ground_velocity_m_s;
+  const bool stop_braking = zero_drive_for_speed && !station_hold_active_ &&
+      (std::abs(state.wheel.velocity_m_s) > 0.03F ||
+       std::abs(commanded_velocity_for_speed) > 0.03F ||
+       std::abs(state.imu.pitch_rate_rad_s) > 0.15F ||
+       std::abs(state.imu.pitch_rad - balance_pitch_ref_rad_) > 0.05F);
+  const bool leg_speed_loop_allowed = state.floor_contact &&
+      (((mode == ControlMode::Drive || mode == ControlMode::PoseChange) &&
+        (std::abs(command.target_forward_velocity_m_s) >= 0.01F ||
+         height_motion_pending_)) ||
+       stop_braking) &&
+      !height_capture_recovery_active_;
   last_whole_body_stance_ = whole_body_stance_.update(
       state, joint_target, last_whole_body_, stance_trim_allowed, state.dt_s,
       leg_com_task_allowed, stance_vmc_allowed,
-      last_leg_velocity_error_m_s_);
+      last_leg_velocity_error_m_s_, leg_speed_loop_allowed);
   joint_target = last_whole_body_stance_.target;
 
   whole_body_gravity_feedforward_.fill(0.0F);
@@ -1515,17 +1789,13 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
     const float scale = std::clamp(
         config_.whole_body_gravity_feedforward_scale, 0.0F, 1.0F);
     const auto left = WholeBodyModel::legGravityTorque(
-        state.joints.position_rad[left_hip],
-        state.joints.position_rad[left_knee]);
+        joint_target[left_hip], joint_target[left_knee]);
     const auto left_body = WholeBodyModel::bodySupportTorque(
-        state.joints.position_rad[left_hip],
-        state.joints.position_rad[left_knee]);
+        joint_target[left_hip], joint_target[left_knee]);
     const auto right = WholeBodyModel::legGravityTorque(
-        state.joints.position_rad[right_hip],
-        state.joints.position_rad[right_knee]);
+        joint_target[right_hip], joint_target[right_knee]);
     const auto right_body = WholeBodyModel::bodySupportTorque(
-        state.joints.position_rad[right_hip],
-        state.joints.position_rad[right_knee]);
+        joint_target[right_hip], joint_target[right_knee]);
     whole_body_gravity_feedforward_[left_hip] =
         scale * (left.hip_nm + left_body.hip_nm);
     whole_body_gravity_feedforward_[left_knee] =

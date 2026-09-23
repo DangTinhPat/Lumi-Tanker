@@ -242,6 +242,15 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricHeight(
   const float target_z = geometry::wheel_radius_m - body_height_m;
   float hip = std::clamp(hip_seed_rad, hip_min_rad, hip_max_rad);
   float knee = std::clamp(knee_seed_rad, knee_min_rad, knee_max_rad);
+  const float seed_height = geometry::wheel_radius_m -
+      legHeight(hip, knee).height_m;
+  // Near the straight-leg branch, unconstrained Newton can converge to the
+  // other valid FK branch. That made a lower target from max stand command an
+  // even higher knee pose. Keep the solve on the operator-requested branch.
+  const bool lowering = body_height_m < seed_height;
+  const float branch_knee_min = lowering ? knee_min_rad : knee_seed_rad;
+  const float branch_knee_max = lowering ? knee_seed_rad : knee_max_rad;
+  knee = std::clamp(knee, branch_knee_min, branch_knee_max);
 
   // Newton on the exact analytic FK/Jacobian.  The step clamp prevents an
   // out-of-branch jump when the requested height is close to a singular
@@ -268,7 +277,8 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricHeight(
       delta_knee *= scale;
     }
     hip = std::clamp(hip + 0.75F * delta_hip, hip_min_rad, hip_max_rad);
-    knee = std::clamp(knee + 0.75F * delta_knee, knee_min_rad, knee_max_rad);
+    knee = std::clamp(knee + 0.75F * delta_knee,
+                      branch_knee_min, branch_knee_max);
   }
 
   const LegHeight solved = legHeight(hip, knee);
@@ -278,6 +288,63 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricHeight(
   out.axle_x_m = solved.x_m;
   out.residual_m = std::hypot(target_x - solved.x_m,
                               target_z - solved.height_m);
+  out.feasible = std::isfinite(out.residual_m) && out.residual_m <= 2.0e-5F;
+  return out;
+}
+
+WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricComHeight(
+    float body_height_m, float com_target_x_m, float hip_seed_rad,
+    float knee_seed_rad, float hip_min_rad, float hip_max_rad,
+    float knee_min_rad, float knee_max_rad) noexcept {
+  SymmetricPose out{};
+  if (!std::isfinite(body_height_m) || !std::isfinite(com_target_x_m) ||
+      !std::isfinite(hip_seed_rad) || !std::isfinite(knee_seed_rad) ||
+      !(hip_min_rad < hip_max_rad) || !(knee_min_rad < knee_max_rad)) {
+    return out;
+  }
+
+  float hip = std::clamp(hip_seed_rad, hip_min_rad, hip_max_rad);
+  float knee = std::clamp(knee_seed_rad, knee_min_rad, knee_max_rad);
+  for (int iteration = 0; iteration < 40; ++iteration) {
+    const auto leg = legHeight(hip, knee);
+    const auto body = WholeBodyModel{}.compute(hip, knee, hip, knee);
+    const float height_error = body_height_m -
+        (geometry::wheel_radius_m - leg.height_m);
+    const float com_error = com_target_x_m - body.com_offset_x_m;
+    if (std::hypot(height_error, com_error) < 1.0e-7F) break;
+    const auto jacobian = symmetricComOffsetJacobian(hip, knee);
+    const float height_hip = -leg.d_height_d_hip;
+    const float height_knee = -leg.d_height_d_knee;
+    const float determinant = height_hip *
+            jacobian.d_com_offset_x_d_knee -
+        height_knee * jacobian.d_com_offset_x_d_hip;
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-8F) {
+      break;
+    }
+    float delta_hip = (height_error *
+            jacobian.d_com_offset_x_d_knee -
+        height_knee * com_error) / determinant;
+    float delta_knee = (height_hip * com_error -
+        height_error * jacobian.d_com_offset_x_d_hip) / determinant;
+    const float step = std::max(std::abs(delta_hip), std::abs(delta_knee));
+    if (step > 0.15F) {
+      const float scale = 0.15F / step;
+      delta_hip *= scale;
+      delta_knee *= scale;
+    }
+    hip = std::clamp(hip + 0.8F * delta_hip, hip_min_rad, hip_max_rad);
+    knee = std::clamp(knee + 0.8F * delta_knee, knee_min_rad, knee_max_rad);
+  }
+  const auto leg = legHeight(hip, knee);
+  const auto body = WholeBodyModel{}.compute(hip, knee, hip, knee);
+  const float height_error = body_height_m -
+      (geometry::wheel_radius_m - leg.height_m);
+  const float com_error = com_target_x_m - body.com_offset_x_m;
+  out.hip_rad = hip;
+  out.knee_rad = knee;
+  out.body_height_m = geometry::wheel_radius_m - leg.height_m;
+  out.axle_x_m = leg.x_m;
+  out.residual_m = std::hypot(height_error, com_error);
   out.feasible = std::isfinite(out.residual_m) && out.residual_m <= 2.0e-5F;
   return out;
 }
