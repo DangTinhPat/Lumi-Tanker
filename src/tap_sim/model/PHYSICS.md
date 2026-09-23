@@ -55,3 +55,33 @@ and six joint encoders. The MPU6500 site is centered in the body X/Y plane and
 mounted `0.020 m` above the body reference origin, at the upper body surface.
 MuJoCo pose, contacts, and constraint forces remain simulation telemetry and
 are not exported as controller inputs.
+
+## Hardware-facing encoder zero
+
+The validated low-body rocker fixture is the calibrated simulation home
+for the six driver channels `[LH, LK, LW, RH, RK, RW]`. The native MJCF
+`qpos` remains in the CAD frame so collision geometry and FK do not change;
+the native runner subtracts these offsets at the fake GDS68/BL4820M12 frame
+boundary:
+
+`[2.273920000, -1.200000000, -3.578270000, 2.273920000, -1.200000000, -3.178980000] rad`.
+
+Therefore the driver-facing encoder position at the home fixture is exactly
+zero for all six channels. The provisional re-based leg travel is hip
+`[-5.415512654, 0.867672654]` on both sides and knee
+`[0, 1.658407346]` on both sides. These are
+translated simulation envelopes, not measured mechanical stops; physical
+encoder calibration must replace them before hardware bring-up.
+
+## Power-off rocker fixture
+
+`home_offset` remains the controller-compatible powered spawn fixture at root
+`z=0.134 m`; changing the encoder zero must not make the current ENABLE path
+start from a collapsed pose. The saved `power_off_collapse_current` keyframe is
+the angle-zero rocker reference: both hips are `2.27392 rad`, both knees are
+`-1.2 rad`, root `z=0.0698965 m`, and the wheel collision envelopes are
+tangent to the ground while the body remains low. `power_off_deep_front`
+remains only as a static reference endpoint for rendering.
+Contacts and constraint forces are still
+simulation telemetry; the controller must infer support from the MPU6500 and
+encoders.

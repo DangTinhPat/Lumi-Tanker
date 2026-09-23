@@ -34,6 +34,23 @@ inline constexpr float neutral_hip_rad = 1.010467052460e+00F;
 inline constexpr float neutral_knee_rad = -1.068273067470e+00F;
 inline constexpr float knee_zero_rebase_rad = -4.500000000000e-01F;
 inline constexpr float neutral_spawn_z_m = 1.484350374792e-01F;
+// Encoder/driver zero calibration. The MuJoCo qpos remains in the CAD frame;
+// the hardware-facing frame subtracts these offsets so the checked-in
+// low-body rocker home fixture is q=0 for all six joints, in LH/LK/LW/RH/RK/RW
+// order. These values are simulation calibration, not physical encoder-stop
+// measurements.
+inline constexpr std::array<float, 6> encoder_zero_rad{{
+    2.273920000F, -1.200000000F, -3.578270000F,
+    2.273920000F, -1.200000000F, -3.178980000F}};
+// Re-based provisional driver travel.  Hip limits preserve the current CAD
+// envelope after translation.  The folded home is the knee's lower endpoint;
+// its upper endpoint preserves the existing 95-degree simulation envelope.
+inline constexpr std::array<float, 6> encoder_min_rad{{
+    -5.415512654F, 0.0F, 0.0F,
+    -5.415512654F, 0.0F, 0.0F}};
+inline constexpr std::array<float, 6> encoder_max_rad{{
+    0.867672654F, 1.658407346F, 12.5F,
+    0.867672654F, 1.658407346F, 12.5F}};
 // User-provided operating envelope for the native height planner.  The STEP
 // assembly has no kinematic mate/limit metadata, so these are simulation
 // envelope values, not a CAD stop certification.  The hip is represented as

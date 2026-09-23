@@ -105,11 +105,11 @@ def main() -> int:
         reset_state = session.wait_state(lambda state: state.get("mode") == "Disabled")
         view = session.wait_view()
         assert abs(float(view["x"])) < 0.02
-        assert abs(float(view["z"]) - 0.1484350375) < 1.0e-6
-        assert abs(float(view["lh"]) - 1.0104670525) < 0.03
-        assert abs(float(view["rh"]) - 1.0104670525) < 0.03
-        assert abs(float(view["lk"]) + 1.0682730675) < 0.03
-        assert abs(float(view["rk"]) + 1.0682730675) < 0.03
+        assert abs(float(view["z"]) - 0.134000000) < 1.0e-6
+        assert abs(float(view["lh"]) - 1.123132841) < 0.03
+        assert abs(float(view["rh"]) - 1.121352471) < 0.03
+        assert abs(float(view["lk"]) + 1.214584702) < 0.03
+        assert abs(float(view["rk"]) + 1.213451540) < 0.03
         assert reset_state["ground_truth_to_controller"] == "0"
         print("PASS native lifecycle: DISABLE/ENABLE, automatic POSE completion, physical RESET")
         return 0

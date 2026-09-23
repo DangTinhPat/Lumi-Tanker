@@ -55,15 +55,10 @@
     <mesh name="right_thigh_mesh" file="right_thigh.stl"/>
     <mesh name="right_shin_mesh" file="right_shin.stl"/>
     <mesh name="right_wheel_mesh" file="right_wheel.stl"/>
-    <mesh name="left_assist_upper_mesh" file="left_assist_upper.stl"/>
-    <mesh name="left_assist_lower_mesh" file="left_assist_lower.stl"/>
-    <mesh name="right_assist_upper_mesh" file="right_assist_upper.stl"/>
-    <mesh name="right_assist_lower_mesh" file="right_assist_lower.stl"/>
     <material name="body_material" rgba="0.42 0.50 0.60 1"/>
     <material name="thigh_material" rgba="0.10 0.48 0.58 1"/>
     <material name="shin_material" rgba="0.82 0.42 0.12 1"/>
     <material name="wheel_material" rgba="0.06 0.07 0.08 1"/>
-    <material name="assist_material" rgba="0.76 0.78 0.82 1" specular="0.8" shininess="0.75"/>
   </asset>
 
   <worldbody>
@@ -99,9 +94,6 @@
                   fullinertia="0.000748306627 0.000792430278 0.000245860537 0.00000178743198 -0.0000770665558 -0.000000349275268"/>
         <geom name="cad_left_thigh_visual" type="mesh" mesh="left_thigh_mesh"
               material="thigh_material" contype="0" conaffinity="0"/>
-        <geom name="cad_left_assist_upper_visual" type="mesh"
-              mesh="left_assist_upper_mesh" material="assist_material"
-              contype="0" conaffinity="0"/>
         <site name="left_assist_upper_site" pos="-0.02553 0.002 -0.01583"
               size="0.004" rgba="0.95 0.65 0.12 1"/>
         <geom name="cad_left_thigh_collision" type="box" pos="-0.008337 0.003345 -0.036039"
@@ -121,9 +113,6 @@
                     fullinertia="0.000190025861 0.000227856474 0.0000553716106 -0.000000279240308 0.0000813680963 0.000000575946269"/>
           <geom name="cad_left_shin_visual" type="mesh" mesh="left_shin_mesh"
                 material="shin_material" contype="0" conaffinity="0"/>
-          <geom name="cad_left_assist_lower_visual" type="mesh"
-                mesh="left_assist_lower_mesh" material="assist_material"
-                contype="0" conaffinity="0"/>
           <site name="left_assist_lower_site" pos="-0.00880 0 0.01880"
                 size="0.004" rgba="0.95 0.65 0.12 1"/>
           <!-- The shin is a slender diagonal carrier.  Its AABB contains a
@@ -160,9 +149,6 @@
                   fullinertia="0.000748302542 0.000792425709 0.000245862909 -0.00000178617202 -0.0000770659485 0.000000350686465"/>
         <geom name="cad_right_thigh_visual" type="mesh" mesh="right_thigh_mesh"
               material="thigh_material" contype="0" conaffinity="0"/>
-        <geom name="cad_right_assist_upper_visual" type="mesh"
-              mesh="right_assist_upper_mesh" material="assist_material"
-              contype="0" conaffinity="0"/>
         <site name="right_assist_upper_site" pos="-0.02553 -0.002 -0.01583"
               size="0.004" rgba="0.95 0.65 0.12 1"/>
         <geom name="cad_right_thigh_collision" type="box" pos="-0.008337 -0.003345 -0.036038"
@@ -178,9 +164,6 @@
                     fullinertia="0.000190025879 0.000227856498 0.0000553716129 0.000000279243339 0.0000813681129 -0.000000575941519"/>
           <geom name="cad_right_shin_visual" type="mesh" mesh="right_shin_mesh"
                 material="shin_material" contype="0" conaffinity="0"/>
-          <geom name="cad_right_assist_lower_visual" type="mesh"
-                mesh="right_assist_lower_mesh" material="assist_material"
-                contype="0" conaffinity="0"/>
           <site name="right_assist_lower_site" pos="-0.00880 0 0.01880"
                 size="0.004" rgba="0.95 0.65 0.12 1"/>
           <geom name="cad_right_shin_collision" type="capsule"
@@ -227,8 +210,10 @@
     length and the passive spring force without introducing a controller
     sensor or simulator-only actuator.
     The passive assist is currently disabled by configuration (zero stiffness
-    and damping) until the physical spring is measured. The CAD endpoints and
-    changing length remain visible for later calibration.
+    and damping) until the physical spring is measured. Its endpoint sites and
+    changing length remain available for later calibration, but the rod meshes
+    are intentionally not rendered because they interfere visually with the
+    actual link-to-ground contact.
   -->
   <tendon>
     <spatial name="left_knee_assist" width="0.005" rgba="0.95 0.65 0.12 1"
@@ -275,5 +260,14 @@
     <!-- Natural ENABLE reference: 30 mm below the previous pose;
          q_hip=1.0104670525, q_knee=-1.0682730675; not a limit or standing pose. -->
     <key name="neutral" qpos="0 0 0.1484350375 1 0 0 0 1.0104670525 -1.0682730675 0 1.0104670525 -1.0682730675 0"/>
+    <!-- Controller-compatible powered spawn fixture. The angle-zero
+         calibration is stored in encoder_zero_rad and in the saved rocker
+         keyframe below; this spawn remains usable by the current ENABLE path. -->
+    <key name="home_offset" qpos="-0.008970917 0.000097734 0.134000000 0.999950000 0 0.009999833 0 1.123132841 -1.214584702 1.640237084 1.121352471 -1.213451540 1.584088236"/>
+    <!-- Reference endpoint from the former render-only front fixture. -->
+    <key name="power_off_deep_front" qpos="-0.008970917 0.000097734 0.113000000 0.960706412 0.000862848 0.277553224 0.002579350 1.123132841 -1.214584702 1.640237084 1.121352471 -1.213451540 1.584088236"/>
+    <!-- Saved low-body pose: both knees at the lower provisional stop and
+         both hips raised until the wheel rims are tangent to the ground. -->
+    <key name="power_off_collapse_current" qpos="-0.0300281 0.000578288 0.0698965 0.999997 -0.0000190395 0.0000332149 -0.00237860 2.27392 -1.2 -3.57827 2.27392 -1.2 -3.17898"/>
   </keyframe>
 </mujoco>

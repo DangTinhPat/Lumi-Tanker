@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import time
 
 import mujoco
 import mujoco.viewer
@@ -41,13 +42,19 @@ def apply_view(model, data, values):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--keyframe", default="neutral")
+    parser.add_argument("--unpowered", action="store_true")
     args = parser.parse_args(argv)
 
     model = mujoco.MjModel.from_xml_path(str(args.model))
     data = mujoco.MjData(model)
-    # The checked-in MJCF keyframe is the single source of truth for the
-    # current CAD-neutral pose; do not duplicate old robot constants here.
-    mujoco.mj_resetDataKeyframe(model, data, 0)
+    keyframe = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_KEY, args.keyframe)
+    if keyframe < 0:
+        raise ValueError(f"unknown MuJoCo keyframe: {args.keyframe}")
+    # The checked-in MJCF keyframe is the single source of truth; do not
+    # duplicate robot pose constants in the renderer.
+    mujoco.mj_resetDataKeyframe(model, data, keyframe)
     mujoco.mj_forward(model, data)
 
     handle = mujoco.viewer.launch_passive(
@@ -59,6 +66,17 @@ def main(argv=None):
         handle.cam.azimuth = model.vis.global_.azimuth
         handle.cam.elevation = model.vis.global_.elevation
     handle.sync()
+    if args.unpowered:
+        steps_per_frame = max(1, round(1.0 / 60.0 / model.opt.timestep))
+        while handle.is_running():
+            with handle.lock():
+                data.ctrl[:] = 0.0
+                for _ in range(steps_per_frame):
+                    mujoco.mj_step(model, data)
+            handle.sync()
+            time.sleep(1.0 / 60.0)
+        handle.close()
+        return 0
     try:
         for line in sys.stdin:
             if not handle.is_running():

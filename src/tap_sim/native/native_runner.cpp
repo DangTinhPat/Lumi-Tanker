@@ -246,6 +246,14 @@ class NativeRunner {
     return std::isfinite(value) ? std::clamp(value, lo, hi) : 0.0F;
   }
 
+  static float nativeToDriver(std::size_t joint, float native_rad) {
+    return native_rad - robot_control::geometry::encoder_zero_rad[joint];
+  }
+
+  static float driverToNative(std::size_t joint, float driver_rad) {
+    return driver_rad + robot_control::geometry::encoder_zero_rad[joint];
+  }
+
   static float axleForwardOffset(float pitch, float hip, float knee) {
     constexpr float ax = -0.01410935F;
     constexpr float az = -0.10476742F;
@@ -370,16 +378,16 @@ class NativeRunner {
   }
 
   void initializeState() {
-    std::fill(data_->qpos, data_->qpos + model_->nq, 0.0);
-    data_->qpos[2] = robot_control::geometry::neutral_spawn_z_m;
-    // The CAD assembly zero is the public natural-pose reference.  Disabled
-    // lifecycle handling below pauses dynamics until ENABLE, so this exact
-    // reference does not fall while the operator/IMU qualification is idle.
-    data_->qpos[3] = 1.0;
-    data_->qpos[7] = robot_control::geometry::neutral_hip_rad;
-    data_->qpos[8] = robot_control::geometry::neutral_knee_rad;
-    data_->qpos[10] = robot_control::geometry::neutral_hip_rad;
-    data_->qpos[11] = robot_control::geometry::neutral_knee_rad;
+    const int home_keyframe = mj_name2id(
+        model_, mjOBJ_KEY, "home_offset");
+    if (home_keyframe >= 0) {
+      // Spawn at the powered-home offset. The disabled lifecycle pauses this
+      // pose; POWER_OFF explicitly releases it so MuJoCo gravity produces the
+      // natural collapse seen by the sensors.
+      mj_resetDataKeyframe(model_, data_, home_keyframe);
+    } else {
+      throw std::runtime_error("missing home_offset keyframe");
+    }
     std::fill(data_->qvel, data_->qvel + model_->nv, 0.0);
     // The landing scenario deliberately starts on the supported natural
     // ENABLE reference. The robot must first acquire a valid MPU6500 tilt seed before
@@ -457,6 +465,7 @@ class NativeRunner {
       enable_request_ = false;
     }
     disable_request_ = false;
+    power_off_free_ = false;
     estop_ = false;
     enabled_ = false;
     leg_command_.fill(0.0F);
@@ -966,11 +975,16 @@ class NativeRunner {
         float v = sensorValue(vel_sensor_id_[i]);
         if (i == 0 || i == 1 || i == 3 || i == 4) {
           const std::size_t leg = i < 2 ? i : i - 1;
-          p = leg_feedback_position_[leg];
+          // The fake GDS68 reports its calibrated driver-frame position;
+          // restore the CAD frame before it enters the controller.
+          p = driverToNative(i, leg_feedback_position_[leg]);
           v = leg_feedback_velocity_[leg];
         } else {
           const std::size_t side = i == 2 ? 0 : 1;
-          motor_transport_.setWheelMeasurement(side, p, v);
+          // BL4820M12 feedback is also zeroed at the home fixture.  The
+          // native plant remains in the CAD frame internally.
+          motor_transport_.setWheelMeasurement(
+              side, nativeToDriver(i, p), v);
           motor_transport_.sendUart(
               static_cast<std::uint8_t>(side),
               motor_frame::buildReadPresent(
@@ -998,7 +1012,7 @@ class NativeRunner {
               wheel_feedback_position_unwrapped_[side] += delta;
             }
             wheel_feedback_position_previous_[side] = wrapped;
-            p = wheel_feedback_position_unwrapped_[side];
+            p = driverToNative(i, wheel_feedback_position_unwrapped_[side]);
             v = motor_frame::wheelRawSpeedToRadPerSec(present.speed_raw);
           }
         }
@@ -1117,14 +1131,14 @@ class NativeRunner {
     // time.  RESET after a long run gets the same qualification window as the
     // first boot, while the static natural spawn prevents a late ENABLE from
     // inheriting the old pitch-0 gravity impulse.
-    const bool boot_hold = !enabled_ && !estop_ &&
+    const bool boot_hold = !power_off_free_ && !enabled_ && !estop_ &&
         (!disable_request_ || sim_time_s_ < disable_hold_until_s_);
     // Before ENABLE there is no operator-controlled motion request, so keep
     // the natural pose qualified rather than allowing a long GUI startup to
     // turn into a fall.  Once ENABLE arrives, the same hold is time-bounded
     // and hands ownership to the core as soon as it enables motors.
     const bool boot_window = !enable_request_ || sim_time_s_ < boot_hold_until_s_;
-    const bool safe = enabled_ && !estop_ && !disable_request_ &&
+    const bool safe = !power_off_free_ && enabled_ && !estop_ && !disable_request_ &&
         sim_time_s_ - last_command_s_ <= 0.10;
     std::array<float, 4> target_leg{};
     if (safe) target_leg = leg_command_;
@@ -1188,7 +1202,8 @@ class NativeRunner {
           const int qvel = kJointQvel[i < 2 ? i : i + 1];
           motor_transport_.publishLegFeedback(
               i,
-              static_cast<float>(data_->qpos[qpos]),
+              nativeToDriver(qpos - 7,
+                             static_cast<float>(data_->qpos[qpos])),
               static_cast<float>(data_->qvel[qvel]),
               std::clamp(leg_state_[i] + feedback_bias_[i] + normal(0.03F),
                          -11.0F, 11.0F));
@@ -1303,7 +1318,11 @@ class NativeRunner {
             : (motors.position_rad[hip_j] - hip_q);
         const float cross_nm = stiffness.cross * other_error * motors.kp_scale[j];
         const auto mit_bytes = motor_frame::packMitCommand(
-            motors.position_rad[j], motors.velocity_rad_s[j],
+            std::clamp(
+                nativeToDriver(j, motors.position_rad[j]),
+                robot_control::geometry::encoder_min_rad[j],
+                robot_control::geometry::encoder_max_rad[j]),
+            motors.velocity_rad_s[j],
             legKpNmPerRad(j, hip_q, knee_q, motors.kp_scale[j]),
             legKdNmPerRadS(j, hip_q, knee_q, motors.kd_scale[j]),
             motors.feedforward_nm[j] + cross_nm);
@@ -1321,7 +1340,7 @@ class NativeRunner {
             motor_frame::packSetAxisState(motor_frame::kAxisStateIdle));
       }
       leg_command_[i] = drv.computeTorqueNm(
-          static_cast<float>(data_->qpos[kJointQpos[j]]),
+          nativeToDriver(j, static_cast<float>(data_->qpos[kJointQpos[j]])),
           static_cast<float>(data_->qvel[kJointQvel[j]]));
     }
     // Wheels: the ONLY channel a real BL4820M12 exposes is Moving Speed
@@ -1498,7 +1517,7 @@ class NativeRunner {
     // Before ENABLE the desktop model is paused, while the sensor queue above
     // continues with the bounded startup fixture.  After qualification an
     // ENABLE releases dynamics and the core only then owns balance.
-    const bool lifecycle_paused =
+    const bool lifecycle_paused = !power_off_free_ &&
         (!enable_request_ || estop_ ||
          (disable_request_ && sim_time_s_ >= disable_hold_until_s_)) &&
         !options_.landing_30cm;
@@ -1536,7 +1555,10 @@ class NativeRunner {
       // BL4820M12 has no register for "ground acceleration"; the only thing
       // that reaches it is a Moving Speed target, so that is the only thing
       // applyMotorCommand may read for wheel intent.
-      applyMotorCommand(motors);
+      applyMotorCommand(power_off_free_ ? MotorCommand{} : motors);
+      if (power_off_free_) {
+        std::fill(data_->ctrl, data_->ctrl + model_->nu, 0.0);
+      }
       const auto controllerBasePose = [&]() {
         JointArray pose = controller_.lastOutput().position_rad;
         const auto& correction = controller_.wholeBodyStanceCorrection();
@@ -1639,6 +1661,7 @@ class NativeRunner {
     stream >> op;
     if (op == "ENABLE") {
       // DISABLE is a recoverable safe stop. ESTOP remains separately latched.
+      power_off_free_ = false;
       disable_request_ = false;
       enable_request_ = true;
       boot_hold_until_s_ = sim_time_s_ + boot_hold_duration_s_;
@@ -1646,6 +1669,7 @@ class NativeRunner {
     }
     else if (op == "DISABLE") {
       stopDance();
+      power_off_free_ = false;
       disable_request_ = true;
       enable_request_ = false;
       boot_hold_until_s_ = sim_time_s_ + disable_hold_duration_s_;
@@ -1656,6 +1680,20 @@ class NativeRunner {
       command_.request_stand_up = false;
       command_.target_forward_velocity_m_s = 0.0F;
       command_.target_yaw_rate_rad_s = 0.0F;
+    }
+    else if (op == "POWER_OFF") {
+      // Simulation-only fixture: emulate cutting motor power while leaving
+      // MuJoCo gravity/contact dynamics running so a held squat can collapse.
+      stopDance();
+      power_off_free_ = true;
+      disable_request_ = true;
+      enable_request_ = false;
+      command_.request_pose_change = false;
+      command_.request_height_change = false;
+      command_.request_stand_up = false;
+      command_.target_forward_velocity_m_s = 0.0F;
+      command_.target_yaw_rate_rad_s = 0.0F;
+      std::cout << "POWER_OFF_ACCEPTED|free_dynamics=1" << std::endl;
     }
     else if (op == "ESTOP") {
       stopDance();
@@ -1779,6 +1817,7 @@ class NativeRunner {
     const auto& whole_body = controller_.wholeBodyState();
     const auto& stance = controller_.wholeBodyStanceState();
     std::cout << "STATE|t=" << sim_time_s_ << "|mode=" << robot_control::toString(controller_.mode())
+              << "|power_off_free=" << power_off_free_
               << "|pitch=" << state_.imu.pitch_rad << "|pitch_rate=" << state_.imu.pitch_rate_rad_s
               << "|pitch_rate_corrected=" << state_.imu.pitch_rate_bias_corrected_rad_s
               << "|gyro_bias=" << state_.imu.gyro_bias_rad_s
@@ -1808,6 +1847,12 @@ class NativeRunner {
               << "|joint_lk=" << state_.joints.position_rad[1]
               << "|joint_rh=" << state_.joints.position_rad[3]
               << "|joint_rk=" << state_.joints.position_rad[4]
+              << "|enc_lh=" << nativeToDriver(0, state_.joints.position_rad[0])
+              << "|enc_lk=" << nativeToDriver(1, state_.joints.position_rad[1])
+              << "|enc_lw=" << nativeToDriver(2, state_.joints.position_rad[2])
+              << "|enc_rh=" << nativeToDriver(3, state_.joints.position_rad[3])
+              << "|enc_rk=" << nativeToDriver(4, state_.joints.position_rad[4])
+              << "|enc_rw=" << nativeToDriver(5, state_.joints.position_rad[5])
               << "|joint_v_lh=" << state_.joints.velocity_rad_s[0]
               << "|joint_v_lk=" << state_.joints.velocity_rad_s[1]
               << "|joint_v_rh=" << state_.joints.velocity_rad_s[3]
@@ -1971,6 +2016,7 @@ class NativeRunner {
   bool enabled_ = false;
   bool enable_request_ = false;
   bool disable_request_ = false;
+  bool power_off_free_ = false;
   bool estop_ = false;
   bool quit_ = false;
   bool stdin_closed_ = false;

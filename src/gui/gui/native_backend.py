@@ -37,6 +37,7 @@ class NativeBackend:
 
     def runner_path(self) -> Path:
         candidates = [
+            self.root / "build/bin/tap_mujoco_native",
             self.root / "build/native/bin/tap_mujoco_native",
             self.root / "build/tap_mujoco_native3/tap_mujoco_native",
             self.root / "build/tap_mujoco_native/tap_mujoco_native",
