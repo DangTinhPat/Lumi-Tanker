@@ -117,6 +117,9 @@ class NativeDashboard:
         header = ttk.Frame(outer)
         header.pack(fill="x")
         ttk.Label(header, text="TAP robot · native MuJoCo", font=("", 16, "bold")).pack(side="left")
+        self.enable_button = ttk.Button(
+            header, text="ENABLE", command=self.toggle_enable, state="disabled")
+        self.enable_button.pack(side="right", padx=(8, 0))
         self.sim_button = ttk.Button(header, text="Start SIM", command=self.toggle)
         self.sim_button.pack(side="right", padx=(8, 0))
         self.mode = tk.Label(header, text=" offline ", bg="#333", fg=FG, padx=12, pady=4)
@@ -342,11 +345,10 @@ class NativeDashboard:
                 self.estop = False
                 self._posture_last_sent_height = None
                 self.backend.start()
-                # Launching the operator simulation means "spawn and stand".
-                # The runner still waits for its delayed/noisy IMU seed before
-                # the core can enter Enabling/Balance; this is not a bypass of
-                # the embedded startup qualification.
-                self.enable()
+                # Starting the simulation is only power-up. Keep the robot
+                # disabled until the operator has confirmed the physical
+                # fixture/natural pose with the explicit ENABLE button.
+                self.enabled = False
         except Exception as exc:
             # Operator actions are non-modal.  Keep failures in the optional
             # log/status views so a dialog cannot interrupt a control gesture.
@@ -361,6 +363,14 @@ class NativeDashboard:
         if self.backend.running and not self.estop:
             self.backend.send("ENABLE")
             self.enabled = True
+
+    def toggle_enable(self):
+        if not self.backend.running or self.estop:
+            return
+        if self.enabled:
+            self.disable()
+        else:
+            self.enable()
 
     def disable(self):
         self._cancel_pending_posture()
@@ -630,6 +640,10 @@ class NativeDashboard:
             self._posture_last_sent_height = None
         mode = fields.get("mode", "offline")
         self.sim_button.configure(text="Stop SIM" if self.backend.running else "Start SIM")
+        self.enable_button.configure(
+            text="DISABLE" if self.enabled and not self.estop else "ENABLE",
+            state=("normal" if self.backend.running and not self.estop
+                   else "disabled"))
         self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop") else WARN)
         self.viewer_status.set(
             "MuJoCo 3-D viewer connected" if self.backend.viewer_running

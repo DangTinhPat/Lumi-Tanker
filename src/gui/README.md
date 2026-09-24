@@ -18,8 +18,9 @@ viewer from `src/tap_sim/model/tap_robot.xml`, including the floor, CAD
 meshes and materials. The viewer is a render-only mirror of the runner's
 debug `VIEW` stream; it is never fed into the controller. The Tk window is
 the command and sensor-diagnostics panel. Starting the simulation also sends one
-`ENABLE` request, so a fresh spawn proceeds through IMU qualification to
-`Balance`; the standalone runner still requires an explicit `ENABLE`.
+Starting the simulation only spawns the robot in `Disabled` with physics held;
+press the dashboard's explicit `ENABLE` button after confirming the natural
+fixture pose. The runner then proceeds through IMU qualification to `Balance`.
 
 The pose controls reuse the checked-in CAD/CoM-aware curves for squat,
 left/right roll and the finite Show sequence. Requests still pass through the

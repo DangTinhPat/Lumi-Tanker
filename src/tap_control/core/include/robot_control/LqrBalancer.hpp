@@ -48,12 +48,6 @@ class LqrBalancer {
     float leg_kd_scale = 1.0F;
     float turning_stiffness_boost = 0.25F;
     float stiff_yaw_rate_rad_s = 0.1F;
-    float landing_window_s = 0.25F;
-    float landing_kp_boost = 0.0F;
-    float landing_kd_boost = 0.0F;
-    float landing_ground_accel_boost_m_s2 = 0.0F;
-    float landing_velocity_carry_gain = 0.0F;
-    bool landing_hold_airborne_velocity = false;
     // The reduced model's ground velocity is mapped to the native +Y wheel
     // command by the active robot profile. TAP's current contact convention
     // uses the same sign on both sides.
@@ -145,7 +139,6 @@ class LqrBalancer {
     float capture_distance_m = 0.0F;
     bool station_hold_active = false;
     unsigned riccati_iterations = 0U;
-    float landing_window_remaining_s = 0.0F;
     float leg_velocity_error_m_s = 0.0F;
   };
 
@@ -157,7 +150,6 @@ class LqrBalancer {
   void movePositionAnchorToward(float ground_position_m, float alpha) noexcept;
   void clearForwardVelocityReference() noexcept;
   void setStationVelocityReference(float velocity_m_s) noexcept;
-  void setLandingVelocitySeed(float velocity_m_s) noexcept;
 
   [[nodiscard]] Output update(const RobotState& state,
                               const ControlCommand& command,
@@ -229,10 +221,6 @@ class LqrBalancer {
   bool posture_motion_active_ = false;
   float ground_position_target_m_ = 0.0F;
   float station_origin_position_m_ = 0.0F;
-  bool prev_floor_contact_ = true;
-  float landing_window_remaining_s_ = 0.0F;
-  float landing_velocity_seed_m_s_ = 0.0F;
-  bool landing_velocity_seed_valid_ = false;
   DebugState last_debug_{};
 };
 

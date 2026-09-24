@@ -89,7 +89,8 @@ bool FlightObserver::finiteInput(const RobotState& state) const noexcept {
 }
 
 bool FlightObserver::encoderTouchdownEvidence(
-    const RobotState& state) const noexcept {
+    const RobotState& state, float current_min_leg_height_rate_m_s) const
+    noexcept {
   if (!config_.encoder_touchdown_enabled ||
       sensor_free_fall_elapsed_s_ <
           std::max(config_.free_fall_debounce_s, 0.0F) ||
@@ -98,7 +99,6 @@ bool FlightObserver::encoderTouchdownEvidence(
     return false;
   }
 
-  const float current_min_rate = minLegHeightRate(state);
   const float compression_threshold = std::max(
       config_.encoder_compression_rate_threshold_m_s, 0.0F);
   const float reversal_threshold = std::max(
@@ -108,12 +108,14 @@ bool FlightObserver::encoderTouchdownEvidence(
   // commanded airborne extension, while accepting an impact before the IMU
   // spike has satisfied the older acceleration-only gate.
   return previous_min_leg_height_rate_m_s_ <= -compression_threshold &&
-      current_min_rate - previous_min_leg_height_rate_m_s_ >= reversal_threshold;
+      current_min_leg_height_rate_m_s - previous_min_leg_height_rate_m_s_ >=
+          reversal_threshold;
 }
 
 void FlightObserver::updateSupportHypothesis(
     const RobotState& state, float dt,
-    const TorqueResidualEstimator::Output* torque) noexcept {
+    const TorqueResidualEstimator::Output* torque,
+    float current_min_leg_height_rate_m_s) noexcept {
   torque_corroboration_used_ = false;
   // Rule 1 condition #1 ("never the sole gate"): agreement is only ever
   // consulted below to shorten a debounce that IMU evidence has already
@@ -147,7 +149,8 @@ void FlightObserver::updateSupportHypothesis(
       accel >= std::max(config_.support_recovery_accel_min_m_s2, 0.0F) &&
       accel <= std::max(config_.support_recovery_accel_max_m_s2,
                         config_.support_recovery_accel_min_m_s2);
-  encoder_touchdown_evidence_ = encoderTouchdownEvidence(state);
+  encoder_touchdown_evidence_ = encoderTouchdownEvidence(
+      state, current_min_leg_height_rate_m_s);
   if (encoder_touchdown_evidence_) {
     // This is an event latch, not a requirement that the velocity reversal
     // remain visible for several samples.  The impact can stop the joint in a
@@ -208,7 +211,7 @@ void FlightObserver::updateSupportHypothesis(
       support_recovery_armed_ = true;
       sensor_collision_elapsed_s_ = 0.0F;
     }
-    previous_min_leg_height_rate_m_s_ = minLegHeightRate(state);
+    previous_min_leg_height_rate_m_s_ = current_min_leg_height_rate_m_s;
     return;
   }
 
@@ -227,7 +230,7 @@ void FlightObserver::updateSupportHypothesis(
     sensor_free_fall_elapsed_s_ = 0.0F;
     sensor_collision_elapsed_s_ = 0.0F;
     sensor_touchdown_elapsed_s_ = 0.0F;
-    previous_min_leg_height_rate_m_s_ = minLegHeightRate(state);
+    previous_min_leg_height_rate_m_s_ = current_min_leg_height_rate_m_s;
     return;
   }
 
@@ -258,7 +261,7 @@ void FlightObserver::updateSupportHypothesis(
   // Keep the encoder derivative memory live through flight so the next
   // sample can detect a compression-rate reversal.  The observer never
   // integrates this into height or world pose; it is only an event feature.
-  previous_min_leg_height_rate_m_s_ = minLegHeightRate(state);
+  previous_min_leg_height_rate_m_s_ = current_min_leg_height_rate_m_s;
 }
 
 FlightObserver::Output FlightObserver::makeOutput(bool partial_support) const {
@@ -330,7 +333,13 @@ FlightObserver::Output FlightObserver::update(
       ? std::clamp(state.imu.sample_dt_s, 1.0e-5F, 0.05F)
       : dt;
   const float observation_dt = (imu_fresh || encoder_fresh) ? sensor_dt : 0.0F;
-  updateSupportHypothesis(state, observation_dt, torque);
+  // Encoder-derived leg height is unchanged between encoder packets. Reuse
+  // the previous rate on IMU-only samples and evaluate FK once per new
+  // encoder sample instead of twice inside the touchdown path.
+  const float current_min_leg_height_rate_m_s = encoder_fresh
+      ? minLegHeightRate(state) : previous_min_leg_height_rate_m_s_;
+  updateSupportHypothesis(state, observation_dt, torque,
+                          current_min_leg_height_rate_m_s);
   const bool contact = support_contact_;
   const bool partial_support = false;
 

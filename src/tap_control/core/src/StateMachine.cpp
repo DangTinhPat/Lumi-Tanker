@@ -1,8 +1,33 @@
 #include "robot_control/StateMachine.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace robot_control {
+
+namespace {
+bool startupPoseValid(const RobotState& state,
+                      const StateMachine::Config& config) {
+  const float hip_error_left = std::abs(
+      state.joints.position_rad[static_cast<std::size_t>(JointId::LeftHip)] -
+      geometry::neutral_hip_rad);
+  const float hip_error_right = std::abs(
+      state.joints.position_rad[static_cast<std::size_t>(JointId::RightHip)] -
+      geometry::neutral_hip_rad);
+  const float knee_error_left = std::abs(
+      state.joints.position_rad[static_cast<std::size_t>(JointId::LeftKnee)] -
+      geometry::neutral_knee_rad);
+  const float knee_error_right = std::abs(
+      state.joints.position_rad[static_cast<std::size_t>(JointId::RightKnee)] -
+      geometry::neutral_knee_rad);
+  return std::abs(state.imu.pitch_rad) <= config.startup_pitch_rad &&
+      std::abs(state.imu.pitch_rate_rad_s) <= config.startup_pitch_rate_rad_s &&
+      hip_error_left <= config.startup_joint_tolerance_rad &&
+      hip_error_right <= config.startup_joint_tolerance_rad &&
+      knee_error_left <= config.startup_joint_tolerance_rad &&
+      knee_error_right <= config.startup_joint_tolerance_rad;
+}
+}  // namespace
 
 StateMachine::StateMachine() : StateMachine(Config{}) {}
 
@@ -29,12 +54,43 @@ ControlMode StateMachine::update(const RobotState& state,
     return mode_;
   }
 
+  if (config_.fixture_startup_enabled) {
+    if (!command.request_enable &&
+        (mode_ == ControlMode::SensorQualify ||
+         mode_ == ControlMode::FixtureHold ||
+         mode_ == ControlMode::BalanceRamp)) {
+      enter(ControlMode::Disabled);
+      return mode_;
+    }
+    if (mode_ == ControlMode::SensorQualify) {
+      if (startupPoseValid(state, config_)) {
+        if (++cycles_in_mode_ >= config_.sensor_qualify_cycles) {
+          enter(ControlMode::FixtureHold);
+        }
+      } else {
+        cycles_in_mode_ = 0;
+      }
+      return mode_;
+    }
+    if (mode_ == ControlMode::FixtureHold) {
+      if (command.request_fixture_release) enter(ControlMode::BalanceRamp);
+      return mode_;
+    }
+    if (mode_ == ControlMode::BalanceRamp) {
+      if (++cycles_in_mode_ >= config_.balance_ramp_cycles) {
+        enter(ControlMode::Balance);
+      }
+      return mode_;
+    }
+  }
+
   const bool tipped = std::abs(state.imu.pitch_rad) > config_.fall_pitch_rad;
 
   // E-stop stays latched even if the robot tips or a recovery trigger arrives.
   if (mode_ == ControlMode::EmergencyStop) {
     if (command.request_enable && !tipped) {
-      enter(ControlMode::Enabling);
+      enter(config_.fixture_startup_enabled ? ControlMode::SensorQualify
+                                             : ControlMode::Enabling);
     }
     return mode_;
   }
@@ -70,8 +126,14 @@ ControlMode StateMachine::update(const RobotState& state,
   switch (mode_) {
     case ControlMode::Disabled:
       if (command.request_enable) {
-        enter(ControlMode::Enabling);
+        enter(config_.fixture_startup_enabled ? ControlMode::SensorQualify
+                                              : ControlMode::Enabling);
       }
+      break;
+
+    case ControlMode::SensorQualify:
+    case ControlMode::FixtureHold:
+    case ControlMode::BalanceRamp:
       break;
 
     case ControlMode::StandingUp:
@@ -122,6 +184,16 @@ ControlMode StateMachine::update(const RobotState& state,
 
 ControlMode StateMachine::mode() const noexcept { return mode_; }
 
+float StateMachine::balanceRampProgress() const noexcept {
+  if (mode_ != ControlMode::BalanceRamp || config_.balance_ramp_cycles == 0U) {
+    return mode_ == ControlMode::Balance ? 1.0F : 0.0F;
+  }
+  return std::clamp(
+      static_cast<float>(cycles_in_mode_) /
+          static_cast<float>(config_.balance_ramp_cycles),
+      0.0F, 1.0F);
+}
+
 void StateMachine::enter(ControlMode next_mode) {
   if (mode_ == next_mode) {
     return;
@@ -134,6 +206,12 @@ const char* toString(ControlMode mode) noexcept {
   switch (mode) {
     case ControlMode::Disabled:
       return "Disabled";
+    case ControlMode::SensorQualify:
+      return "SensorQualify";
+    case ControlMode::FixtureHold:
+      return "FixtureHold";
+    case ControlMode::BalanceRamp:
+      return "BalanceRamp";
     case ControlMode::Enabling:
       return "Enabling";
     case ControlMode::StandingUp:

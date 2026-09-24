@@ -6,6 +6,9 @@ namespace robot_control {
 
 enum class ControlMode {
   Disabled,
+  SensorQualify,
+  FixtureHold,
+  BalanceRamp,
   Enabling,
   StandingUp,
   Balance,
@@ -20,6 +23,12 @@ class StateMachine {
   struct Config {
     unsigned enable_cycles = 20;
     float fall_pitch_rad = 0.65F;
+    bool fixture_startup_enabled = false;
+    unsigned sensor_qualify_cycles = 50;
+    unsigned balance_ramp_cycles = 100;
+    float startup_pitch_rad = 0.15F;
+    float startup_pitch_rate_rad_s = 0.35F;
+    float startup_joint_tolerance_rad = 0.20F;
   };
 
   StateMachine();
@@ -36,6 +45,7 @@ class StateMachine {
                                    bool airborne = false);
   [[nodiscard]] ControlMode mode() const noexcept;
   [[nodiscard]] float fallPitchRad() const noexcept { return config_.fall_pitch_rad; }
+  [[nodiscard]] float balanceRampProgress() const noexcept;
 
  private:
   void enter(ControlMode next_mode);

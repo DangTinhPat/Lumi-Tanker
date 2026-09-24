@@ -111,9 +111,14 @@ struct ControlCommand {
   float target_body_height_m = geometry::neutral_spawn_z_m;
   bool request_enable = false;
   bool request_disable = false;
+  bool request_emergency_stop = false;
   bool request_pose_change = false;
   bool request_height_change = false;
   bool request_stand_up = false;
+  // Firmware startup: the operator confirms that the support fixture has been
+  // removed. Native simulation keeps this false and uses its existing startup
+  // path; the ESP firmware enables the fixture qualification state machine.
+  bool request_fixture_release = false;
 };
 
 struct MotorCommand {

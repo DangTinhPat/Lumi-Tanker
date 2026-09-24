@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <poll.h>
+#include <cerrno>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -25,13 +26,15 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 namespace {
 
 using robot_control::ControlCommand;
 using robot_control::EmbeddedController;
 using robot_control::ImuStateEstimator;
-using robot_control::LandingController;
 using robot_control::JointArray;
 using robot_control::JointId;
 using robot_control::MotorCommand;
@@ -118,7 +121,7 @@ struct Options {
   double run_for_s = 0.0;
   bool realtime = false;
   bool gds68_feedback = true;
-  bool landing_30cm = false;
+  std::uint16_t command_port = 0;
   unsigned seed = 6814U;
 };
 
@@ -129,16 +132,6 @@ double asDouble(const char* text, const char* option) {
     throw std::invalid_argument(std::string("invalid ") + option);
   }
   return value;
-}
-
-const char* landingPhaseName(LandingController::Phase phase) noexcept {
-  switch (phase) {
-    case LandingController::Phase::Grounded: return "Grounded";
-    case LandingController::Phase::Flight: return "Flight";
-    case LandingController::Phase::Impact: return "Impact";
-    case LandingController::Phase::Recovery: return "Recovery";
-  }
-  return "Unknown";
 }
 
 Options parseOptions(int argc, char** argv) {
@@ -155,11 +148,15 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--run-for") options.run_for_s = asDouble(value("--run-for"), "--run-for");
     else if (arg == "--seed") options.seed = static_cast<unsigned>(std::stoul(value("--seed")));
     else if (arg == "--no-gds68") options.gds68_feedback = false;
-    else if (arg == "--landing-30cm") options.landing_30cm = true;
+    else if (arg == "--command-port") {
+      const auto port = std::stoul(value("--command-port"));
+      if (port > 65535U) throw std::invalid_argument("invalid --command-port");
+      options.command_port = static_cast<std::uint16_t>(port);
+    }
     else if (arg == "--realtime") options.realtime = true;
     else if (arg == "--help") {
       std::cout << "tap_mujoco_native --model FILE [--rate 3000|4000] "
-                    "[--sensor-rate 500] [--landing-30cm] [--realtime] [--run-for SEC]\n";
+                    "[--sensor-rate 500] [--command-port PORT] [--realtime] [--run-for SEC]\n";
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + arg);
@@ -211,17 +208,19 @@ class NativeRunner {
     initial.imu.accel_magnitude_m_s2 = 9.81F;
     controller_.reset(initial);
     setNonBlockingStdin();
+    openCommandSocket();
     std::cout << "READY|backend=mujoco_native|physics_hz=" << options_.rate_hz
               << "|control_hz=" << options_.rate_hz
               << "|sensor_hz=" << options_.sensor_rate_hz
               << "|ground_truth_to_controller=0"
               << "|gds68_feedback=" << (options_.gds68_feedback ? 1 : 0)
               << "|imu_startup_qualification=1"
-              << "|scenario=" << (options_.landing_30cm ? "landing_30cm_v1p5_delayed_seed" : "neutral")
+              << "|scenario=neutral"
               << std::endl;
   }
 
   ~NativeRunner() {
+    if (command_socket_ >= 0) ::close(command_socket_);
     if (data_) mj_deleteData(data_);
     if (model_) mj_deleteModel(model_);
   }
@@ -381,13 +380,8 @@ class NativeRunner {
     data_->qpos[10] = robot_control::geometry::neutral_hip_rad;
     data_->qpos[11] = robot_control::geometry::neutral_knee_rad;
     std::fill(data_->qvel, data_->qvel + model_->nv, 0.0);
-    // The landing scenario deliberately starts on the supported natural
-    // ENABLE reference. The robot must first acquire a valid MPU6500 tilt seed before
-    // it reaches the ledge; spawning directly in free fall makes pitch
-    // unobservable to a 6-axis IMU and leaves the estimator at its zero
-    // initial value.  The ledge/drop event is injected later by
-    // startLandingScenario(), strictly as simulator setup, never as a
-    // controller input.
+    // Spawn on the supported natural ENABLE reference. The robot first
+    // acquires a valid MPU6500 tilt seed before the operator enables balance.
     mj_forward(model_, data_);
   }
 
@@ -448,14 +442,7 @@ class NativeRunner {
         robot_control::geometry::neutral_knee_rad, 0.0F,
         robot_control::geometry::neutral_hip_rad,
         robot_control::geometry::neutral_knee_rad, 0.0F};
-    // A landing run is an explicit fixture, so RESET restarts its approach.
-    // Ordinary runs remain disabled until the operator sends ENABLE.
-    if (options_.landing_30cm) {
-      command_.target_forward_velocity_m_s = 1.5F;
-      enable_request_ = true;
-    } else {
-      enable_request_ = false;
-    }
+    enable_request_ = false;
     disable_request_ = false;
     estop_ = false;
     enabled_ = false;
@@ -496,23 +483,6 @@ class NativeRunner {
     seen_touchdown_ = false;
     imu_seeded_ = false;
     imu_tilt_valid_ = false;
-    landing_scenario_started_ = false;
-    landing_drop_time_s_ = sim_time_s_ + landing_drop_delay_s_;
-  }
-
-  void startLandingScenario() {
-    if (!options_.landing_30cm || landing_scenario_started_ ||
-        sim_time_s_ < landing_drop_time_s_) {
-      return;
-    }
-    // Scenario setup only: model state is changed to represent driving off a
-    // sharp ledge.  No qpos/qvel/contact value is copied into RobotState or
-    // used by CMF, the FSM, MPC, or landing control.  The controller sees
-    // only the subsequent delayed/noisy MPU6500 and encoder streams.
-    data_->qpos[2] += landing_height_m_;
-    data_->qvel[0] = landing_command_speed_m_s_;
-    mj_forward(model_, data_);
-    landing_scenario_started_ = true;
   }
 
   void configureController() {
@@ -770,54 +740,11 @@ class NativeRunner {
     cfg.whole_body_stance.hip_max_rad = robot_control::geometry::native_hip_max_rad;
     cfg.whole_body_stance.knee_min_rad = robot_control::geometry::native_knee_min_rad;
     cfg.whole_body_stance.knee_max_rad = robot_control::geometry::native_knee_max_rad;
-    cfg.keep_legs_active_when_fallen = true;
-    cfg.landing_controller.enabled = true;
-    cfg.landing_controller.flight_extension_delay_s = 0.05F;
-    cfg.landing_controller.flight_extension_max_m = 0.025F;
-    cfg.landing_controller.flight_hip_offset_max_rad = 0.035F;
-    cfg.landing_controller.flight_knee_offset_max_rad = 0.18F;
-    cfg.landing_controller.flight_kp_scale = 0.65F;
-    cfg.landing_controller.impact_kp_scale = 1.0F;
-    cfg.landing_controller.impact_kd_scale = 1.0F;
-    cfg.landing_controller.height_kp_n_m = 20.0F;
-    cfg.landing_controller.height_kd_n_s_m = 8.0F;
-    cfg.landing_controller.max_virtual_force_n = 30.0F;
-    cfg.landing_controller.max_feedforward_torque_nm = 2.0F;
-    cfg.landing_controller.min_impact_s = 0.04F;
-    cfg.landing_controller.max_impact_s = 0.35F;
-    cfg.landing_controller.recovery_drive_ramp_s = 0.50F;
-    cfg.landing_controller.recovery_settle_pitch_rad = 0.22F;
-    cfg.landing_controller.recovery_settle_pitch_rate_rad_s = 0.55F;
-    cfg.landing_controller.recovery_settle_hold_s = 0.12F;
-    // Keep the native CMF scenario aligned with the checked-in 30 cm profile.
-    // These are all sensor-only landing mechanisms; their phase input still
-    // comes from FlightObserver, never from MuJoCo contact or pose.
-    cfg.landing_reflex.active_extension_gravity_m_s2 = 9.81F;
-    cfg.landing_reflex.active_extension_max_rad = 0.12F;
-    cfg.landing_reflex.active_extension_max_hip_rad = 0.035F;
-    cfg.landing_reflex.active_extension_delay_s = 0.05F;
-    cfg.landing_reflex.unloading_accel_mps2 = 4.0F;
-    cfg.landing_reflex.unloading_debounce_s = 0.025F;
-    cfg.landing_reflex.target_slew_rate_rad_s = 2.0F;
-    cfg.landing_reflex.catch_hold_s = 0.12F;
-    cfg.landing_reflex.catch_blend_s = 0.30F;
-    cfg.landing_reflex.min_airborne_before_touchdown_s = 0.03F;
-    cfg.landing_impedance.impact_kp_scale = 0.20F;
-    cfg.landing_impedance.impact_kd_scale = 3.0F;
-    cfg.landing_impedance.touchdown_velocity_threshold_m_s = 0.05F;
-    cfg.landing_impedance.hard_impact_accel_mps2 = 18.0F;
-    cfg.landing_impedance.rebound_blend_s = 0.22F;
-    cfg.landing_impedance.max_impact_duration_s = 0.35F;
-    cfg.landing_impedance.min_airborne_before_touchdown_s = 0.03F;
-    // The landing fixture needs the short CMF latency required by its
-    // measured drop. Normal balance uses a longer, conservative loss debounce:
-    // a wheel catch can unload the IMU briefly, and cutting MPC before that
-    // evidence is confirmed is worse than carrying the wheel command for a
-    // few extra milliseconds.
-    cfg.flight_observer.free_fall_debounce_s =
-        options_.landing_30cm ? 0.012F : 0.025F;
-    cfg.flight_observer.support_loss_debounce_s =
-        options_.landing_30cm ? 0.012F : 0.040F;
+    // No landing/recovery motion is compiled in this firmware profile.
+    // A fall therefore stops every actuator instead of holding the legs live.
+    cfg.keep_legs_active_when_fallen = false;
+    cfg.flight_observer.free_fall_debounce_s = 0.025F;
+    cfg.flight_observer.support_loss_debounce_s = 0.040F;
     // Use the observer's free-fall threshold instead of classifying ordinary
     // height-transition unloading as support loss. The time debounce still
     // protects genuine flight and keeps this sensor-only.
@@ -828,20 +755,9 @@ class NativeRunner {
     cfg.flight_observer.encoder_compression_rate_threshold_m_s = 0.08F;
     cfg.flight_observer.encoder_compression_reversal_threshold_m_s = 0.03F;
     cfg.flight_observer.encoder_touchdown_hold_s = 0.006F;
-    cfg.flight_observer.torque_corroboration_enabled = true;
-    cfg.flight_observer.torque_agreement_confidence_threshold = 0.75F;
-    cfg.flight_observer.torque_corroboration_speedup_multiplier = 1.5F;
-    cfg.torque_residual_estimator.enabled = options_.gds68_feedback;
-    cfg.torque_residual_estimator.use_force_projection = true;
-    cfg.torque_residual_estimator.use_inertial_term = true;
-    cfg.torque_residual_estimator.joint_accel_filter_time_constant_s = 0.008F;
-    cfg.torque_residual_estimator.unloading_force_threshold_n = 12.0F;
-    cfg.torque_residual_estimator.impact_force_threshold_n = 28.0F;
-    cfg.torque_residual_estimator.impact_accel_gate_m_s2 = 18.0F;
-    cfg.torque_residual_estimator.max_force_projection_joint_speed_rad_s = 0.45F;
-    cfg.torque_residual_estimator.residual_deadband_nm = 0.35F;
-    cfg.torque_residual_estimator.residual_debounce_s = 0.025F;
-    cfg.torque_residual_estimator.residual_decay_rate = 2.0F;
+    // Effort frames may still be emitted by the fake GDS68 transport for
+    // frame testing, but they are not part of the firmware balance contract.
+    cfg.flight_observer.torque_corroboration_enabled = false;
     controller_ = EmbeddedController(cfg);
     command_.target_joint_position_rad = {
         robot_control::geometry::neutral_hip_rad,
@@ -850,10 +766,6 @@ class NativeRunner {
         robot_control::geometry::neutral_knee_rad, 0.0F};
     command_.target_body_height_m = robot_control::geometry::neutral_spawn_z_m;
     height_request_started_ = false;
-    if (options_.landing_30cm) {
-      command_.target_forward_velocity_m_s = 1.5F;
-      enable_request_ = true;
-    }
   }
 
   void configureSensors() {
@@ -920,8 +832,7 @@ class NativeRunner {
       // only that sensor-level startup fixture until the estimator is seeded;
       // no pose, quaternion, contact or ground-truth quantity enters the
       // controller.  Once seeded, packets always come from the live model.
-      const bool startup_sensor_fixture =
-          !options_.landing_30cm && !imu_seeded_;
+      const bool startup_sensor_fixture = !imu_seeded_;
       for (int i = 0; i < 3; ++i) {
         imu_bias_accel_[i] += normal(0.012F * static_cast<float>(std::sqrt(dt)));
         imu_bias_gyro_[i] += normal(0.0006F * static_cast<float>(std::sqrt(dt)));
@@ -1493,15 +1404,13 @@ class NativeRunner {
     state_.dt_s = static_cast<float>(model_->opt.timestep);
     readCommands();
     updateDanceCommand();
-    startLandingScenario();
     updateActuators();
     // Before ENABLE the desktop model is paused, while the sensor queue above
     // continues with the bounded startup fixture.  After qualification an
     // ENABLE releases dynamics and the core only then owns balance.
     const bool lifecycle_paused =
         (!enable_request_ || estop_ ||
-         (disable_request_ && sim_time_s_ >= disable_hold_until_s_)) &&
-        !options_.landing_30cm;
+         (disable_request_ && sim_time_s_ >= disable_hold_until_s_));
     if (!lifecycle_paused) mj_step(model_, data_);
     sim_time_s_ += model_->opt.timestep;
     enqueueSensors();
@@ -1616,21 +1525,56 @@ class NativeRunner {
   }
 
   void readCommands() {
-    if (stdin_closed_) return;
-    pollfd descriptor{STDIN_FILENO, POLLIN, 0};
-    while (poll(&descriptor, 1, 0) > 0 && (descriptor.revents & POLLIN)) {
-      char buffer[512];
-      const ssize_t count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
-      if (count == 0) { stdin_closed_ = true; return; }
-      if (count < 0) return;
-      input_buffer_.append(buffer, static_cast<std::size_t>(count));
-      std::size_t newline = 0;
-      while ((newline = input_buffer_.find('\n')) != std::string::npos) {
-        const std::string line = input_buffer_.substr(0, newline);
-        input_buffer_.erase(0, newline + 1);
-        parseCommand(line);
+    if (!stdin_closed_) {
+      pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+      while (poll(&descriptor, 1, 0) > 0 && (descriptor.revents & POLLIN)) {
+        char buffer[512];
+        const ssize_t count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (count == 0) { stdin_closed_ = true; break; }
+        if (count < 0) break;
+        input_buffer_.append(buffer, static_cast<std::size_t>(count));
+        std::size_t newline = 0;
+        while ((newline = input_buffer_.find('\n')) != std::string::npos) {
+          const std::string line = input_buffer_.substr(0, newline);
+          input_buffer_.erase(0, newline + 1);
+          parseCommand(line);
+        }
       }
     }
+    if (command_socket_ < 0) return;
+    for (;;) {
+      char packet[512] = {};
+      const ssize_t count = ::recv(command_socket_, packet, sizeof(packet) - 1,
+                                   MSG_DONTWAIT);
+      if (count < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        return;
+      }
+      if (count == 0) return;
+      packet[count] = '\0';
+      parseCommand(std::string(packet, static_cast<std::size_t>(count)));
+    }
+  }
+
+  void openCommandSocket() {
+    if (options_.command_port == 0) return;
+    command_socket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (command_socket_ < 0) throw std::runtime_error("command UDP socket failed");
+    int reuse = 1;
+    (void)::setsockopt(command_socket_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                       sizeof(reuse));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(options_.command_port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(command_socket_, reinterpret_cast<sockaddr*>(&address),
+               sizeof(address)) < 0) {
+      ::close(command_socket_);
+      command_socket_ = -1;
+      throw std::runtime_error("command UDP bind failed");
+    }
+    const int flags = fcntl(command_socket_, F_GETFL, 0);
+    if (flags >= 0) fcntl(command_socket_, F_SETFL, flags | O_NONBLOCK);
   }
 
   void parseCommand(const std::string& line) {
@@ -1773,7 +1717,6 @@ class NativeRunner {
 
   void emitTelemetry() {
     const auto& flight = controller_.flightEstimate();
-    const auto& torque = controller_.torqueResidualEstimate();
     const auto& lqr = controller_.lqrDebugState();
     const auto& output = controller_.lastOutput();
     const auto& whole_body = controller_.wholeBodyState();
@@ -1798,10 +1741,6 @@ class NativeRunner {
               << "|flight_time_s=" << flight.flight_time_s
               << "|free_fall_confidence=" << flight.free_fall_confidence
               << "|collision_confidence=" << flight.collision_confidence
-              << "|torque_corroboration_used=" << flight.torque_corroboration_used
-              << "|landing_phase=" << landingPhaseName(controller_.landingPhase())
-              << "|landing_suspend_wheel=" << controller_.landingSuspendsWheelBalance()
-              << "|landing_drive_scale=" << controller_.landingDriveVelocityScale()
               << "|wheel_position=" << state_.wheel.position_m
               << "|wheel_velocity=" << state_.wheel.velocity_m_s
               << "|joint_lh=" << state_.joints.position_rad[0]
@@ -1891,8 +1830,7 @@ class NativeRunner {
               << "|cmd_rh=" << output.position_rad[3]
               << "|cmd_rk=" << output.position_rad[4]
               << "|cmd_rw=" << output.velocity_rad_s[5]
-              << "|torque_valid=" << torque.valid << "|fz_l=" << torque.left_normal_force_n
-              << "|fz_r=" << torque.right_normal_force_n << "|ground_truth_to_controller=0"
+              << "|torque_valid=0|fz_l=0|fz_r=0|ground_truth_to_controller=0"
               << "|fall_pitch_limit=" << controller_.fallPitchThresholdRad()
               << "|loop_hz=" << options_.rate_hz << std::endl;
     // VIEW is explicitly debug-only.  The GUI may render it, but this line is
@@ -1974,6 +1912,7 @@ class NativeRunner {
   bool estop_ = false;
   bool quit_ = false;
   bool stdin_closed_ = false;
+  int command_socket_ = -1;
   bool height_request_started_ = false;
   bool stationary_stop_request_ = false;
   bool dance_active_ = false;
@@ -1994,11 +1933,6 @@ class NativeRunner {
   bool seen_touchdown_ = false;
   bool imu_seeded_ = false;
   bool imu_tilt_valid_ = false;
-  bool landing_scenario_started_ = false;
-  static constexpr double landing_drop_delay_s_ = 0.20;
-  static constexpr double landing_height_m_ = 0.30;
-  static constexpr double landing_command_speed_m_s_ = 1.5;
-  double landing_drop_time_s_ = landing_drop_delay_s_;
   std::string input_buffer_;
 };
 

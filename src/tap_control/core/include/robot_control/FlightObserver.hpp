@@ -132,8 +132,10 @@ class FlightObserver {
   [[nodiscard]] bool finiteInput(const RobotState& state) const noexcept;
   void updateSupportHypothesis(
       const RobotState& state, float dt,
-      const TorqueResidualEstimator::Output* torque) noexcept;
-  [[nodiscard]] bool encoderTouchdownEvidence(const RobotState& state) const
+      const TorqueResidualEstimator::Output* torque,
+      float current_min_leg_height_rate_m_s) noexcept;
+  [[nodiscard]] bool encoderTouchdownEvidence(
+      const RobotState& state, float current_min_leg_height_rate_m_s) const
       noexcept;
 
   Config config_;

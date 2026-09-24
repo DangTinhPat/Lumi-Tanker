@@ -6,6 +6,7 @@ from collections import deque
 import math
 from pathlib import Path
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -34,9 +35,13 @@ class NativeBackend:
         self._reader: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._viewer_process: Optional[subprocess.Popen[str]] = None
+        self._command_socket: Optional[socket.socket] = None
+        self._command_port = 37681
+        self._ready = threading.Event()
 
     def runner_path(self) -> Path:
         candidates = [
+            self.root / "build/bin/tap_mujoco_native",
             self.root / "build/native/bin/tap_mujoco_native",
             self.root / "build/tap_mujoco_native3/tap_mujoco_native",
             self.root / "build/tap_mujoco_native/tap_mujoco_native",
@@ -62,13 +67,18 @@ class NativeBackend:
                 return
             runner = self.runner_path()
             model = self.root / "src/tap_sim/model/tap_robot.xml"
+            self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._ready.clear()
             self.process = subprocess.Popen(
-                [str(runner), "--model", str(model), "--rate", str(self.rate_hz), "--realtime"],
+                [str(runner), "--model", str(model), "--rate", str(self.rate_hz),
+                 "--command-port", str(self._command_port), "--realtime"],
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1)
             self._reader = threading.Thread(target=self._read_output, daemon=True)
             self._reader.start()
             try:
+                if not self._ready.wait(timeout=2.0):
+                    raise RuntimeError("native runner did not open command transport")
                 self._open_mujoco_viewer(model)
             except Exception:
                 self.stop()
@@ -126,6 +136,8 @@ class NativeBackend:
         if process is None or process.stdout is None:
             return
         for line in process.stdout:
+            if line.startswith("READY|"):
+                self._ready.set()
             self.lines.put(line.rstrip("\n"))
 
     @staticmethod
@@ -152,11 +164,18 @@ class NativeBackend:
 
     def send(self, command: str) -> None:
         process = self.process
-        if process is None or process.stdin is None or process.poll() is not None:
+        if process is None or process.poll() is not None:
             return
         try:
-            process.stdin.write(command.rstrip("\n") + "\n")
-            process.stdin.flush()
+            packet = (command.rstrip("\n") + "\n").encode("ascii")
+            if self._command_socket is not None:
+                # One datagram is one BLE-like command write; no controller
+                # response is required on this path.
+                self._command_socket.sendto(
+                    packet, ("127.0.0.1", self._command_port))
+            elif process.stdin is not None:
+                process.stdin.write(packet.decode("ascii"))
+                process.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
 
@@ -176,6 +195,9 @@ class NativeBackend:
                 process.kill()
                 process.wait()
         self.process = None
+        if self._command_socket is not None:
+            self._command_socket.close()
+            self._command_socket = None
 
     def command_drive(self, velocity: float, yaw_rate: float) -> None:
         if math.isfinite(velocity) and math.isfinite(yaw_rate):

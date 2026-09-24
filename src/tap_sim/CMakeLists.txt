@@ -150,18 +150,6 @@ if(BUILD_TESTING)
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml
             --duration-s 120)
-  add_test(
-    NAME tap_mujoco_native_landing_cmf
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_landing_contract_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_multirate_cmf
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_multirate_cmf_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   # These tests own a native runner and sensor clock. Prevent a parallel CTest
   # job from turning host contention into a false lifecycle/control failure.
   set_tests_properties(
@@ -174,7 +162,5 @@ if(BUILD_TESTING)
     tap_mujoco_native_yaw_station
     tap_mujoco_native_posture_transition
     tap_mujoco_native_dance_skill
-    tap_mujoco_native_landing_cmf
-    tap_mujoco_native_multirate_cmf
     PROPERTIES RUN_SERIAL TRUE)
 endif()

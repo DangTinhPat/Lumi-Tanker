@@ -207,7 +207,7 @@ void LqrBalancer::setComHeight(float com_height_m) {
   }
 }
 
-void LqrBalancer::reset(float ground_position_m, bool floor_contact) {
+void LqrBalancer::reset(float ground_position_m, bool /*floor_contact*/) {
   commanded_ground_velocity_m_s_ = 0.0F;
   station_gain_quiet_elapsed_s_ = 0.0F;
   station_gain_blend_ = 0.0F;
@@ -217,10 +217,6 @@ void LqrBalancer::reset(float ground_position_m, bool floor_contact) {
   target_yaw_rate_rad_s_ = 0.0F;
   ground_position_target_m_ = ground_position_m;
   station_origin_position_m_ = ground_position_m;
-  prev_floor_contact_ = floor_contact;
-  landing_window_remaining_s_ = 0.0F;
-  landing_velocity_seed_m_s_ = 0.0F;
-  landing_velocity_seed_valid_ = false;
   last_debug_ = DebugState{};
   last_debug_.effective_pendulum_length_m = active_length_m_;
   last_debug_.riccati_iterations = config_.riccati_iterations;
@@ -248,13 +244,6 @@ void LqrBalancer::clearForwardVelocityReference() noexcept {
 void LqrBalancer::setStationVelocityReference(float velocity_m_s) noexcept {
   if (std::isfinite(velocity_m_s)) {
     station_velocity_reference_m_s_ = velocity_m_s;
-  }
-}
-
-void LqrBalancer::setLandingVelocitySeed(float velocity_m_s) noexcept {
-  if (std::isfinite(velocity_m_s)) {
-    landing_velocity_seed_m_s_ = velocity_m_s;
-    landing_velocity_seed_valid_ = true;
   }
 }
 
@@ -384,14 +373,6 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
     last_debug_ = DebugState{};
     return output;
   }
-
-  const bool touchdown = !prev_floor_contact_ && state.floor_contact;
-  if (touchdown && config_.landing_window_s > 0.0F)
-    landing_window_remaining_s_ = config_.landing_window_s;
-  prev_floor_contact_ = state.floor_contact;
-  const bool landing_active = landing_window_remaining_s_ > 0.0F;
-  if (integrate) landing_window_remaining_s_ = std::max(
-      0.0F, landing_window_remaining_s_ - dt);
 
   float forward = clampFinite(command.target_forward_velocity_m_s,
                               -config_.max_ground_velocity_m_s,
@@ -545,23 +526,16 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       std::max(config_.wheel_ground_mu, 0.0F) *
       std::max(config_.gravity_m_s2, 0.0F);
   const float accel_limit = std::min(
-      std::max(config_.max_ground_accel_m_s2 +
-                   (landing_active
-                        ? std::max(config_.landing_ground_accel_boost_m_s2,
-                                   0.0F)
-                        : 0.0F),
+      std::max(config_.max_ground_accel_m_s2,
                0.1F),
       std::max(friction_accel_limit, 0.1F));
   ground_accel = clampFinite(ground_accel, -accel_limit, accel_limit);
 
   if (!integrate || !state.floor_contact) {
-    if (!(integrate && !state.floor_contact && landing_active &&
-          config_.landing_hold_airborne_velocity)) {
-      commanded_ground_velocity_m_s_ +=
-          std::clamp(-commanded_ground_velocity_m_s_ * dt / 0.1F,
-                     -std::abs(commanded_ground_velocity_m_s_),
-                     std::abs(commanded_ground_velocity_m_s_));
-    }
+    commanded_ground_velocity_m_s_ +=
+        std::clamp(-commanded_ground_velocity_m_s_ * dt / 0.1F,
+                   -std::abs(commanded_ground_velocity_m_s_),
+                   std::abs(commanded_ground_velocity_m_s_));
   } else {
     // The LQR input is physical ground acceleration. Integrate it once into
     // the speed target; the motor's internal speed servo then realizes it.
@@ -571,13 +545,6 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       commanded_ground_velocity_m_s_ *= std::clamp(
           1.0F - config_.station_velocity_decay_gain_hz * dt, 0.0F, 1.0F);
     }
-  }
-  if (landing_velocity_seed_valid_ && state.floor_contact) {
-    commanded_ground_velocity_m_s_ = std::clamp(
-        commanded_ground_velocity_m_s_ + config_.landing_velocity_carry_gain *
-            (landing_velocity_seed_m_s_ - commanded_ground_velocity_m_s_),
-        -config_.max_ground_velocity_m_s, config_.max_ground_velocity_m_s);
-    landing_velocity_seed_valid_ = false;
   }
   commanded_ground_velocity_m_s_ = clampFinite(commanded_ground_velocity_m_s_,
                                                -config_.max_ground_velocity_m_s,
@@ -597,7 +564,6 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   last_debug_.capture_distance_m = capture_distance;
   last_debug_.station_hold_active = hold_station;
   last_debug_.riccati_iterations = config_.riccati_iterations;
-  last_debug_.landing_window_remaining_s = landing_window_remaining_s_;
 
   if (std::abs(state.imu.pitch_rad - balance_pitch_ref_rad) > config_.fall_pitch_rad) {
     output.fallen = true;
@@ -628,13 +594,8 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   last_debug_.leg_velocity_error_m_s = output.velocity_error_m_s;
   const float yaw_scale = std::abs(yaw_command) >= config_.stiff_yaw_rate_rad_s
       ? config_.turning_stiffness_boost : 0.0F;
-  const float landing_scale = landing_active
-      ? landing_window_remaining_s_ / std::max(config_.landing_window_s, 1.0e-4F)
-      : 0.0F;
-  output.leg_kp_scale = config_.leg_kp_scale +
-      yaw_scale + landing_scale * config_.landing_kp_boost;
-  output.leg_kd_scale = config_.leg_kd_scale +
-      yaw_scale + landing_scale * config_.landing_kd_boost;
+  output.leg_kp_scale = config_.leg_kp_scale + yaw_scale;
+  output.leg_kd_scale = config_.leg_kd_scale + yaw_scale;
   return output;
 }
 
