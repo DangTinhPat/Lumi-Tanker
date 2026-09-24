@@ -113,6 +113,7 @@ constexpr float kDanceYawBudgetRad = 1.7F;
 
 struct Options {
   std::string model;
+  std::string initial_keyframe = "home_offset";
   double rate_hz = 3000.0;
   double sensor_rate_hz = 500.0;
   double run_for_s = 0.0;
@@ -150,6 +151,7 @@ Options parseOptions(int argc, char** argv) {
       return argv[++i];
     };
     if (arg == "--model") options.model = value("--model");
+    else if (arg == "--keyframe") options.initial_keyframe = value("--keyframe");
     else if (arg == "--rate") options.rate_hz = asDouble(value("--rate"), "--rate");
     else if (arg == "--sensor-rate") options.sensor_rate_hz = asDouble(value("--sensor-rate"), "--sensor-rate");
     else if (arg == "--run-for") options.run_for_s = asDouble(value("--run-for"), "--run-for");
@@ -158,7 +160,7 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--landing-30cm") options.landing_30cm = true;
     else if (arg == "--realtime") options.realtime = true;
     else if (arg == "--help") {
-      std::cout << "tap_mujoco_native --model FILE [--rate 3000|4000] "
+      std::cout << "tap_mujoco_native --model FILE [--keyframe NAME] [--rate 3000|4000] "
                     "[--sensor-rate 500] [--landing-30cm] [--realtime] [--run-for SEC]\n";
       std::exit(0);
     } else {
@@ -210,6 +212,7 @@ class NativeRunner {
     }
     initial.imu.accel_magnitude_m_s2 = 9.81F;
     controller_.reset(initial);
+    resetSensorPipeline();
     setNonBlockingStdin();
     std::cout << "READY|backend=mujoco_native|physics_hz=" << options_.rate_hz
               << "|control_hz=" << options_.rate_hz
@@ -379,14 +382,15 @@ class NativeRunner {
 
   void initializeState() {
     const int home_keyframe = mj_name2id(
-        model_, mjOBJ_KEY, "home_offset");
+        model_, mjOBJ_KEY, options_.initial_keyframe.c_str());
     if (home_keyframe >= 0) {
       // Spawn at the powered-home offset. The disabled lifecycle pauses this
       // pose; POWER_OFF explicitly releases it so MuJoCo gravity produces the
       // natural collapse seen by the sensors.
       mj_resetDataKeyframe(model_, data_, home_keyframe);
     } else {
-      throw std::runtime_error("missing home_offset keyframe");
+      throw std::runtime_error("missing initial keyframe: " +
+                               options_.initial_keyframe);
     }
     std::fill(data_->qvel, data_->qvel + model_->nv, 0.0);
     // The landing scenario deliberately starts on the supported natural
@@ -437,7 +441,14 @@ class NativeRunner {
     accel_trust_ = 0.0F;
     raw_accel_.fill(0.0F);
     feedback_.fill(0.0F);
-    leg_feedback_position_.fill(0.0F);
+    // A disabled GDS68 still reports its absolute encoder position. Seed the
+    // fake feedback in the driver's calibrated frame; zero-initialising it
+    // makes native hip zero look like the collapsed low-body keyframe.
+    for (std::size_t i = 0; i < 4; ++i) {
+      const std::size_t joint = i < 2 ? i : i + 1;
+      leg_feedback_position_[i] = nativeToDriver(
+          joint, static_cast<float>(data_->qpos[kJointQpos[joint]]));
+    }
     leg_feedback_velocity_.fill(0.0F);
     wheel_feedback_position_previous_.fill(0.0F);
     wheel_feedback_position_unwrapped_.fill(0.0F);

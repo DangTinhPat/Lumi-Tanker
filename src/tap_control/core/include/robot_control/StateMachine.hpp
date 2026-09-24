@@ -33,9 +33,13 @@ class StateMachine {
                                    const ControlCommand& command,
                                    bool pose_motion_active,
                                    bool stand_up_active,
-                                   bool airborne = false);
+                                   bool airborne = false,
+                                   bool low_body_rocker = false);
   [[nodiscard]] ControlMode mode() const noexcept;
   [[nodiscard]] float fallPitchRad() const noexcept { return config_.fall_pitch_rad; }
+  [[nodiscard]] bool lowBodyRockerLatched() const noexcept {
+    return low_body_rocker_latched_;
+  }
 
  private:
   void enter(ControlMode next_mode);
@@ -45,6 +49,7 @@ class StateMachine {
   unsigned cycles_in_mode_ = 0;
   bool stand_up_requested_ = false;
   bool enable_requested_ = false;
+  bool low_body_rocker_latched_ = false;
 };
 
 [[nodiscard]] const char* toString(ControlMode mode) noexcept;

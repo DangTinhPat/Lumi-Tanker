@@ -606,6 +606,9 @@ void EmbeddedController::reset(const RobotState& state) {
   stand_up_settle_cycles_ = 0;
   stand_up_settle_elapsed_s_ = 0.0F;
   stand_up_fall_sign_ = 1.0F;
+  rocker_pump_torque_nm_ = 0.0F;
+  rocker_crossed_balance_ = false;
+  rocker_catch_stable_s_ = 0.0F;
   last_output_ = MotorCommand{};
   last_imu_sample_sequence_ = 0;
   last_encoder_sample_sequence_ = 0;
@@ -1498,7 +1501,8 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       joint_motion_.active();
   ControlMode mode = state_machine_.update(
       state, command, pose_motion_active, standingUp(),
-      last_flight_estimate_.airborne || last_flight_estimate_.support_settling);
+      last_flight_estimate_.airborne || last_flight_estimate_.support_settling,
+      lowBodyRocker(state));
   // Keep the sensor-derived fall latch authoritative even when a caller
   // supplies a custom StateMachine configuration. This duplicates no sensor
   // source: it is the same MPU6500 pitch and the same airborne hypothesis
@@ -1545,6 +1549,16 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       writeSafeStop(output, state);
       return finish(output);
     }
+    if (low_body_recovery_ &&
+        std::abs(state.imu.pitch_rad) >=
+            std::max(config_.stand_up.rocker_abort_pitch_rad, 0.0F)) {
+      // The low-body hardware cannot recover an unchecked wheelie. Cut all
+      // actuator authority before the body reaches the floor-facing branch.
+      finishStandUp(state);
+      state_machine_.abortStandUp();
+      writeSafeStop(output, state);
+      return finish(output);
+    }
     JointArray joint_target = joint_motion_.update(state.dt_s);
     // Tuck and Rise are one recovery transaction. Moving the legs while
     // forcing the wheels to zero removes the only actuator that can catch the
@@ -1553,14 +1567,32 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
     ControlCommand recovery_command = command;
     recovery_command.target_forward_velocity_m_s = 0.0F;
     recovery_command.target_yaw_rate_rad_s = 0.0F;
-    const bool wheel_capture_window = state.floor_contact &&
+    const bool ordinary_wheel_capture = !low_body_recovery_ &&
+        state.floor_contact &&
         std::abs(state.imu.pitch_rad) <=
             std::max(config_.stand_up.wheel_balance_pitch_rad, 0.0F) &&
         std::abs(state.imu.pitch_rate_rad_s) <=
             std::max(config_.stand_up.wheel_balance_pitch_rate_rad_s, 0.0F);
+    const bool rocker_capture_phase = low_body_recovery_ &&
+        (stand_up_stage_ == StandUpStage::Catch ||
+         stand_up_stage_ == StandUpStage::Rise ||
+         stand_up_stage_ == StandUpStage::Settle);
+    const bool rocker_support = rocker_capture_phase &&
+        !last_flight_estimate_.airborne &&
+        !last_flight_estimate_.support_unloading;
+    const bool wheel_capture_window = ordinary_wheel_capture || rocker_support;
+    RobotState recovery_state = state;
+    // This is a sensor-derived two-point support hypothesis. Keep LQR alive
+    // through the reversible observer delay instead of dropping wheel catch
+    // authority while the body is rocking on the floor/wheels.
+    if (rocker_support) {
+      recovery_state.floor_contact = true;
+      recovery_state.left_floor_contact = true;
+      recovery_state.right_floor_contact = true;
+    }
     LqrBalancer::Output balance{};
     if (wheel_capture_window) {
-      balance = runBalance(state, recovery_command, true);
+      balance = runBalance(recovery_state, recovery_command, true);
     } else {
       // Keep the LQR reference decaying deterministically, but do not
       // publish its stale wheel velocity while the body is outside the
@@ -1578,7 +1610,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
     // recovery tick; never reuse a pre-fall Balance torque.
     last_whole_body_stance_ = whole_body_stance_.update(
         state, joint_target, last_whole_body_, false, state.dt_s,
-        false, state.floor_contact);
+        false, rocker_capture_phase && state.floor_contact);
     joint_target = last_whole_body_stance_.target;
     writeBalancedCommand(output, balance, joint_target, LandingImpedance::Output{},
                          LandingController::Output{});
@@ -1593,7 +1625,11 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
 
   if (mode == ControlMode::Enabling) {
     resetBalance(state.wheel.position_m, state.floor_contact);
-    writePostureHold(output, command.target_joint_position_rad, state);
+    // A low-body rocker is already loaded against the floor. Re-referencing
+    // it to neutral here injects the pitch impulse recovery must overcome.
+    writePostureHold(output, (lowBodyRocker(state) ||
+                              state_machine_.lowBodyRockerLatched())
+        ? state.joints.position_rad : command.target_joint_position_rad, state);
     return finish(output);
   }
 
@@ -2158,6 +2194,8 @@ void EmbeddedController::writeBalancedCommand(
       output.feedforward_nm[i] += vmc_torque[i];
     }
   }
+  output.feedforward_nm[left_hip] += rocker_pump_torque_nm_;
+  output.feedforward_nm[right_hip] += rocker_pump_torque_nm_;
 }
 
 JointArray EmbeddedController::standUpPose(const JointArray& pose) const {
@@ -2171,14 +2209,69 @@ JointArray EmbeddedController::standUpPose(const JointArray& pose) const {
   return out;
 }
 
+bool EmbeddedController::lowBodyRocker(const RobotState& state) const noexcept {
+  const float hip = 0.5F * (state.joints.position_rad[left_hip] +
+                            state.joints.position_rad[right_hip]);
+  const float knee = 0.5F * (state.joints.position_rad[left_knee] +
+                             state.joints.position_rad[right_knee]);
+  const bool symmetric =
+      std::abs(state.joints.position_rad[left_hip] -
+               state.joints.position_rad[right_hip]) < 0.20F &&
+      std::abs(state.joints.position_rad[left_knee] -
+               state.joints.position_rad[right_knee]) < 0.20F;
+  const bool result = symmetric &&
+      hip >= config_.stand_up.low_body_hip_min_rad &&
+      hip <= config_.stand_up.low_body_hip_max_rad &&
+      knee >= config_.stand_up.low_body_knee_min_rad &&
+      knee <= config_.stand_up.low_body_knee_max_rad &&
+      std::abs(state.imu.pitch_rad) <=
+          std::max(config_.stand_up.low_body_max_abs_pitch_rad, 0.0F) &&
+      std::abs(state.imu.pitch_rate_rad_s) <=
+          std::max(config_.stand_up.low_body_max_pitch_rate_rad_s, 0.0F) &&
+      std::abs(state.imu.accel_magnitude_m_s2 - 9.81F) < 1.5F;
+  return result;
+}
+
+float EmbeddedController::rockerEnergy(const RobotState& state) const noexcept {
+  const float inertia = std::max(last_whole_body_.pitch_inertia_at_axle_kg_m2,
+                                 1.0e-3F);
+  const float com_x = last_whole_body_.com_offset_x_m;
+  const float com_z = std::max(last_whole_body_.com_above_axle_m, 0.0F);
+  // The FK vector is body-fixed.  This is its world vertical height while
+  // rocking about the wheel axle; using z*(1-cos(pitch)) loses the fore/aft
+  // COM term and reports false energy at the low-body support angles.
+  const float world_height = com_z * std::cos(state.imu.pitch_rad) -
+      com_x * std::sin(state.imu.pitch_rad);
+  const float kinetic = 0.5F * inertia *
+      state.imu.pitch_rate_rad_s * state.imu.pitch_rate_rad_s;
+  const float potential = geometry::total_mass_kg * 9.81F * world_height;
+  return std::isfinite(kinetic + potential) ? kinetic + potential : 0.0F;
+}
+
 void EmbeddedController::beginStandUp(const RobotState& state) {
-  stand_up_stage_ = StandUpStage::Tuck;
+  low_body_recovery_ = lowBodyRocker(state) ||
+      state_machine_.lowBodyRockerLatched();
+  stand_up_stage_ = low_body_recovery_ ? StandUpStage::Qualify
+                                       : StandUpStage::Tuck;
   stand_up_settle_cycles_ = 0;
   // Which way is the robot lying? +1 face-down (pitch ~ +pi/2), -1 belly-up.
   stand_up_fall_sign_ = (state.imu.pitch_rad >= 0.0F) ? 1.0F : -1.0F;
-  joint_motion_.startMove(state.joints.position_rad,
-                          standUpPose(config_.stand_up.tuck_pose_rad),
-                          config_.stand_up.tuck_duration_s);
+  rocker_pump_count_ = 0;
+  rocker_elapsed_s_ = 0.0F;
+  rocker_pump_torque_nm_ = 0.0F;
+  rocker_crossed_balance_ = false;
+  rocker_catch_stable_s_ = 0.0F;
+  // The configured low-body keyframe is on the front rocker. Increasing the
+  // hip angle moves the body toward the axle; reverse only after the live
+  // pitch rate says that this swing has reached its turning point.
+  rocker_direction_ = state.imu.pitch_rad >= -0.10F ? 1.0F : -1.0F;
+  if (!low_body_recovery_) {
+    joint_motion_.startMove(state.joints.position_rad,
+                            standUpPose(config_.stand_up.tuck_pose_rad),
+                            config_.stand_up.tuck_duration_s);
+  } else {
+    joint_motion_.reset(state.joints.position_rad);
+  }
   // Do not carry a pre-fall VMC torque into Tuck/Rise. The recovery branch
   // recomputes VMC from the live body and joint state once Rise starts.
   whole_body_stance_.reset();
@@ -2199,6 +2292,136 @@ void EmbeddedController::advanceStandUp(const RobotState& state) {
     case StandUpStage::Idle:
       break;
 
+    case StandUpStage::Qualify:
+      rocker_elapsed_s_ += std::max(state.dt_s, 0.0F);
+      if (rocker_elapsed_s_ >= 0.20F) {
+        stand_up_stage_ = StandUpStage::Prepare;
+        rocker_elapsed_s_ = 0.0F;
+        JointArray target = state.joints.position_rad;
+        target[left_hip] = config_.stand_up.rocker_prepare_hip_rad;
+        target[right_hip] = config_.stand_up.rocker_prepare_hip_rad;
+        target[left_knee] = config_.stand_up.rocker_prepare_knee_rad;
+        target[right_knee] = config_.stand_up.rocker_prepare_knee_rad;
+        joint_motion_.startMove(state.joints.position_rad,
+                                standUpPose(target),
+                                config_.stand_up.rocker_prepare_duration_s);
+      }
+      break;
+
+    case StandUpStage::Prepare:
+      if (!joint_motion_.active()) {
+        stand_up_stage_ = StandUpStage::Pump;
+        rocker_elapsed_s_ = 0.0F;
+        rocker_pump_count_ = 1;
+        rocker_pump_torque_nm_ = rocker_direction_ *
+            std::max(config_.leg_max_torque_nm, 0.0F);
+        JointArray target = joint_motion_.target();
+        target[left_hip] += rocker_direction_ *
+            config_.stand_up.rocker_pump_amplitude_rad;
+        target[right_hip] += rocker_direction_ *
+            config_.stand_up.rocker_pump_amplitude_rad;
+        target[left_knee] = config_.stand_up.rocker_prepare_knee_rad;
+        target[right_knee] = config_.stand_up.rocker_prepare_knee_rad;
+        joint_motion_.startMove(joint_motion_.target(), standUpPose(target),
+                                config_.stand_up.rocker_pump_duration_s);
+      }
+      break;
+
+    case StandUpStage::Pump: {
+      rocker_elapsed_s_ += std::max(state.dt_s, 0.0F);
+      if (rocker_elapsed_s_ >=
+          std::max(config_.stand_up.rocker_pump_timeout_s, 0.0F)) {
+        finishStandUp(state);
+        state_machine_.abortStandUp();
+        break;
+      }
+      rocker_crossed_balance_ = rocker_crossed_balance_ ||
+          state.imu.pitch_rad < -0.05F;
+      const float com_radius = std::hypot(last_whole_body_.com_offset_x_m,
+                                          last_whole_body_.com_above_axle_m);
+      const float energy_target = geometry::total_mass_kg * 9.81F * com_radius;
+      const float energy_deficit = std::max(
+          energy_target - rockerEnergy(state), 0.0F);
+      const float swing_sign = rocker_direction_;
+      const float max_leg_torque = std::max(config_.leg_max_torque_nm, 0.0F);
+      rocker_pump_torque_nm_ = rocker_elapsed_s_ <
+              std::max(config_.stand_up.rocker_kick_duration_s, 0.0F)
+          ? swing_sign * max_leg_torque
+          : std::clamp(0.80F * energy_deficit * swing_sign,
+                       -max_leg_torque, max_leg_torque);
+      const float energy_error = std::abs(rockerEnergy(state) - energy_target);
+      const float balance_pitch = WholeBodyModel::equilibriumPitch(
+          last_whole_body_);
+      const bool captured = rocker_elapsed_s_ >= 0.10F &&
+          rocker_crossed_balance_ &&
+          std::abs(state.imu.pitch_rad - balance_pitch) <=
+              std::max(config_.stand_up.rocker_capture_pitch_rad, 0.0F) &&
+          std::abs(state.imu.pitch_rate_rad_s) <=
+              std::max(config_.stand_up.rocker_capture_pitch_rate_rad_s, 0.0F) &&
+          energy_error <= std::max(config_.stand_up.rocker_energy_tolerance_j,
+                                   0.0F);
+      if (captured) {
+        stand_up_stage_ = StandUpStage::Catch;
+        rocker_elapsed_s_ = 0.0F;
+        rocker_pump_torque_nm_ = 0.0F;
+        rocker_catch_stable_s_ = 0.0F;
+        joint_motion_.reset(joint_motion_.target());
+      } else if (!joint_motion_.active()) {
+        const float swing_rate = -rocker_direction_ *
+            state.imu.pitch_rate_rad_s;
+        // A position target can finish before the body has absorbed the
+        // impulse. Hold that target until the measured rocker motion turns;
+        // switching on the planner timer cancels the useful swing.
+        if (rocker_elapsed_s_ <
+                std::max(0.50F, config_.stand_up.rocker_pump_duration_s) ||
+            swing_rate > 0.10F) {
+          break;
+        }
+        if (rocker_pump_count_ >= config_.stand_up.rocker_max_pumps) {
+          finishStandUp(state);
+          state_machine_.abortStandUp();
+          break;
+        }
+        rocker_direction_ = -rocker_direction_;
+        ++rocker_pump_count_;
+        rocker_elapsed_s_ = 0.0F;
+        rocker_pump_torque_nm_ = rocker_direction_ *
+            std::max(config_.leg_max_torque_nm, 0.0F);
+        JointArray target = joint_motion_.target();
+        target[left_hip] = config_.stand_up.rocker_prepare_hip_rad +
+            rocker_direction_ * config_.stand_up.rocker_pump_amplitude_rad;
+        target[right_hip] = target[left_hip];
+        target[left_knee] = config_.stand_up.rocker_prepare_knee_rad;
+        target[right_knee] = target[left_knee];
+        joint_motion_.startMove(joint_motion_.target(), standUpPose(target),
+                                config_.stand_up.rocker_pump_duration_s);
+      }
+      break;
+    }
+
+    case StandUpStage::Catch:
+      rocker_pump_torque_nm_ = 0.0F;
+      rocker_elapsed_s_ += std::max(state.dt_s, 0.0F);
+      if (std::abs(state.imu.pitch_rad) <=
+              std::max(config_.stand_up.settle_pitch_rad, 0.0F) &&
+          std::abs(state.imu.pitch_rate_rad_s) <= 0.80F) {
+        rocker_catch_stable_s_ += std::max(state.dt_s, 0.0F);
+      } else {
+        rocker_catch_stable_s_ = 0.0F;
+      }
+      if (rocker_catch_stable_s_ >=
+              std::max(config_.stand_up.rocker_catch_duration_s, 0.0F)) {
+        stand_up_stage_ = StandUpStage::Rise;
+        joint_motion_.startMove(
+            joint_motion_.target(), standUpPose(config_.stand_up.stand_pose_rad),
+            config_.stand_up.rise_duration_s);
+      } else if (rocker_elapsed_s_ >=
+                 std::max(config_.stand_up.rocker_catch_timeout_s, 0.0F)) {
+        finishStandUp(state);
+        state_machine_.abortStandUp();
+      }
+      break;
+
     case StandUpStage::Tuck:
       if (!joint_motion_.active()) {
         stand_up_stage_ = StandUpStage::Rise;
@@ -2209,6 +2432,7 @@ void EmbeddedController::advanceStandUp(const RobotState& state) {
       break;
 
     case StandUpStage::Rise:
+      rocker_pump_torque_nm_ = 0.0F;
       if (!joint_motion_.active()) {
         stand_up_stage_ = StandUpStage::Settle;
         stand_up_settle_cycles_ = 0;
@@ -2218,6 +2442,7 @@ void EmbeddedController::advanceStandUp(const RobotState& state) {
       break;
 
     case StandUpStage::Settle:
+      rocker_pump_torque_nm_ = 0.0F;
       stand_up_settle_elapsed_s_ += std::max(state.dt_s, 0.0F);
       if (std::abs(state.imu.pitch_rad) < config_.stand_up.settle_pitch_rad &&
           std::abs(state.imu.pitch_rate_rad_s) < 0.2F && state.floor_contact) {
@@ -2239,6 +2464,12 @@ void EmbeddedController::advanceStandUp(const RobotState& state) {
 
 void EmbeddedController::finishStandUp(const RobotState& state) {
   stand_up_stage_ = StandUpStage::Idle;
+  low_body_recovery_ = false;
+  rocker_pump_count_ = 0;
+  rocker_elapsed_s_ = 0.0F;
+  rocker_pump_torque_nm_ = 0.0F;
+  rocker_crossed_balance_ = false;
+  rocker_catch_stable_s_ = 0.0F;
   stand_up_settle_cycles_ = 0;
   stand_up_settle_elapsed_s_ = 0.0F;
   setBalanceFallPitch(config_.lqr.fall_pitch_rad);

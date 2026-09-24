@@ -13,18 +13,27 @@ void StateMachine::reset() {
   cycles_in_mode_ = 0;
   stand_up_requested_ = false;
   enable_requested_ = false;
+  low_body_rocker_latched_ = false;
 }
 
 ControlMode StateMachine::update(const RobotState& state,
                                  const ControlCommand& command,
                                  bool pose_motion_active,
                                  bool stand_up_active,
-                                 bool airborne) {
+                                 bool airborne,
+                                 bool low_body_rocker) {
   const bool stand_trigger = command.request_stand_up && !stand_up_requested_;
   stand_up_requested_ = command.request_stand_up;
+  if (mode_ == ControlMode::Disabled && low_body_rocker) {
+    // Classify before ENABLE can inject actuator acceleration. The measured
+    // pose is the only valid startup evidence; later IMU spikes must not
+    // redirect a low-body spawn into the neutral Balance path.
+    low_body_rocker_latched_ = true;
+  }
   const bool enable_trigger = command.request_enable && !enable_requested_;
   enable_requested_ = command.request_enable;
   if (state.emergency_stop || command.request_disable) {
+    low_body_rocker_latched_ = false;
     enter(ControlMode::EmergencyStop);
     return mode_;
   }
@@ -79,7 +88,8 @@ ControlMode StateMachine::update(const RobotState& state,
 
     case ControlMode::Enabling:
       if (++cycles_in_mode_ >= config_.enable_cycles) {
-        enter(ControlMode::Balance);
+        enter(low_body_rocker_latched_ ? ControlMode::StandingUp
+                                       : ControlMode::Balance);
       }
       break;
 
@@ -112,6 +122,7 @@ ControlMode StateMachine::update(const RobotState& state,
       // re-arm the wheels after a transient pitch recovery; require a new
       // rising edge (or the explicit STAND_UP path above).
       if (enable_trigger && !state.emergency_stop && !tipped) {
+        low_body_rocker_latched_ = false;
         enter(ControlMode::Enabling);
       }
       break;

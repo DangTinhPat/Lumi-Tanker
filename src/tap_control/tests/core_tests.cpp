@@ -139,6 +139,30 @@ void lifecycleTests() {
         "disable has immediate stop priority");
 }
 
+void lowBodyEnableLatchTests() {
+  EmbeddedController::Config config;
+  config.state_machine.enable_cycles = 1;
+  EmbeddedController controller(config);
+  RobotState state;
+  state.joints.position_rad = {2.27392F, -1.2F, 0.0F,
+                               2.27392F, -1.2F, 0.0F};
+  state.imu.accel_magnitude_m_s2 = 9.81F;
+  ControlCommand command;
+  command.target_joint_position_rad = state.joints.position_rad;
+  controller.reset(state);
+
+  // Classification happens while disabled, before ENABLE can disturb the
+  // accelerometer. The next sample deliberately looks dynamic.
+  (void)controller.update(state, command);
+  command.request_enable = true;
+  (void)controller.update(state, command);
+  command.request_enable = false;
+  state.imu.accel_magnitude_m_s2 = 15.0F;
+  (void)controller.update(state, command);
+  check(controller.mode() == ControlMode::StandingUp,
+        "low-body startup classification is latched before ENABLE");
+}
+
 void fallGuardTests() {
   EmbeddedController::Config config;
   config.lqr.fall_pitch_rad = 0.55F;
@@ -165,6 +189,7 @@ int main() {
   geometryTests();
   lqrTests();
   lifecycleTests();
+  lowBodyEnableLatchTests();
   fallGuardTests();
   return failures == 0 ? 0 : 1;
 }

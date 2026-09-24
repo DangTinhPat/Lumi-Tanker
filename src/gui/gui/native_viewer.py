@@ -61,8 +61,8 @@ def main(argv=None):
         model, data, show_left_ui=True, show_right_ui=True)
     with handle.lock():
         handle.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-        handle.cam.lookat[:] = [0.0, 0.0, 0.10]
-        handle.cam.distance = 0.75
+        handle.cam.lookat[:] = [0.0, 0.0, 0.08]
+        handle.cam.distance = 0.45
         handle.cam.azimuth = model.vis.global_.azimuth
         handle.cam.elevation = model.vis.global_.elevation
     handle.sync()

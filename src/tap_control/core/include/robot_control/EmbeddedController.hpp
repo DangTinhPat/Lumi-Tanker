@@ -18,8 +18,9 @@ namespace robot_control {
 
 class EmbeddedController {
  public:
-  // Experimental Tuck -> Rise -> Settle sequence, not a validated physical
-  // stand-up strategy. TAP knees cannot be mirrored fore/aft about CAD zero.
+  // Low-body recovery is a sensor-only Qualify -> Prepare -> Pump -> Catch ->
+  // Rise -> Settle sequence. It is still simulation-only until the closed-loop
+  // regression clears the configured torque/contact limits.
   struct StandUpConfig {
     JointArray tuck_pose_rad{0.75838357F, -1.2F, 0.0F, 0.75838357F, -1.2F, 0.0F};
     // The stand-up endpoint must be the current CAD natural ENABLE pose.
@@ -41,6 +42,26 @@ class EmbeddedController {
     float settle_pitch_rad = 0.20F;
     unsigned settle_cycles = 40;
     float max_settle_duration_s = 3.0F;
+    float low_body_hip_min_rad = 1.45F;
+    float low_body_hip_max_rad = 2.95F;
+    float low_body_knee_min_rad = -1.25F;
+    float low_body_knee_max_rad = -0.15F;
+    float low_body_max_abs_pitch_rad = 0.25F;
+    float low_body_max_pitch_rate_rad_s = 0.80F;
+    float rocker_prepare_hip_rad = 1.0F;
+    float rocker_prepare_knee_rad = -1.2F;
+    float rocker_prepare_duration_s = 1.20F;
+    float rocker_pump_amplitude_rad = 0.18F;
+    float rocker_pump_duration_s = 0.28F;
+    float rocker_kick_duration_s = 0.20F;
+    float rocker_pump_timeout_s = 2.0F;
+    float rocker_abort_pitch_rad = 0.85F;
+    float rocker_catch_duration_s = 0.35F;
+    float rocker_catch_timeout_s = 2.0F;
+    unsigned rocker_max_pumps = 3;
+    float rocker_capture_pitch_rad = 0.25F;
+    float rocker_capture_pitch_rate_rad_s = 1.50F;
+    float rocker_energy_tolerance_j = 0.35F;
   };
 
   struct Config {
@@ -342,7 +363,9 @@ class EmbeddedController {
   }
 
  private:
-  enum class StandUpStage { Idle, Tuck, Rise, Settle };
+  enum class StandUpStage {
+    Idle, Qualify, Prepare, Pump, Catch, Tuck, Rise, Settle
+  };
 
   void writeSafeStop(MotorCommand& output, const RobotState& state) const;
   void writePostureHold(MotorCommand& output,
@@ -368,6 +391,8 @@ class EmbeddedController {
   void advanceStandUp(const RobotState& state);
   void finishStandUp(const RobotState& state);
   [[nodiscard]] JointArray standUpPose(const JointArray& pose) const;
+  [[nodiscard]] bool lowBodyRocker(const RobotState& state) const noexcept;
+  [[nodiscard]] float rockerEnergy(const RobotState& state) const noexcept;
 
   Config config_;
   LqrBalancer lqr_;
@@ -455,6 +480,13 @@ class EmbeddedController {
   unsigned stand_up_settle_cycles_ = 0;
   float stand_up_settle_elapsed_s_ = 0.0F;
   float stand_up_fall_sign_ = 1.0F;
+  bool low_body_recovery_ = false;
+  unsigned rocker_pump_count_ = 0;
+  float rocker_elapsed_s_ = 0.0F;
+  float rocker_direction_ = -1.0F;
+  float rocker_pump_torque_nm_ = 0.0F;
+  bool rocker_crossed_balance_ = false;
+  float rocker_catch_stable_s_ = 0.0F;
 };
 
 }  // namespace robot_control
