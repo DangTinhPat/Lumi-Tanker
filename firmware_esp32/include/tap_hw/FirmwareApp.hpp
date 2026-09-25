@@ -25,7 +25,6 @@ class FirmwareApp {
 
  private:
   void pollBle(std::uint64_t now_us) noexcept;
-  void pollFixtureButton(std::uint64_t now_us) noexcept;
   void drainMotorFeedback(std::uint64_t now_us) noexcept;
   void updateImu(std::uint64_t now_us) noexcept;
   void controlTick(std::uint64_t now_us) noexcept;
@@ -55,8 +54,6 @@ class FirmwareApp {
   std::uint64_t last_imu_us_ = 0U;
   std::uint64_t last_report_us_ = 0U;
   std::uint64_t imu_sequence_ = 0U;
-  std::uint64_t button_candidate_since_us_ = 0U;
-  std::uint64_t button_last_event_us_ = 0U;
   int last_mode_ = -1;
   bool can_ready_ = false;
   bool uart1_ready_ = false;
@@ -64,9 +61,6 @@ class FirmwareApp {
   bool imu_ready_ = false;
   bool ble_link_up_ = false;
   bool ble_inputs_armed_ = false;
-  bool button_raw_ = true;
-  bool button_stable_ = true;
-  bool fixture_release_pending_ = false;
   bool reported_enable_block_ = false;
 };
 

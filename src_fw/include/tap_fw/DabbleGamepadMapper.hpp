@@ -36,6 +36,8 @@ class DabbleGamepadMapper {
   DabbleGamepadMapper(CommandEndpoint& endpoint, Config config) noexcept
       : endpoint_(endpoint), config_(config) {}
 
+  // A Start press enables the controller and requests automatic release of
+  // the startup fixture once sensor qualification has completed.
   void update(const GamepadState& input, std::uint64_t now_us) noexcept;
 
  private:

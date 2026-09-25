@@ -26,8 +26,12 @@ void DabbleGamepadMapper::update(const GamepadState& input,
   }
   if (input.start && rising(input.start, previous_.start)) {
     static constexpr char kEnable[] = "ENABLE";
+    static constexpr char kFixtureRelease[] = "FIXTURE_RELEASE";
     (void)endpoint_.onWrite(reinterpret_cast<const std::uint8_t*>(kEnable),
                              sizeof(kEnable) - 1U, now_us);
+    (void)endpoint_.onWrite(
+        reinterpret_cast<const std::uint8_t*>(kFixtureRelease),
+        sizeof(kFixtureRelease) - 1U, now_us);
   }
 
   bool pose_requested = false;

@@ -17,9 +17,7 @@ namespace tap_hw {
 namespace {
 
 constexpr float kGravity = 9.80665F;
-constexpr std::uint64_t kButtonDebounceUs = 30'000U;
 constexpr std::uint64_t kStatusPeriodUs = 200'000U;
-constexpr std::uint64_t kButtonGuardUs = 100'000U;
 constexpr std::uint64_t kBleAdvertiseRestartDelayUs = 300'000U;
 
 std::atomic<int> g_ble_links{0};
@@ -56,7 +54,6 @@ bool FirmwareApp::begin() noexcept {
   pinMode(tap_fw::board::kLed1Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed2Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed3Gpio, OUTPUT);
-  pinMode(tap_fw::board::kButtonGpio, INPUT_PULLUP);
   digitalWrite(tap_fw::board::kLed1Gpio, LOW);
   digitalWrite(tap_fw::board::kLed2Gpio, LOW);
   digitalWrite(tap_fw::board::kLed3Gpio, LOW);
@@ -100,16 +97,12 @@ bool FirmwareApp::begin() noexcept {
   const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
   next_control_us_ = now_us;
   next_ble_poll_us_ = now_us;
-  button_raw_ = digitalRead(tap_fw::board::kButtonGpio) != LOW;
-  button_stable_ = button_raw_;
-  button_candidate_since_us_ = now_us;
   return can_ready_ && uart1_ready_ && uart2_ready_ && imu_ready_;
 }
 
 void FirmwareApp::loop() noexcept {
   const auto now_us = static_cast<std::uint64_t>(esp_timer_get_time());
   pollBle(now_us);
-  pollFixtureButton(now_us);
   drainMotorFeedback(now_us);
 
   if (now_us >= next_control_us_) {
@@ -166,27 +159,6 @@ void FirmwareApp::pollBle(std::uint64_t now_us) noexcept {
     }
   }
   gamepad_.update(input, now_us);
-}
-
-void FirmwareApp::pollFixtureButton(std::uint64_t now_us) noexcept {
-  const bool raw = digitalRead(tap_fw::board::kButtonGpio) != LOW;
-  if (raw != button_raw_) {
-    button_raw_ = raw;
-    button_candidate_since_us_ = now_us;
-  }
-  if (raw == button_stable_ ||
-      now_us - button_candidate_since_us_ < kButtonDebounceUs) return;
-
-  button_stable_ = raw;
-  if (button_stable_ || now_us - button_last_event_us_ < kButtonGuardUs) return;
-  button_last_event_us_ = now_us;
-  if (control_loop_.controller().mode() == robot_control::ControlMode::FixtureHold &&
-      sensorsReady(now_us)) {
-    fixture_release_pending_ = true;
-    Serial.println("Fixture release confirmed by GPIO6 button");
-  } else {
-    Serial.println("GPIO6 press ignored: controller is not sensor-qualified in FixtureHold");
-  }
 }
 
 void FirmwareApp::drainMotorFeedback(std::uint64_t now_us) noexcept {
@@ -290,11 +262,6 @@ void FirmwareApp::controlTick(std::uint64_t now_us) noexcept {
   } else if (!command.request_enable) {
     reported_enable_block_ = false;
   }
-  if (fixture_release_pending_) {
-    command.request_fixture_release = true;
-    fixture_release_pending_ = false;
-  }
-
   if (control_loop_.last_command().enable_motors && !sensorsReady(now_us)) {
     writeCommand(endpoint_, "DISABLE", now_us);
     command = endpoint_.command(now_us);

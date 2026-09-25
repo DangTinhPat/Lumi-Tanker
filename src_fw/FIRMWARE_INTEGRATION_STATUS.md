@@ -1,6 +1,6 @@
 # Trạng thái tích hợp firmware ESP32-S3
 
-Cập nhật: 2026-09-25
+Cập nhật: 2026-09-25 (luồng tháo fixture qua BLE)
 Phạm vi: code cho PCB ESP32-S3-WROOM-1-N16R8; chưa flash hoặc vận hành động cơ.
 
 ## Kiến trúc hiện tại
@@ -31,8 +31,8 @@ Dabble BLE --> CommandEndpoint --> FirmwareControlLoop
 | MPU6500 | `Mpu6500Spi` | SPI GPIO10-13, INT GPIO14, WHO_AM_I, cấu hình 500 Hz và burst read |
 | Control runtime | `FirmwareApp` | Lấy sensor, dựng `RobotState`, gọi `FirmwareControlLoop`/actuator bridge ở nhịp mục tiêu 500 Hz |
 | An toàn khởi động | `FirmwareApp` | Boot gửi trạng thái disable; enable cần sensor mới, dấu bánh/scale raw và frame IMU được xác nhận |
-| Xác nhận fixture | GPIO6 | Nút active-low, debounce; chỉ gửi `FIXTURE_RELEASE` khi controller đã vào `FixtureHold` và sensor còn mới |
-| Dabble BLE | `DabbleGamepadMapper` | Start chỉ có hiệu lực ở cạnh nhấn; timeout/disconnect yêu cầu disable |
+| Xác nhận fixture | Dabble GamePad Start | Một lần nhấn Start gửi `ENABLE` và yêu cầu tự tháo fixture sau khi sensor qualify |
+| Dabble BLE | `DabbleGamepadMapper` | Điều khiển enable/tháo fixture/drive/pose/stop qua BLE; timeout/disconnect yêu cầu disable |
 
 Trong lúc chưa enable, firmware thăm dò UART Present Data và gửi CAN MIT probe
 với `Kp=Kd=T_ff=0` để lấy feedback theo frame hai chiều đã ghi trong
@@ -76,7 +76,7 @@ và bảng mapping trong `POC - Robot version 1.md`.
 | MPU6500 CS/MOSI/SCLK/MISO | GPIO10/11/12/13 | SPI mode 0, 1 MHz |
 | MPU6500 INT | GPIO14 | Input, polling hiện dùng làm đường đọc chính |
 | UART0 debug | GPIO43/GPIO44 | CP2102, 115200 baud |
-| Nút / LEDs | GPIO6 / GPIO39-41 | Nút active-low; LED active-high |
+| Nút / LEDs | GPIO6 / GPIO39-41 | GPIO6 không tham gia luồng điều khiển fixture; LEDs active-high |
 
 ## Build và bằng chứng
 
@@ -113,6 +113,12 @@ nghiệm thu đó. Các probe feedback trong firmware chưa được chạy trê
    `kWheelSpeedScaleVerified=true` trong `MotorMapping.hpp`.
 5. Xác nhận chiều trục IMU, timestamp/freshness và mất frame; sau đó mới xem
    xét một motor trên bench với lệnh nhỏ.
+
+Luồng tháo fixture được đưa vào Dabble GamePad: một lần nhấn Start gửi cả
+`ENABLE` và yêu cầu `FIXTURE_RELEASE`. State machine vẫn chờ `SensorQualify`
+hoàn tất trước khi rời `FixtureHold` và bắt đầu `BalanceRamp`; không cần nút
+GPIO6 hay lần nhấn BLE thứ hai. Các cờ xác nhận wheel speed scale và IMU frame
+vẫn khóa `ENABLE` cho đến khi có bằng chứng hiệu chuẩn phần cứng.
 
 Không có bước nào trong lượt code này flash board hay phát lệnh tới động cơ
 thật.

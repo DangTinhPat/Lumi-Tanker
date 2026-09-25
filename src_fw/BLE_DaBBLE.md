@@ -48,7 +48,7 @@ The mapper uses this gamepad mapping:
 | Down | Reverse `-0.25 m/s` |
 | Left | Turn left |
 | Right | Turn right |
-| Start | `ENABLE` |
+| Start | `ENABLE` plus automatic `FIXTURE_RELEASE` after sensor qualification |
 | Select | `DISABLE` |
 | Triangle | `MAX_STAND` (`HEIGHT 0.245`) |
 | Circle | `DEEP_SQUAT` (`HEIGHT 0.140`) |
@@ -58,8 +58,11 @@ The mapper uses this gamepad mapping:
 There are no pose or height sliders. Pose buttons act on the press edge and
 also send zero drive demand. When no direction is pressed, the mapper sends
 zero drive demand. The endpoint watchdog disables the controller after 500 ms
-without a valid update. `RESET`, `CLEAR_ESTOP`, and `FIXTURE_RELEASE` remain
-available through the generic command endpoint, not the primary GamePad map.
+without a valid update. `RESET` and `CLEAR_ESTOP` remain available through the
+generic command endpoint. One Start press requests enable and fixture release;
+the state machine still waits for valid sensor qualification before it leaves
+the startup hold and ramps into balance. No second button press or PCB button
+is needed for this flow.
 
 ## Generic BLE alternative
 
