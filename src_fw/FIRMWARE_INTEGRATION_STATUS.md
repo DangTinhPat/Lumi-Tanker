@@ -14,6 +14,8 @@ phát frame xuống driver động cơ. Tuy nhiên `src_fw` hiện vẫn là l�
 - Controller core LQR/FSM và estimator IMU.
 - Chuẩn hóa `RobotState -> MotorCommand`.
 - Chuyển lệnh chân sang frame GDS68 CAN MIT.
+- Mapping GDS68 thực tế đã kiểm chứng: RH=ID1 sign -1, RK=ID2 sign +1,
+  LH=ID3 sign +1, LK=ID4 sign -1.
 - Chuyển lệnh bánh sang frame UART BL4820.
 - Watchdog lệnh BLE và mapping Dabble GamePad.
 - Khai báo GPIO theo sơ đồ PCB.
@@ -105,7 +107,7 @@ nhiệm của firmware application, chưa nằm trong `src_fw`.
 
 | Module | Trạng thái | Ghi chú |
 |---|---|---|
-| `BoardConfig.hpp` | Có | GPIO, bitrate CAN, baud UART, motor IDs |
+| `BoardConfig.hpp` | Có | GPIO, bitrate CAN, baud UART, motor IDs và dấu GDS68 đã kiểm chứng |
 | `BusTransport` | Có khung | Callback transport, chưa gắn ESP-IDF driver |
 | `FirmwareControlLoop` | Có | Boundary một bước: sensor vào, frame ra |
 | `ControllerActuatorBridge` | Có | Gửi frame CAN/UART theo nhịp 2 ms |

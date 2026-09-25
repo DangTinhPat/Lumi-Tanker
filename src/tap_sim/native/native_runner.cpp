@@ -4,6 +4,7 @@
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
+#include "robot_hal/MotorMapping.hpp"
 #include "robot_control/WholeBodyModel.hpp"
 #include "SimActuatorBus.hpp"
 
@@ -41,6 +42,7 @@ using robot_control::MotorCommand;
 using robot_control::RobotState;
 using robot_control::WholeBodyModel;
 namespace motor_frame = robot_control::motor_frame;
+namespace motor_mapping = robot_control::motor_mapping;
 namespace motor_transport = robot_control::motor_transport;
 
 constexpr std::array<int, 6> kJointQpos = {7, 8, 9, 10, 11, 12};
@@ -113,6 +115,13 @@ constexpr unsigned kDanceLowHeightCycles = 1U;
 // capture margin indefinitely.  1.8 rad remains above the regression's
 // 1.5-rad presentation requirement; after that the skill holds station.
 constexpr float kDanceYawBudgetRad = 1.7F;
+
+const motor_mapping::LegCanBinding* legBindingForNode(std::uint8_t node_id) {
+  for (const auto& binding : motor_mapping::kVerifiedLegCanBindings) {
+    if (binding.node_id == node_id) return &binding;
+  }
+  return nullptr;
+}
 
 struct Options {
   std::string model;
@@ -867,18 +876,19 @@ class NativeRunner {
         }
         const auto feedback = motor_frame::unpackMitFeedback(can_feedback.data);
         if (feedback.node_id != node) continue;
-        const std::size_t leg = static_cast<std::size_t>(node - 1U);
-        leg_feedback_position_[leg] = feedback.pos_rad;
-        leg_feedback_velocity_[leg] = feedback.vel_rad_s;
-        feedback_[leg] = feedback.torque_nm;
+        const auto* binding = legBindingForNode(node);
+        if (binding == nullptr) continue;
+        const std::size_t joint = binding->joint_index;
+        leg_feedback_position_[joint] = binding->driver_sign * feedback.pos_rad;
+        leg_feedback_velocity_[joint] = binding->driver_sign * feedback.vel_rad_s;
+        feedback_[joint] = binding->driver_sign * feedback.torque_nm;
       }
       for (std::size_t i = 0; i < 6; ++i) {
         float p = sensorValue(pos_sensor_id_[i]);
         float v = sensorValue(vel_sensor_id_[i]);
         if (i == 0 || i == 1 || i == 3 || i == 4) {
-          const std::size_t leg = i < 2 ? i : i - 1;
-          p = leg_feedback_position_[leg];
-          v = leg_feedback_velocity_[leg];
+          p = leg_feedback_position_[i];
+          v = leg_feedback_velocity_[i];
         } else {
           const std::size_t side = i == 2 ? 0 : 1;
           motor_transport_.setWheelMeasurement(side, p, v);
@@ -918,8 +928,7 @@ class NativeRunner {
         sample.velocity[i] = quantize(v + normal(0.012F), 0.02F);
       }
       sample.effort_valid = options_.gds68_feedback && uniform_(rng_) >= 0.001;
-      sample.effort[0] = feedback_[0]; sample.effort[1] = feedback_[1];
-      sample.effort[3] = feedback_[2]; sample.effort[4] = feedback_[3];
+      sample.effort = feedback_;
       if (sample.effort_valid) encoder_queue_.push_back(sample);
       else if (!options_.gds68_feedback || uniform_(rng_) >= 0.001) encoder_queue_.push_back(sample);
     }
@@ -1092,17 +1101,19 @@ class NativeRunner {
           : 0.0;
       applied_leg_torque_[i] = static_cast<float>(data_->ctrl[i]);
       if (options_.gds68_feedback) {
+        const auto& binding = motor_mapping::kVerifiedLegCanBindings[i];
         feedback_clock_[i] += dt;
         if (feedback_clock_[i] >= 0.002) {
           feedback_clock_[i] = std::fmod(feedback_clock_[i], 0.002);
-          const int qpos = kJointQpos[i < 2 ? i : i + 1];
-          const int qvel = kJointQvel[i < 2 ? i : i + 1];
+          const int qpos = kJointQpos[binding.joint_index];
+          const int qvel = kJointQvel[binding.joint_index];
           motor_transport_.publishLegFeedback(
               i,
-              static_cast<float>(data_->qpos[qpos]),
-              static_cast<float>(data_->qvel[qvel]),
-              std::clamp(leg_state_[i] + feedback_bias_[i] + normal(0.03F),
-                         -11.0F, 11.0F));
+              binding.driver_sign * static_cast<float>(data_->qpos[qpos]),
+              binding.driver_sign * static_cast<float>(data_->qvel[qvel]),
+              binding.driver_sign *
+                  std::clamp(leg_state_[i] + feedback_bias_[i] + normal(0.03F),
+                             -11.0F, 11.0F));
         }
       }
     }
@@ -1176,7 +1187,8 @@ class NativeRunner {
     // controller itself sees. See docs/MOTOR_HAL_PLAN.md section 3 leak 2
     // and section 4 ("SimGds68 phải mô phỏng những gì").
     for (std::size_t i = 0; i < 4; ++i) {
-      const std::size_t j = i < 2 ? i : i + 1;
+      const auto& binding = motor_mapping::kVerifiedLegCanBindings[i];
+      const std::size_t j = binding.joint_index;
       auto& drv = motor_transport_.leg(i);
       if (enabled_) {
         // Set_Limits equivalent: a one-time bring-up value on real
@@ -1189,14 +1201,12 @@ class NativeRunner {
         drv.setTorqueLimitNm(std::max(motors.torque_nm[j], 0.1F));
         if (!was_enabled) {
           motor_transport_.sendCan(
-              motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                 motor_frame::kSetControllerModeCmdId),
+              motor_frame::canId(binding.node_id, motor_frame::kSetControllerModeCmdId),
               motor_frame::packSetControllerMode(
                   motor_frame::kControlModePosition,
                   motor_frame::kInputModeMit));
           motor_transport_.sendCan(
-              motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                                 motor_frame::kSetAxisStateCmdId),
+              motor_frame::canId(binding.node_id, motor_frame::kSetAxisStateCmdId),
               motor_frame::packSetAxisState(motor_frame::kAxisStateClosedLoop));
         }
         // Live-pose stiffness matrix for this side. The diagonal rides the
@@ -1214,26 +1224,26 @@ class NativeRunner {
             : (motors.position_rad[hip_j] - hip_q);
         const float cross_nm = stiffness.cross * other_error * motors.kp_scale[j];
         const auto mit_bytes = motor_frame::packMitCommand(
-            motors.position_rad[j], motors.velocity_rad_s[j],
+            binding.driver_sign * motors.position_rad[j],
+            binding.driver_sign * motors.velocity_rad_s[j],
             legKpNmPerRad(j, hip_q, knee_q, motors.kp_scale[j]),
             legKdNmPerRadS(j, hip_q, knee_q, motors.kd_scale[j]),
-            motors.feedforward_nm[j] + cross_nm);
+            binding.driver_sign * (motors.feedforward_nm[j] + cross_nm));
         motor_transport_.sendCan(
-            motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                               motor_frame::kMitControlCmdId),
+            motor_frame::canId(binding.node_id, motor_frame::kMitControlCmdId),
             mit_bytes);
       } else {
         // disable = IDLE every tick, not silence: a driver with its own
         // watchdog does not guarantee it stops on silence alone (same
         // reasoning as the wheel Torque Disable path below).
         motor_transport_.sendCan(
-            motor_frame::canId(static_cast<std::uint8_t>(i + 1),
-                               motor_frame::kSetAxisStateCmdId),
+            motor_frame::canId(binding.node_id, motor_frame::kSetAxisStateCmdId),
             motor_frame::packSetAxisState(motor_frame::kAxisStateIdle));
       }
-      leg_command_[i] = drv.computeTorqueNm(
-          static_cast<float>(data_->qpos[kJointQpos[j]]),
-          static_cast<float>(data_->qvel[kJointQvel[j]]));
+      const float driver_torque = drv.computeTorqueNm(
+          binding.driver_sign * static_cast<float>(data_->qpos[kJointQpos[j]]),
+          binding.driver_sign * static_cast<float>(data_->qvel[kJointQvel[j]]));
+      leg_command_[i] = binding.driver_sign * driver_torque;
     }
     // Wheels: the ONLY channel a real BL4820M12 exposes is Moving Speed
     // (WHEEL_MOTOR_PROTOCOL.md §4) - MotorCommand.velocity_rad_s[wheel] is
@@ -1864,9 +1874,9 @@ class NativeRunner {
   std::array<float, 3> raw_accel_{};
   std::array<float, 3> raw_gyro_{};
   std::array<float, 4> feedback_bias_{{0.08F, -0.04F, 0.03F, -0.06F}};
-  std::array<float, 4> feedback_{};
-  std::array<float, 4> leg_feedback_position_{};
-  std::array<float, 4> leg_feedback_velocity_{};
+  JointArray feedback_{};
+  JointArray leg_feedback_position_{};
+  JointArray leg_feedback_velocity_{};
   std::array<float, 4> feedback_clock_{};
   std::array<float, 4> leg_command_{};
   std::array<float, 4> applied_leg_torque_{};

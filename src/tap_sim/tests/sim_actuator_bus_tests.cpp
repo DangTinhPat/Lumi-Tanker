@@ -24,22 +24,28 @@ int main() {
 
   SimMotorTransport bus;
 
-  check(bus.sendCan(canId(1, kSetControllerModeCmdId),
+  check(bus.sendCan(canId(3, kSetControllerModeCmdId),
                     packSetControllerMode(kControlModePosition, kInputModeMit)),
         "CAN mode command reaches simulated GDS68");
-  check(bus.sendCan(canId(1, kSetAxisStateCmdId),
+  check(bus.sendCan(canId(3, kSetAxisStateCmdId),
                     packSetAxisState(kAxisStateClosedLoop)),
         "CAN axis-state command reaches simulated GDS68");
-  check(bus.leg(0).closedLoop(), "GDS68 enters closed-loop from wire frames");
+  check(bus.leg(0).closedLoop(), "left hip GDS68 enters closed-loop from verified node ID");
+  check(bus.sendCan(canId(1, kSetControllerModeCmdId),
+                    packSetControllerMode(kControlModePosition, kInputModeMit)) &&
+            bus.sendCan(canId(1, kSetAxisStateCmdId),
+                        packSetAxisState(kAxisStateClosedLoop)) &&
+            bus.leg(2).closedLoop(),
+        "right hip GDS68 is addressed by verified node ID");
 
   check(bus.publishLegFeedback(0, 1.25F, -2.0F, 0.75F),
         "simulated GDS68 publishes a CAN feedback frame");
   motor_transport::CanFrame can_feedback;
   check(bus.receiveCan(can_feedback), "CAN feedback is readable by the host");
-  check(can_feedback.id == canId(1, kMitControlCmdId) && can_feedback.dlc == 8,
+  check(can_feedback.id == canId(3, kMitControlCmdId) && can_feedback.dlc == 8,
         "CAN feedback uses the real node/command ID and DLC");
   const auto feedback = unpackMitFeedback(can_feedback.data);
-  check(feedback.node_id == 1 && std::abs(feedback.pos_rad - 1.25F) < 0.01F &&
+  check(feedback.node_id == 3 && std::abs(feedback.pos_rad - 1.25F) < 0.01F &&
             std::abs(feedback.vel_rad_s + 2.0F) < 0.05F &&
             std::abs(feedback.torque_nm - 0.75F) < 0.05F,
         "CAN feedback payload round-trips through the wire codec");

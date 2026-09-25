@@ -26,26 +26,27 @@ nguồn/điện, cơ khí, và mọi việc chạy trên phần cứng thật ng
 
 Thứ tự khớp trong core cố định: `[LH, LK, LW, RH, RK, RW]` (`Types.hpp:13-20`).
 Bảng dưới là bản dịch duy nhất từ index đó sang địa chỉ vật lý — không có
-bản sao thứ hai ở bất cứ đâu khác, khớp nguyên văn `GDS68_DRIVER.md` §2 và
-`WHEEL_MOTOR_PROTOCOL.md`:
+bản sao thứ hai ở bất cứ đâu khác. CAN chân đã được kiểm chứng trên robot
+ngày 2026-09-25; source code chính thức là `robot_hal/MotorMapping.hpp`:
 
-| idx | Khớp | Bus | Địa chỉ | Driver | Chế độ |
-|---|---|---|---|---|---|
-| 0 | LeftHip | CAN | node_id 1 | GDS68 | MIT (0x008) |
-| 1 | LeftKnee | CAN | node_id 2 | GDS68 | MIT (0x008) |
-| 2 | LeftWheel | UART1 | motor id 0x01 | BL4820M12 | Moving Speed (0x20) |
-| 3 | RightHip | CAN | node_id 3 | GDS68 | MIT (0x008) |
-| 4 | RightKnee | CAN | node_id 4 | GDS68 | MIT (0x008) |
-| 5 | RightWheel | UART2 | motor id 0x01 | BL4820M12 | Moving Speed (0x20) |
+| idx | Khớp | Bus | Địa chỉ | Driver sign | Driver | Chế độ |
+|---|---|---|---|---:|---|---|
+| 0 | LeftHip | CAN | node_id 3 | +1 | GDS68 | MIT (0x008) |
+| 1 | LeftKnee | CAN | node_id 4 | -1 | GDS68 | MIT (0x008) |
+| 2 | LeftWheel | UART1 | motor id 0x01 | TBD | BL4820M12 | Moving Speed (0x20) |
+| 3 | RightHip | CAN | node_id 1 | -1 | GDS68 | MIT (0x008) |
+| 4 | RightKnee | CAN | node_id 2 | +1 | GDS68 | MIT (0x008) |
+| 5 | RightWheel | UART2 | motor id 0x01 | TBD | BL4820M12 | Moving Speed (0x20) |
 
 Khớp đúng ngân sách peripheral ESP32-S3: đúng 1 controller TWAI, và UART1/
 UART2 (UART0 để lại cho console). Không còn dự phòng — không tách CAN thành
 2 bus, không thêm UART thứ ba.
 
-Bảng chỉ là ý định đấu dây, không phải bằng chứng đấu dây đúng. Phase 6 bắt
-buộc nhích từng khớp một, mắt nhìn khớp nào thật sự quay, trước khi đóng bất
-kỳ vòng kín nào. Đảo trái/phải làm đảo dấu momen roll và đảo hướng yaw — robot
-lật ngay lần enable đầu tiên.
+Bảng CAN chân ở trên đã được kiểm chứng bằng quan sát từng động cơ thật. Phần
+bánh UART vẫn cần nghiệm thu riêng. Trước khi đóng bất kỳ vòng kín toàn thân
+nào vẫn phải test từng khớp ở command rất nhỏ sau mỗi lần tháo/lắp lại dây.
+Đảo trái/phải làm đảo dấu momen roll và đảo hướng yaw — robot lật ngay lần
+enable đầu tiên.
 
 ---
 
@@ -362,12 +363,12 @@ Disable mỗi tick, không im lặng. Gate feedback: chặn enable tới khi c�
 khớp có feedback thật. Cổng: một động cơ kê bàn, không tải, chưa lắp robot —
 đo turnaround UART thật, đo tải bus CAN thật ở 1 Mbps.
 
-**Phase 6 — nghiệm thu mapping vật lý + đối chiếu sim↔thật.** Nhích từng
-khớp một, mắt nhìn khớp nào quay, xác nhận dấu. Cùng chuỗi `MotorCommand`
-chạy qua SimTransport và HwTransport, so feedback. Cổng: bảng §1 xác nhận
-bằng quan sát, không bằng constant; sai lệch sim↔thật được ghi nhận và giải
-thích — đây mới là lúc `SimGds68`/`SimBl4820` trở thành mô hình có bằng
-chứng thay vì giả định.
+**Phase 6 — nghiệm thu mapping vật lý + đối chiếu sim↔thật.** Mapping vật
+lý và dấu encoder của 4 khớp CAN đã hoàn thành ngày 2026-09-25 và được đưa
+vào `MotorMapping.hpp`. Phần còn lại: cùng chuỗi `MotorCommand` chạy qua
+SimTransport và HwTransport, so feedback. Cổng: sai lệch sim↔thật được ghi
+nhận và giải thích — đây mới là lúc `SimGds68`/`SimBl4820` trở thành mô hình
+có bằng chứng thay vì giả định.
 
 Lắp lên robot, vòng kín thật, nằm ngoài kế hoạch này và cần quyết định riêng.
 

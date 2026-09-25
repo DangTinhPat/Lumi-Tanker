@@ -101,12 +101,18 @@ Thứ tự thực hiện, mỗi mục là điều kiện tiên quyết của m�
    MotorWizard/odrivetool — mặc định cả 4 driver đều là `0`, đấu chung bus
    mà không đổi sẽ đụng CAN ID:
 
-   | Khớp | node_id |
-   |---|---|
-   | LeftHip | 1 |
-   | LeftKnee | 2 |
-   | RightHip | 3 |
-   | RightKnee | 4 |
+   Mapping thực tế đã kiểm chứng trên robot ngày 2026-09-25:
+
+   | Khớp | node_id | Dấu driver so với core |
+   |---|---:|---:|
+   | RightHip | 1 | -1 |
+   | RightKnee | 2 | +1 |
+   | LeftHip | 3 | +1 |
+   | LeftKnee | 4 | -1 |
+
+   Xem `GDS68_MOTOR_MAPPING.md` và
+   `src/tap_control/hal/include/robot_hal/MotorMapping.hpp`. Không dùng lại
+   mapping ý định cũ `LeftHip=1, LeftKnee=2, RightHip=3, RightKnee=4`.
 
 4. **Hiệu chuẩn động cơ + encoder** (1 lần/driver, bắt buộc trước khi có
    thể vào closed-loop control):

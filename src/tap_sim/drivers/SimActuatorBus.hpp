@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "robot_hal/MotorFrameCodec.hpp"
+#include "robot_hal/MotorMapping.hpp"
 #include "robot_hal/MotorTransport.hpp"
 
 // Fake drivers standing in for the real GDS68 (leg) and BL4820M12 (wheel)
@@ -88,6 +89,7 @@ class SimGds68Joint {
   }
 
   bool closedLoop() const { return closed_loop_; }
+  std::uint8_t nodeId() const { return cfg_.node_id; }
 
  private:
   Config cfg_;
@@ -225,16 +227,22 @@ class SimMotorTransport final : public motor_transport::Transport {
   static constexpr std::size_t kUartRxCapacity = 4;
 
   SimMotorTransport()
-      : legs_{{SimGds68Joint({1, 3.0F}), SimGds68Joint({2, 3.0F}),
-               SimGds68Joint({3, 3.0F}), SimGds68Joint({4, 3.0F})}},
+      : legs_{{SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[0].node_id, 3.0F}),
+               SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[1].node_id, 3.0F}),
+               SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[2].node_id, 3.0F}),
+               SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[3].node_id, 3.0F})}},
         wheels_{{SimBl4820Wheel({1, 0.13F}), SimBl4820Wheel({1, 0.13F})}} {}
 
   bool sendCan(std::uint16_t id,
                const motor_frame::MitBytes& data) noexcept override {
     const std::uint16_t node = id >> 5;
-    if (node < 1 || node > legs_.size()) return false;
-    legs_[node - 1].onFrame(id, data);
-    return true;
+    for (auto& leg : legs_) {
+      if (node == leg.nodeId()) {
+        leg.onFrame(id, data);
+        return true;
+      }
+    }
+    return false;
   }
 
   bool receiveCan(motor_transport::CanFrame& frame) noexcept override {
@@ -272,7 +280,8 @@ class SimMotorTransport final : public motor_transport::Transport {
 
   void reset() {
     for (std::size_t i = 0; i < legs_.size(); ++i) {
-      legs_[i] = SimGds68Joint({static_cast<std::uint8_t>(i + 1), 3.0F});
+      legs_[i] = SimGds68Joint(
+          {motor_mapping::kVerifiedLegCanBindings[i].node_id, 3.0F});
     }
     for (auto& wheel : wheels_) wheel = SimBl4820Wheel({1, 0.13F});
     can_rx_head_ = 0;
@@ -287,9 +296,8 @@ class SimMotorTransport final : public motor_transport::Transport {
                           float velocity_rad_s, float torque_nm) noexcept {
     if (index >= legs_.size()) return false;
     motor_transport::CanFrame frame;
-    frame.id = motor_frame::canId(
-        static_cast<std::uint8_t>(index + 1U),
-        motor_frame::kMitControlCmdId);
+    frame.id = motor_frame::canId(legs_[index].nodeId(),
+                                  motor_frame::kMitControlCmdId);
     frame.dlc = static_cast<std::uint8_t>(frame.data.size());
     frame.data = legs_[index].buildFeedback(
         position_rad, velocity_rad_s, torque_nm);

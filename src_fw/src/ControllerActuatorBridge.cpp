@@ -8,7 +8,6 @@ namespace tap_fw {
 namespace motor_frame = robot_control::motor_frame;
 namespace motor_transport = robot_control::motor_transport;
 namespace {
-constexpr std::array<std::size_t, 4> kLegJoints = {0U, 1U, 3U, 4U};
 constexpr std::array<std::size_t, 2> kWheelJoints = {2U, 5U};
 
 float finiteOrZero(float value) noexcept {
@@ -58,10 +57,9 @@ bool ControllerActuatorBridge::sendWheelCommand(
 
 bool ControllerActuatorBridge::sendDisabled() noexcept {
   bool ok = true;
-  for (std::size_t i = 0; i < config_.ids.leg_can.size(); ++i) {
+  for (const auto& leg : config_.ids.leg_can) {
     ok = transport_.sendCan(
-             motor_frame::canId(config_.ids.leg_can[i],
-                                motor_frame::kSetAxisStateCmdId),
+             motor_frame::canId(leg.node_id, motor_frame::kSetAxisStateCmdId),
              motor_frame::packSetAxisState(motor_frame::kAxisStateIdle)) &&
         ok;
   }
@@ -98,8 +96,8 @@ ControllerActuatorBridge::Result ControllerActuatorBridge::apply(
 
   // GDS68 controller-mode/axis-state frames are sent once on the transition.
   if (!was_enabled) {
-    for (std::size_t i = 0; i < kLegJoints.size(); ++i) {
-      const auto node = config_.ids.leg_can[i];
+    for (const auto& leg : config_.ids.leg_can) {
+      const auto node = leg.node_id;
       ok = transport_.sendCan(
                motor_frame::canId(node, motor_frame::kSetControllerModeCmdId),
                motor_frame::packSetControllerMode(
@@ -121,8 +119,8 @@ ControllerActuatorBridge::Result ControllerActuatorBridge::apply(
 
   // The wheel driver requires >=20 ms between Torque Enable and Moving Speed.
   // Leg MIT frames are safe immediately after the GDS68 mode transition.
-  for (std::size_t i = 0; i < kLegJoints.size(); ++i) {
-    const std::size_t joint = kLegJoints[i];
+  for (const auto& leg : config_.ids.leg_can) {
+    const std::size_t joint = leg.joint_index;
     const std::size_t hip = joint < 2U ? 0U : 3U;
     const std::size_t knee = hip + 1U;
     const auto stiffness = legStiffness(
@@ -135,13 +133,17 @@ ControllerActuatorBridge::Result ControllerActuatorBridge::apply(
       const float cross = stiffness.cross_nm_per_rad *
           (finiteOrZero(command.position_rad[other]) -
            finiteOrZero(state.joints.position_rad[other])) * kp_scale;
+      const float command_pos_driver = leg.driver_sign *
+          finiteOrZero(command.position_rad[joint]);
+      const float command_vel_driver = leg.driver_sign *
+          finiteOrZero(command.velocity_rad_s[joint]);
+      const float tff_driver = leg.driver_sign *
+          (finiteOrZero(command.feedforward_nm[joint]) + cross);
       return transport_.sendCan(
-          motor_frame::canId(config_.ids.leg_can[i], motor_frame::kMitControlCmdId),
+          motor_frame::canId(leg.node_id, motor_frame::kMitControlCmdId),
           motor_frame::packMitCommand(
-              finiteOrZero(command.position_rad[joint]),
-              finiteOrZero(command.velocity_rad_s[joint]),
-              base_kp * kp_scale, base_kd * kd_scale,
-              finiteOrZero(command.feedforward_nm[joint]) + cross));
+              command_pos_driver, command_vel_driver,
+              base_kp * kp_scale, base_kd * kd_scale, tff_driver));
     };
     ok = send_joint(
              joint, isHip(joint) ? stiffness.hip_nm_per_rad

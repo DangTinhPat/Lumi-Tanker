@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+#include "robot_hal/MotorMapping.hpp"
+
 namespace tap_fw::board {
 
 // POC hardware mapping from docs/data/POC - Robot version 1.
@@ -34,8 +36,11 @@ inline constexpr std::uint32_t kCanBitrate = 1'000'000U;
 inline constexpr std::uint32_t kMotorUartBaud = 1'000'000U;
 
 struct MotorIds {
-  std::array<std::uint8_t, 4> leg_can{1, 2, 3, 4};
-  std::array<std::uint8_t, 2> wheel_uart{1, 1};
+  std::array<robot_control::motor_mapping::LegCanBinding, 4> leg_can =
+      robot_control::motor_mapping::kVerifiedLegCanBindings;
+  std::array<std::uint8_t, 2> wheel_uart = {
+      robot_control::motor_mapping::kLeftWheelUartId,
+      robot_control::motor_mapping::kRightWheelUartId};
 };
 
 }  // namespace tap_fw::board

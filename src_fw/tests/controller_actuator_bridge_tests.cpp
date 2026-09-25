@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -41,6 +42,10 @@ MotorCommand command() {
   out.kd_scale.fill(1.0F);
   return out;
 }
+
+bool near(float a, float b, float eps = 0.01F) {
+  return std::abs(a - b) < eps;
+}
 }  // namespace
 
 int main() {
@@ -53,6 +58,22 @@ int main() {
   // 4 mode + 4 axis + 4 MIT CAN frames, and 2 wheel enable frames.
   assert(transport.can.size() == 12U);
   assert(transport.uart.size() == 2U);
+  assert(transport.can[0].id == canId(3, kSetControllerModeCmdId));
+  assert(transport.can[1].id == canId(3, kSetAxisStateCmdId));
+  assert(transport.can[2].id == canId(4, kSetControllerModeCmdId));
+  assert(transport.can[3].id == canId(4, kSetAxisStateCmdId));
+  assert(transport.can[4].id == canId(1, kSetControllerModeCmdId));
+  assert(transport.can[5].id == canId(1, kSetAxisStateCmdId));
+  assert(transport.can[6].id == canId(2, kSetControllerModeCmdId));
+  assert(transport.can[7].id == canId(2, kSetAxisStateCmdId));
+  assert(transport.can[8].id == canId(3, kMitControlCmdId));
+  assert(near(unpackMitCommand(transport.can[8].data).pos_rad, 0.3F));
+  assert(transport.can[9].id == canId(4, kMitControlCmdId));
+  assert(near(unpackMitCommand(transport.can[9].data).pos_rad, 1.0F));
+  assert(transport.can[10].id == canId(1, kMitControlCmdId));
+  assert(near(unpackMitCommand(transport.can[10].data).pos_rad, -0.3F));
+  assert(transport.can[11].id == canId(2, kMitControlCmdId));
+  assert(near(unpackMitCommand(transport.can[11].data).pos_rad, -1.0F));
   assert(bridge.apply(command(), state, 1000) ==
          tap_fw::ControllerActuatorBridge::Result::RateLimited);
   assert(bridge.apply(command(), state, 2000) ==
