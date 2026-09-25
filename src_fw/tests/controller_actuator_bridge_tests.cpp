@@ -84,6 +84,14 @@ int main() {
   assert(bridge.apply(command(), state, 20'000) ==
          tap_fw::ControllerActuatorBridge::Result::Sent);
   assert(transport.uart.size() == 4U);
+  for (std::size_t wheel = 2U; wheel < 4U; ++wheel) {
+    const auto write = parseDxlWrite(transport.uart[wheel].frame);
+    assert(write.ok && write.address == kDxlMovingSpeedAddr);
+    const auto raw_speed = static_cast<std::int16_t>(
+        static_cast<std::uint16_t>(write.data[0]) |
+        (static_cast<std::uint16_t>(write.data[1]) << 8U));
+    assert(raw_speed > 0);
+  }
   assert(bridge.apply(command(), state, 22'000) ==
          tap_fw::ControllerActuatorBridge::Result::Sent);
   assert(transport.uart.size() == 6U);

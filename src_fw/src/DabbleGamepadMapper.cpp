@@ -24,7 +24,7 @@ void DabbleGamepadMapper::update(const GamepadState& input,
     previous_ = input;
     return;
   }
-  if (input.start) {
+  if (input.start && rising(input.start, previous_.start)) {
     static constexpr char kEnable[] = "ENABLE";
     (void)endpoint_.onWrite(reinterpret_cast<const std::uint8_t*>(kEnable),
                              sizeof(kEnable) - 1U, now_us);

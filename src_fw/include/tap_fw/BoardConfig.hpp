@@ -34,13 +34,22 @@ inline constexpr int kImuMisoGpio = 13;
 inline constexpr int kImuIntGpio = 14;
 inline constexpr std::uint32_t kCanBitrate = 1'000'000U;
 inline constexpr std::uint32_t kMotorUartBaud = 1'000'000U;
+inline constexpr std::uint32_t kControlPeriodUs = 2'000U;
+inline constexpr std::uint32_t kFeedbackMaxAgeUs = 20'000U;
+inline constexpr std::uint32_t kCanProbePeriodUs = 10'000U;
+inline constexpr std::uint32_t kWheelFeedbackPeriodUs = 2'000U;
+inline constexpr std::uint32_t kBlePollPeriodUs = 10'000U;
+inline constexpr bool kWheelDirectionsVerified =
+    robot_control::motor_mapping::kWheelDirectionsVerified;
+inline constexpr bool kWheelSpeedScaleVerified =
+    robot_control::motor_mapping::kWheelSpeedScaleVerified;
+inline constexpr bool kImuFrameVerified = false;
 
 struct MotorIds {
   std::array<robot_control::motor_mapping::LegCanBinding, 4> leg_can =
       robot_control::motor_mapping::kVerifiedLegCanBindings;
-  std::array<std::uint8_t, 2> wheel_uart = {
-      robot_control::motor_mapping::kLeftWheelUartId,
-      robot_control::motor_mapping::kRightWheelUartId};
+  std::array<robot_control::motor_mapping::WheelUartBinding, 2> wheel_uart =
+      robot_control::motor_mapping::kWheelUartBindings;
 };
 
 }  // namespace tap_fw::board

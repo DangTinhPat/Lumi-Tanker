@@ -137,3 +137,10 @@ triển khai protocol từ đầu.
 - `enable_motors=false` → gửi Torque Disable mỗi tick (không im lặng, cùng
   lý do với `can_motor.c`: im lặng không đảm bảo động cơ dừng nếu có
   watchdog giữ lệnh cuối).
+
+### Chiều quay đã kiểm tra trên robot
+
+Người dùng xác nhận ngày 2026-09-25 rằng với cả hai bánh, Moving Speed dương
+làm robot tiến và giá trị âm làm robot lùi. Firmware dùng `driver_sign=+1`
+cho UART1 bánh trái và UART2 bánh phải trong `MotorMapping.hpp`. Phép kiểm tra
+này xác nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.

@@ -4,6 +4,7 @@ add_library(tap_fw STATIC
   src/BusTransport.cpp
   src/BleCommandEndpoint.cpp
   src/DabbleGamepadMapper.cpp
+  src/MotorFeedback.cpp
   src/ControllerActuatorBridge.cpp
   src/FirmwareControlLoop.cpp)
 target_include_directories(tap_fw PUBLIC
@@ -38,4 +39,12 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME ble_command_endpoint_tests
            COMMAND ble_command_endpoint_tests)
+  add_executable(motor_feedback_tests tests/motor_feedback_tests.cpp)
+  target_link_libraries(motor_feedback_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(motor_feedback_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(motor_feedback_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME motor_feedback_tests COMMAND motor_feedback_tests)
 endif()

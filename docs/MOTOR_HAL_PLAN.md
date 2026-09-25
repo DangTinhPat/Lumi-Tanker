@@ -1,8 +1,9 @@
 # Kế hoạch lớp HAL động cơ (CAN GDS68 + UART bánh xe)
 
-Bản kế hoạch, chưa có dòng code nào được viết. Rút ra từ `docs/actuatal_driver/*`
-đối chiếu với code thực tế trong `src/tap_control/core` và
-`src/tap_sim/native/native_runner.cpp`. Mọi con số đều kèm file:line.
+Kế hoạch HAL và mô phỏng, đối chiếu với `docs/actuatal_driver/*`,
+`src/tap_control/core` và `src/tap_sim/native/native_runner.cpp`. Phần adapter
+firmware ESP32-S3 được triển khai riêng trong `firmware_esp32/` và `src_fw/`;
+trạng thái build/bench được ghi ở Phase 5 bên dưới. Mọi con số đều kèm nguồn.
 
 Không cho phép vận hành phần cứng, nạp firmware, hay cấp lệnh động cơ thật.
 Rule 4 (`docs/RULES.md`) giữ nguyên: sim là môi trường kiểm chứng, ESP32-S3
@@ -357,15 +358,20 @@ bản native — đây là lúc biết balance/landing có sống sót ràng bu�
 cứng không. Kết quả có thể là "không", và đó là thông tin giá trị nhất của
 cả kế hoạch.
 
-**Phase 5 — `HwTransport`, bench một động cơ.** TWAI + 2 UART, cùng codec,
-cùng driver logic phía host, chỉ đổi transport. Disable = phát IDLE/Torque
-Disable mỗi tick, không im lặng. Gate feedback: chặn enable tới khi cả 6
-khớp có feedback thật. Cổng: một động cơ kê bàn, không tải, chưa lắp robot —
-đo turnaround UART thật, đo tải bus CAN thật ở 1 Mbps.
+**Phase 5 — adapter ESP32-S3. Phần code/build XONG; phần cứng CHƯA NGHIỆM THU.**
+`Esp32TwaiPort` + hai `Esp32UartPort` dùng chung codec và `ControllerActuatorBridge`;
+`Mpu6500Spi`, `MotorFeedback` và `FirmwareApp` nối peripheral vào control loop.
+Target `esp32-s3-poc` build pass ngày 2026-09-25 trên profile R8N16. Disable
+phát lệnh idle/torque-disable; enable cần feedback đủ sáu khớp, IMU mới và
+seeded, raw-speed scale và frame IMU. Chiều quay hai bánh đã được xác nhận
+trên robot: dấu driver dương đưa robot tiến. Chưa
+flash, chưa chạy adapter trên board, chưa vận hành motor. Cổng bench còn lại,
+chỉ thực hiện khi có quyết định riêng: kiểm tra feedback khi driver ở IDLE,
+đo turnaround UART, xác nhận CAN 1 Mbps trên harness và đo tải bus.
 
 **Phase 6 — nghiệm thu mapping vật lý + đối chiếu sim↔thật.** Mapping vật
-lý và dấu encoder của 4 khớp CAN đã hoàn thành ngày 2026-09-25 và được đưa
-vào `MotorMapping.hpp`. Phần còn lại: cùng chuỗi `MotorCommand` chạy qua
+lý và dấu encoder của 4 khớp CAN, cùng chiều quay của 2 bánh, đã được xác nhận
+ngày 2026-09-25 và đưa vào `MotorMapping.hpp`. Phần còn lại: cùng chuỗi `MotorCommand` chạy qua
 SimTransport và HwTransport, so feedback. Cổng: sai lệch sim↔thật được ghi
 nhận và giải thích — đây mới là lúc `SimGds68`/`SimBl4820` trở thành mô hình
 có bằng chứng thay vì giả định.

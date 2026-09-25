@@ -41,18 +41,21 @@ bool ControllerActuatorBridge::due(std::uint64_t now_us) const noexcept {
 
 bool ControllerActuatorBridge::sendWheelStop(std::size_t wheel) noexcept {
   const std::uint8_t bus = static_cast<std::uint8_t>(wheel);
+  const auto& binding = config_.ids.wheel_uart[wheel];
   return transport_.sendUart(
-      bus, motor_frame::buildTorqueEnable(config_.ids.wheel_uart[wheel], false));
+      bus, motor_frame::buildTorqueEnable(binding.motor_id, false));
 }
 
 bool ControllerActuatorBridge::sendWheelCommand(
     std::size_t wheel, float velocity_rad_s) noexcept {
   const std::uint8_t bus = static_cast<std::uint8_t>(wheel);
-  const std::uint8_t id = config_.ids.wheel_uart[wheel];
+  const auto& binding = config_.ids.wheel_uart[wheel];
   // Torque Enable is sent once on the disabled->enabled edge. Repeating it
   // here could restart the real driver's 20 ms settle window on every tick.
   return transport_.sendUart(
-      bus, motor_frame::buildMovingSpeed(id, finiteOrZero(velocity_rad_s)));
+      bus, motor_frame::buildMovingSpeed(
+               binding.motor_id,
+               binding.driver_sign * finiteOrZero(velocity_rad_s)));
 }
 
 bool ControllerActuatorBridge::sendDisabled() noexcept {
@@ -89,7 +92,8 @@ ControllerActuatorBridge::Result ControllerActuatorBridge::apply(
     for (std::size_t i = 0; i < config_.ids.wheel_uart.size(); ++i) {
       ok = transport_.sendUart(
                static_cast<std::uint8_t>(i),
-               motor_frame::buildTorqueEnable(config_.ids.wheel_uart[i], true)) &&
+               motor_frame::buildTorqueEnable(
+                   config_.ids.wheel_uart[i].motor_id, true)) &&
           ok;
     }
   }

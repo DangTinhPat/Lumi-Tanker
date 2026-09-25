@@ -16,6 +16,14 @@ struct LegCanBinding {
   float driver_sign = 1.0F;
 };
 
+struct WheelUartBinding {
+  std::size_t joint_index = 0;
+  std::uint8_t motor_id = 1;
+  // Driver coordinate = core coordinate * driver_sign. The wheel motor
+  // directions have not yet been checked on the assembled robot.
+  float driver_sign = 1.0F;
+};
+
 inline constexpr std::array<LegCanBinding, 4> kVerifiedLegCanBindings{{
     // Verified on the physical robot, 2026-09-25:
     // left hip: lifting the straight leg toward the robot head is positive.
@@ -28,7 +36,14 @@ inline constexpr std::array<LegCanBinding, 4> kVerifiedLegCanBindings{{
     {4U, 2U, 1.0F},
 }};
 
-inline constexpr std::uint8_t kLeftWheelUartId = 1U;
-inline constexpr std::uint8_t kRightWheelUartId = 1U;
+inline constexpr std::array<WheelUartBinding, 2> kWheelUartBindings{{
+    // Verified on the physical robot, 2026-09-25: positive speed moves forward.
+    {2U, 1U, 1.0F},  // Left wheel, UART1.
+    {5U, 1U, 1.0F},  // Right wheel, UART2.
+}};
+inline constexpr bool kWheelDirectionsVerified = true;
+// Protocol documentation infers raw speed = RPM; retain an enable lock until
+// this conversion has been measured on the assembled wheel drive.
+inline constexpr bool kWheelSpeedScaleVerified = false;
 
 }  // namespace robot_control::motor_mapping
