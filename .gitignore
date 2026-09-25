@@ -1,4 +1,5 @@
 build/
+.pio/
 install/
 log/
 __pycache__/

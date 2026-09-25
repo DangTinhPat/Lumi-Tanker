@@ -27,6 +27,51 @@ Chưa sẵn sàng để nạp ESP32-S3:
 - Hiệu chuẩn sensor/motor trên phần cứng.
 - CMake/partition/boot target ESP-IDF hoàn chỉnh.
 
+Đã setup thêm PlatformIO:
+
+- `platformio.ini` ở thư mục gốc, environment `esp32-s3-poc`.
+- Board profile: ESP32-S3 R8N16 tương thích PCB N16R8.
+- Platform: Espressif32 `7.1.3`.
+- DabbleESP32: `1.5.1`, pin cố định để tương thích Arduino framework hiện tại.
+- Firmware bring-up nằm ở `firmware_esp32/src/main.cpp`; hiện chỉ khởi tạo
+  Serial, đọc MPU6500 qua SPI, chạy `ImuStateEstimator` và quảng bá Dabble
+  `TAP-RB`; không phát lệnh motor.
+- Build PlatformIO đã pass trên host; cấu hình hiện compile cả source
+  `src_fw` và `tap_control/core`, không copy code vào project Arduino.
+
+Thiết lập hệ điều hành còn thiếu quyền serial: user `dvt` chưa thuộc nhóm
+`dialout`, nên cần chạy `sudo usermod -aG dialout dvt` rồi đăng nhập lại.
+
+## Bring-up IMU và BLE
+
+Firmware test hiện tại dùng đúng GPIO trong sơ đồ PCB:
+
+```text
+CS=10, MOSI=11, SCLK=12, MISO=13, INT=14
+```
+
+Khi chạy trên PCB:
+
+```bash
+pio run -e esp32-s3-poc -t upload
+pio device monitor -e esp32-s3-poc
+```
+
+Kết quả mong đợi:
+
+- `WHO_AM_I=0x70` hoặc `0x71` và `PASS`: SPI/CS/MPU6500 phản hồi.
+- Sau khoảng 250 ms đứng yên: `seed=1`, LED2 sáng; đây là dấu hiệu bộ lọc
+  đã nhận đủ cửa sổ khởi tạo, không phải xác nhận hiệu chuẩn cơ khí.
+- Dòng `IMU ...` ổn định khi để yên; xoay nhẹ quanh trục pitch thì `gy` và
+  `pitch` đổi cùng chiều theo quy ước hiện tại.
+- Mở Dabble GamePad, chọn thiết bị `TAP-RB`: LED3 sáng và Serial báo
+  `BLE connected`. Nút Start/Select chỉ kiểm tra command endpoint; không có
+  motor nào được gọi trong firmware test này.
+
+Đèn LED chỉ là chỉ báo bring-up: LED1 = nhận diện MPU, LED2 = estimator đã
+seed, LED3 = Dabble đã kết nối. Không có oscilloscope/loopback nên chưa thể
+chứng minh chất lượng mức điện áp hay continuity của từng đường SPI bằng code.
+
 ## Luồng điều khiển dự kiến
 
 ```text
