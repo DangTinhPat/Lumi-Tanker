@@ -18,6 +18,8 @@ constexpr std::uint16_t kWheelEncoderCounts = 1024U;
 constexpr std::int32_t kWheelHalfTurn = kWheelEncoderCounts / 2;
 constexpr float kWheelRadiansPerCount =
     6.28318530717958647692F / static_cast<float>(kWheelEncoderCounts);
+constexpr float kLegRadiansPerEstimateTurn = 6.28318530717958647692F /
+    mapping::kGds68EstimateTurnsPerOutputTurn;
 
 }  // namespace
 
@@ -52,10 +54,17 @@ bool MotorFeedback::poll(motor_transport::Transport& transport,
 
 bool MotorFeedback::ingestCan(const motor_transport::CanFrame& input,
                               std::uint64_t now_us) noexcept {
-  if (input.dlc != 8U) return false;
   const auto node_id = static_cast<std::uint8_t>(input.id >> 5U);
   const auto command_id = static_cast<std::uint8_t>(input.id & 0x1FU);
-  if (command_id != frame::kMitControlCmdId) return false;
+  // GDS68 MIT feedback uses bytes 0-5 only and arrives with DLC 6 on the
+  // robot (verified 2026-09-25); encoder estimates are two float32s.
+  if (command_id == frame::kMitControlCmdId) {
+    if (input.dlc < 6U || input.dlc > 8U) return false;
+  } else if (command_id == frame::kGetEncoderEstimatesCmdId) {
+    if (input.dlc != 8U) return false;
+  } else {
+    return false;
+  }
 
   const auto binding = [&]() -> const mapping::LegCanBinding* {
     for (const auto& item : mapping::kVerifiedLegCanBindings) {
@@ -64,17 +73,52 @@ bool MotorFeedback::ingestCan(const motor_transport::CanFrame& input,
     return nullptr;
   }();
   if (binding == nullptr) return false;
+  return command_id == frame::kMitControlCmdId
+      ? ingestMit(*binding, node_id, input, now_us)
+      : ingestEncoderEstimates(*binding, input, now_us);
+}
 
+bool MotorFeedback::ingestMit(const mapping::LegCanBinding& binding,
+                              std::uint8_t node_id,
+                              const motor_transport::CanFrame& input,
+                              std::uint64_t now_us) noexcept {
   const auto feedback = frame::unpackMitFeedback(input.data);
   if (feedback.node_id != node_id || !std::isfinite(feedback.pos_rad) ||
       !std::isfinite(feedback.vel_rad_s) || !std::isfinite(feedback.torque_nm)) {
     return false;
   }
 
-  const std::size_t joint = binding->joint_index;
-  position_rad_[joint] = binding->driver_sign * feedback.pos_rad;
-  velocity_rad_s_[joint] = binding->driver_sign * feedback.vel_rad_s;
-  effort_nm_[joint] = binding->driver_sign * feedback.torque_nm;
+  const std::size_t joint = binding.joint_index;
+  position_rad_[joint] = binding.driver_sign * feedback.pos_rad;
+  velocity_rad_s_[joint] = binding.driver_sign * feedback.vel_rad_s;
+  effort_nm_[joint] = binding.driver_sign * feedback.torque_nm;
+  stamp_us_[joint] = now_us;
+  mit_stamp_us_[joint] = now_us;
+  valid_[joint] = true;
+  ++sequence_;
+  return true;
+}
+
+bool MotorFeedback::ingestEncoderEstimates(
+    const mapping::LegCanBinding& binding,
+    const motor_transport::CanFrame& input, std::uint64_t now_us) noexcept {
+  const std::size_t joint = binding.joint_index;
+  if (mit_stamp_us_[joint] != 0U && now_us >= mit_stamp_us_[joint] &&
+      now_us - mit_stamp_us_[joint] <= board::kFeedbackMaxAgeUs) {
+    return false;
+  }
+  const auto estimate = frame::unpackEncoderEstimates(input.data);
+  if (!std::isfinite(estimate.pos_turns) ||
+      !std::isfinite(estimate.vel_turns_s)) {
+    return false;
+  }
+
+  position_rad_[joint] =
+      binding.driver_sign * estimate.pos_turns * kLegRadiansPerEstimateTurn;
+  velocity_rad_s_[joint] =
+      binding.driver_sign * estimate.vel_turns_s * kLegRadiansPerEstimateTurn;
+  // 0x009 carries no torque estimate.
+  effort_nm_[joint] = 0.0F;
   stamp_us_[joint] = now_us;
   valid_[joint] = true;
   ++sequence_;

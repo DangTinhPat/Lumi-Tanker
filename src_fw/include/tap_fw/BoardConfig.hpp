@@ -32,7 +32,7 @@ inline constexpr int kImuMosiGpio = 11;
 inline constexpr int kImuSclkGpio = 12;
 inline constexpr int kImuMisoGpio = 13;
 inline constexpr int kImuIntGpio = 14;
-inline constexpr std::uint32_t kCanBitrate = 1'000'000U;
+inline constexpr std::uint32_t kCanBitrate = 500'000U;
 inline constexpr std::uint32_t kMotorUartBaud = 1'000'000U;
 inline constexpr std::uint32_t kControlPeriodUs = 2'000U;
 inline constexpr std::uint32_t kFeedbackMaxAgeUs = 20'000U;
@@ -44,6 +44,22 @@ inline constexpr bool kWheelDirectionsVerified =
 inline constexpr bool kWheelSpeedScaleVerified =
     robot_control::motor_mapping::kWheelSpeedScaleVerified;
 inline constexpr bool kImuFrameVerified = false;
+inline constexpr bool kLegEncoderEstimateScaleVerified =
+    robot_control::motor_mapping::kGds68EncoderEstimateScaleVerified;
+// Bench option: open TWAI listen-only so leg encoder estimates can be read
+// while the CAN TX path is being debugged. Nothing is transmitted or
+// acknowledged on CAN, and enable stays refused while this is true.
+inline constexpr bool kCanListenOnly = false;
+// Bench option: TWAI in normal mode, but every firmware CAN transmission is
+// suppressed. Instead one single-shot frame with an unassigned ID (node 62,
+// cmd 0, no GDS68 addresses it) is sent per second, so a TX failure can be
+// separated from the firmware's traffic pattern. Enable stays refused.
+inline constexpr bool kCanTxSingleFrameTest = false;
+inline constexpr std::uint16_t kCanTxTestId = 0x7C0U;
+inline constexpr std::uint32_t kCanTxTestPeriodUs = 1'000'000U;
+// After a bus-off, wait this long before starting TWAI recovery so a broken
+// TX path does not keep disturbing the bus.
+inline constexpr std::uint32_t kCanBusOffRecoveryDelayUs = 1'000'000U;
 
 struct MotorIds {
   std::array<robot_control::motor_mapping::LegCanBinding, 4> leg_can =

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 
 // Pure, allocation-free pack/unpack for the two actuator wire protocols this
 // robot uses. No I/O, no state, no MuJoCo/simulator types anywhere in this
@@ -31,6 +32,10 @@ constexpr std::uint8_t kSetControllerModeCmdId = 0x00B;
 constexpr std::uint8_t kSetAxisStateCmdId = 0x007;
 constexpr std::uint8_t kMitControlCmdId = 0x008;
 constexpr std::uint8_t kSetLimitsCmdId = 0x00F;
+// Driver-originated periodic frames, GDS68_DRIVER.md §3. Both are broadcast
+// while the axis is IDLE; MIT feedback (0x008) only answers in closed loop.
+constexpr std::uint8_t kHeartbeatCmdId = 0x001;
+constexpr std::uint8_t kGetEncoderEstimatesCmdId = 0x009;
 
 constexpr std::int32_t kAxisStateIdle = 1;
 constexpr std::int32_t kAxisStateClosedLoop = 8;
@@ -187,6 +192,30 @@ inline MitFeedback packMitFeedback(std::uint8_t node_id, float pos_rad,
   out[6] = 0;
   out[7] = 0;
   return MitFeedback{node_id, pos_rad, vel_rad_s, torque_nm};
+}
+
+// Get_Encoder_Estimates (0x009), ODrive CAN Simple: little-endian IEEE-754
+// float32 pos_estimate [turns] then vel_estimate [turns/s]. The turns are in
+// the driver's encoder frame; converting them to output-shaft radians is a
+// motor-mapping concern (MotorMapping.hpp), not a wire-format one.
+struct EncoderEstimates {
+  float pos_turns = 0.0F;
+  float vel_turns_s = 0.0F;
+};
+
+inline EncoderEstimates unpackEncoderEstimates(const MitBytes& b) {
+  static_assert(sizeof(float) == 4U, "CAN Simple floats are 32-bit");
+  EncoderEstimates out;
+  std::memcpy(&out.pos_turns, &b[0], 4U);
+  std::memcpy(&out.vel_turns_s, &b[4], 4U);
+  return out;
+}
+
+inline MitBytes packEncoderEstimates(float pos_turns, float vel_turns_s) {
+  MitBytes b{};
+  std::memcpy(&b[0], &pos_turns, 4U);
+  std::memcpy(&b[4], &vel_turns_s, 4U);
+  return b;
 }
 
 inline MitFeedback unpackMitFeedback(const MitBytes& b) {

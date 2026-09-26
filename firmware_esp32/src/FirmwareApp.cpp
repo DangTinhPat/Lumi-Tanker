@@ -18,6 +18,7 @@ namespace {
 
 constexpr float kGravity = 9.80665F;
 constexpr std::uint64_t kStatusPeriodUs = 200'000U;
+constexpr std::uint64_t kCanDiagPeriodUs = 1'000'000U;
 constexpr std::uint64_t kBleAdvertiseRestartDelayUs = 300'000U;
 
 std::atomic<int> g_ble_links{0};
@@ -49,6 +50,9 @@ FirmwareApp::FirmwareApp() noexcept
       transport_(can_.port(), uart1_.port(), uart2_.port()) {}
 
 bool FirmwareApp::begin() noexcept {
+  // Without a TX ring buffer every status line blocks the control loop until
+  // it has drained at 115200 baud (~11.5 bytes/ms).
+  Serial.setTxBufferSize(4096U);
   Serial.begin(115200);
   delay(300);
   pinMode(tap_fw::board::kLed1Gpio, OUTPUT);
@@ -86,8 +90,17 @@ bool FirmwareApp::begin() noexcept {
   if (!tap_fw::board::kImuFrameVerified) {
     Serial.println("ACTUATION LOCKED: MPU6500 axis frame has not been verified");
   }
-  if (tap_fw::board::kCanBitrate == 1'000'000U) {
-    Serial.println("CAN at 1 Mbit/s is the planned rate; harness validation recorded at 500 kbit/s");
+  if (!tap_fw::board::kLegEncoderEstimateScaleVerified) {
+    Serial.println("ACTUATION LOCKED: GDS68 encoder-estimate scale/zero is unverified");
+  }
+  if (tap_fw::board::kCanListenOnly) {
+    Serial.println("ACTUATION LOCKED: CAN is listen-only (bench feedback mode)");
+  }
+  if (tap_fw::board::kCanTxSingleFrameTest) {
+    Serial.println("ACTUATION LOCKED: CAN single-frame TX test; motor CAN TX suppressed");
+  }
+  if (tap_fw::board::kCanBitrate == 500'000U) {
+    Serial.println("CAN configured at 500 kbit/s (GDS68 bring-up rate)");
   }
 
   Dabble.begin("TAP-RB");
@@ -103,6 +116,7 @@ bool FirmwareApp::begin() noexcept {
 void FirmwareApp::loop() noexcept {
   const auto now_us = static_cast<std::uint64_t>(esp_timer_get_time());
   pollBle(now_us);
+  can_.service(now_us);
   drainMotorFeedback(now_us);
 
   if (now_us >= next_control_us_) {
@@ -251,11 +265,13 @@ void FirmwareApp::controlTick(std::uint64_t now_us) noexcept {
     writeCommand(endpoint_, "DISABLE", now_us);
     command = endpoint_.command(now_us);
     if (!reported_enable_block_) {
-      Serial.printf("ENABLE refused: IMU=%d motors=%d wheel-directions=%d wheel-scale=%d imu-frame=%d buses=%d\n",
+      Serial.printf("ENABLE refused: IMU=%d motors=%d wheel-directions=%d wheel-scale=%d imu-frame=%d leg-estimate=%d can-tx=%d buses=%d\n",
                     imuFresh(now_us) && imu_output_.seeded,
                     feedback_.ready(now_us), tap_fw::board::kWheelDirectionsVerified,
                     tap_fw::board::kWheelSpeedScaleVerified,
                     tap_fw::board::kImuFrameVerified,
+                    tap_fw::board::kLegEncoderEstimateScaleVerified,
+                    !tap_fw::board::kCanListenOnly,
                     can_ready_ && uart1_ready_ && uart2_ready_);
       reported_enable_block_ = true;
     }
@@ -297,12 +313,19 @@ bool FirmwareApp::readyForEnable(std::uint64_t now_us) const noexcept {
   return can_ready_ && uart1_ready_ && uart2_ready_ && sensorsReady(now_us) &&
       tap_fw::board::kWheelDirectionsVerified &&
       tap_fw::board::kWheelSpeedScaleVerified &&
-      tap_fw::board::kImuFrameVerified;
+      tap_fw::board::kImuFrameVerified &&
+      tap_fw::board::kLegEncoderEstimateScaleVerified &&
+      !tap_fw::board::kCanListenOnly &&
+      !tap_fw::board::kCanTxSingleFrameTest;
 }
 
 void FirmwareApp::report(std::uint64_t now_us) noexcept {
   if (now_us - last_report_us_ < kStatusPeriodUs) return;
   last_report_us_ = now_us;
+  if (now_us - last_can_diag_us_ >= kCanDiagPeriodUs) {
+    last_can_diag_us_ = now_us;
+    can_.printDiagnostics(Serial);
+  }
   const auto ageMs = [&](std::uint64_t stamp) {
     return stamp == 0U || now_us < stamp ? -1L :
         static_cast<long>((now_us - stamp) / 1000U);

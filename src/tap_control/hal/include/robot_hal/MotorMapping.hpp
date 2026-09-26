@@ -36,6 +36,15 @@ inline constexpr std::array<LegCanBinding, 4> kVerifiedLegCanBindings{{
     {4U, 2U, 1.0F},
 }};
 
+// GDS68 Get_Encoder_Estimates (0x009) reports turns in the driver's encoder
+// frame. The motor manual states USB/odrivetool values are rotor-side while
+// MIT frames are output-shaft, so these turns are assumed to be rotor turns
+// through the 8:1 gearbox. Neither the ratio nor the zero offset relative to
+// MIT feedback has been measured on the robot; the enable lock stays until
+// one full output turn per joint has been checked against this constant.
+inline constexpr float kGds68EstimateTurnsPerOutputTurn = 8.0F;
+inline constexpr bool kGds68EncoderEstimateScaleVerified = false;
+
 inline constexpr std::array<WheelUartBinding, 2> kWheelUartBindings{{
     // Verified on the physical robot, 2026-09-25: positive speed moves forward.
     {2U, 1U, 1.0F},  // Left wheel, UART1.

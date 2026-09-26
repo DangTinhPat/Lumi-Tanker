@@ -53,6 +53,7 @@ class FirmwareApp {
   std::uint64_t ble_advertise_at_us_ = 0U;
   std::uint64_t last_imu_us_ = 0U;
   std::uint64_t last_report_us_ = 0U;
+  std::uint64_t last_can_diag_us_ = 0U;
   std::uint64_t imu_sequence_ = 0U;
   int last_mode_ = -1;
   bool can_ready_ = false;

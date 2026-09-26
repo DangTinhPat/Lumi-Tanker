@@ -25,7 +25,7 @@ Dabble BLE --> CommandEndpoint --> FirmwareControlLoop
 
 | Phần | Module | Tình trạng |
 |---|---|---|
-| TWAI classic CAN | `Esp32TwaiPort` | GPIO4/5, standard 11-bit frames, bitrate cấu hình 1 Mbit/s, RX/TX queue |
+| TWAI classic CAN | `Esp32TwaiPort` | GPIO4/5, standard 11-bit frames, bitrate cấu hình 500 kbit/s, RX/TX queue |
 | Hai UART motor | `Esp32UartPort` | UART1 GPIO17/18 và UART2 GPIO15/16, 1 Mbaud 8N1, parser response có kiểm checksum |
 | Feedback encoder | `MotorFeedback` | GDS68 MIT feedback đổi theo mapping/sign; BL4820 position được unwrap và speed đổi sang rad/s |
 | MPU6500 | `Mpu6500Spi` | SPI GPIO10-13, INT GPIO14, WHO_AM_I, cấu hình 500 Hz và burst read |
@@ -50,9 +50,8 @@ quy trình bring-up sau khi xác nhận giao thức trên bench.
   chưa được đo. `kWheelSpeedScaleVerified` cũng đang `false` và khóa enable.
 - Mapping CAN GDS68 đã xác nhận trên robot: RH node 1/sign -1, RK node 2/sign
   +1, LH node 3/sign +1, LK node 4/sign -1.
-- GDS68 đã được bring-up trên USB-CAN ở 500 kbit/s. Firmware đặt 1 Mbit/s để
-  đáp ứng mục tiêu 500 Hz; tốc độ này chưa được xác nhận trên harness CAN của
-  robot.
+- GDS68 đã được bring-up trên USB-CAN và ESP32 thử nghiệm ở 500 kbit/s; firmware
+  robot cũng đặt 500 kbit/s để khớp với cấu hình điều khiển đã hoạt động.
 - Driver GDS68 phải được cấu hình CAN đúng node/baud, hiệu chuẩn motor và
   encoder, và lưu cấu hình trước khi vào closed-loop. Firmware không tự chạy
   quy trình hiệu chuẩn driver. Payload/giá trị `Set_Limits` chưa có trong tài
@@ -70,7 +69,7 @@ và bảng mapping trong `POC - Robot version 1.md`.
 
 | Ngoại vi | Chân ESP32-S3 | Cấu hình |
 |---|---|---|
-| TWAI TX/RX | GPIO4/GPIO5 | Classic CAN, 1 Mbit/s trong firmware |
+| TWAI TX/RX | GPIO4/GPIO5 | Classic CAN, 500 kbit/s trong firmware |
 | UART1 TX/RX | GPIO17/GPIO18 | Motor trái, 1 Mbaud 8N1 |
 | UART2 TX/RX | GPIO15/GPIO16 | Motor phải, 1 Mbaud 8N1 |
 | MPU6500 CS/MOSI/SCLK/MISO | GPIO10/11/12/13 | SPI mode 0, 1 MHz |
@@ -97,17 +96,18 @@ phiên làm việc, nên trên máy chưa có lệnh `pio` toàn cục. Kết qu
 - Chưa chạy CTest từ build tree: thư mục `build/` chỉ còn cache, còn configure
   build sạch bị chặn vì môi trường hiện không có MuJoCo.
 
-Chưa flash hoặc chạy board. Chưa có bằng chứng phần cứng cho TWAI 1 Mbit/s,
-hai UART 1 Mbaud, feedback đủ sáu encoder, dấu IMU, hướng bánh hay vòng kín.
-Build thành công chỉ xác nhận compile/link cho target, không thay cho các bước
-nghiệm thu đó. Các probe feedback trong firmware chưa được chạy trên robot.
+Firmware CAN 500 kbit/s khớp với bitrate đã dùng khi điều khiển GDS68 qua
+USB-CAN và ESP32 thử nghiệm; build và upload qua CP2102 `/dev/ttyUSB0` đã pass,
+flash được xác minh và ESP reset. Cần kiểm tra lại feedback trên harness robot;
+build/upload pass không chứng minh đủ phản hồi từ bốn driver hoặc khả năng cân
+bằng vật lý. Các khóa enable cho wheel speed scale và IMU frame vẫn giữ.
 
 ## Bring-up phần cứng còn lại
 
 1. Kiểm tra lại `pio run -e esp32-s3-poc`; chỉ nạp khi người vận hành quyết định.
 2. Kiểm tra boot log, MPU6500 WHO_AM_I, seed estimator và feedback CAN/UART
    trong trạng thái disable.
-3. Xác nhận cấu hình node/baud/calibration từng GDS68; xác nhận CAN 1 Mbit/s
+3. Xác nhận cấu hình node/baud/calibration từng GDS68; xác nhận CAN 500 kbit/s
    trên harness.
 4. Chiều hai bánh đã được xác nhận. Đo raw-speed scale trên bench rồi mới đặt
    `kWheelSpeedScaleVerified=true` trong `MotorMapping.hpp`.
@@ -122,3 +122,45 @@ vẫn khóa `ENABLE` cho đến khi có bằng chứng hiệu chuẩn phần c�
 
 Không có bước nào trong lượt code này flash board hay phát lệnh tới động cơ
 thật.
+
+## Chẩn đoán CAN trên robot (2026-09-25)
+
+Triệu chứng: `can_legs=0`. ESP32 nhận heartbeat `0x001`/encoder `0x009` của cả
+4 node nhưng mọi frame ESP32 phát đều lỗi, TWAI vào `BUS_OFF`.
+
+Nguyên nhân (đã xác nhận): **bus bị terminate quá mức**. Cả 4 GDS68 đều bật
+`can.config.enable_r120=True` (thiết lập từ lúc bring-up từng driver), cộng R5
+120Ω trên board → khoảng 24Ω. Frame ESP32 phát không được driver nào ACK.
+Bằng chứng: test 1 frame single-shot/giây tới ID không dùng `0x7C0` thất bại
+29/29; ở error-passive TEC đứng yên (lỗi ACK, không phải lỗi bit), trong khi
+các driver vẫn ACK nhau.
+
+Khắc phục: tắt `enable_r120` trên node 1-4 qua USB (`odrivetool_legacy`,
+`save_configuration()`), đã đọc lại sau reboot. Sau đó test TX 11/11 thành
+công, TEC=0. Việc còn lại: bật lại `enable_r120` trên đúng driver ở đầu xa
+nhất của dây để bus về ~60Ω.
+
+Kết quả ở chế độ bình thường: bus RUNNING, TEC=0, không bus-off; mỗi node trả
+MIT `0x008` ~87/s (driver trả MIT probe cả khi IDLE) và `0x009` 100/s;
+`can_legs=1`.
+
+Thay đổi firmware giữ lại:
+
+- `Esp32TwaiPort::service()` phục hồi sau `BUS_OFF`.
+- `MotorFeedback` nhận phản hồi MIT với DLC 6: driver chỉ gửi byte 0-5 và
+  kiểm tra `dlc == 8` cũ đã bỏ qua toàn bộ phản hồi MIT (xác nhận trên robot:
+  byte 0 = node ID đúng, không có echo sai).
+- `MotorFeedback` nhận thêm `0x009` khi không có MIT mới.
+- Tùy chọn bench `kCanListenOnly` và `kCanTxSingleFrameTest` (mặc định
+  `false`; cả hai luôn khóa enable).
+- Log `CANDIAG` mỗi giây: trạng thái bus, ID nhận được, heartbeat và estimate.
+
+Lưu ý quan trọng: `pos_estimate` (0x009) — và theo quan sát cả vị trí MIT — là
+độ dịch chuyển tính từ lúc driver bật nguồn (reset về 0 sau mỗi reboot driver);
+encoder tuyệt đối `pos_abs` là một vòng rotor trước hộp số 8:1. Góc khớp tuyệt
+đối cần bước homing/offset trước khi enable;
+`kGds68EncoderEstimateScaleVerified=false` giữ khóa enable.
+
+Tải bus: ở trạng thái disable firmware gửi Set_Axis_State(IDLE) cho 4 node mỗi
+tick 2 ms cộng MIT probe 10 ms (~2000 frame/s, `arb_lost` cao). Nên giảm nhịp
+gửi IDLE trước khi thêm tải điều khiển.

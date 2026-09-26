@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "robot_control/Types.hpp"
+#include "robot_hal/MotorMapping.hpp"
 #include "robot_hal/MotorTransport.hpp"
 #include "tap_fw/BoardConfig.hpp"
 
@@ -30,11 +31,20 @@ class MotorFeedback {
  private:
   [[nodiscard]] bool fresh(std::size_t joint,
                            std::uint64_t now_us) const noexcept;
+  bool ingestMit(const robot_control::motor_mapping::LegCanBinding& binding,
+                 std::uint8_t node_id, const motor_transport::CanFrame& frame,
+                 std::uint64_t now_us) noexcept;
+  bool ingestEncoderEstimates(
+      const robot_control::motor_mapping::LegCanBinding& binding,
+      const motor_transport::CanFrame& frame, std::uint64_t now_us) noexcept;
 
   robot_control::JointArray position_rad_{};
   robot_control::JointArray velocity_rad_s_{};
   robot_control::JointArray effort_nm_{};
   std::array<std::uint64_t, robot_control::kJointCount> stamp_us_{};
+  // Last MIT (0x008) sample per joint. While it is fresh, encoder estimates
+  // (0x009) are ignored so the two sources never interleave.
+  std::array<std::uint64_t, robot_control::kJointCount> mit_stamp_us_{};
   std::array<bool, robot_control::kJointCount> valid_{};
   std::array<std::uint16_t, 2> wheel_previous_raw_{};
   std::array<float, 2> wheel_unwrapped_rad_{};
