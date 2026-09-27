@@ -30,8 +30,20 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
   // Axle motion of a rolling wheel on a rigid (locked) leg: R*(wheel + pitch).
   const float mean_rate = 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
   const float mean_pos = 0.5F * (in.wheel_pos_rad[0] + in.wheel_pos_rad[1]);
-  ground_v_ = config_.wheel_radius_m * (mean_rate + in.pitch_rate_rad_s);
-  ground_x_ = config_.wheel_radius_m * (mean_pos + in.pitch_rad);
+  // The wheel encoder turns with the shin: add the leg chain (hip + knee)
+  // to the axle odometry, as MotorFeedback::writeTo does (v3.1).
+  if (!chain_init_) {
+    chain_prev_rad_ = in.leg_chain_rad;
+    chain_rate_f_ = 0.0F;
+    chain_init_ = true;
+  }
+  const float chain_rate = in.dt_s > 0.0F
+      ? (in.leg_chain_rad - chain_prev_rad_) / in.dt_s : 0.0F;
+  chain_prev_rad_ = in.leg_chain_rad;
+  chain_rate_f_ += std::clamp(2.0F * 3.14159265F * 10.0F * in.dt_s, 0.0F, 1.0F) *
+      (chain_rate - chain_rate_f_);
+  ground_v_ = config_.wheel_radius_m * (mean_rate + in.pitch_rate_rad_s + chain_rate_f_);
+  ground_x_ = config_.wheel_radius_m * (mean_pos + in.pitch_rad + in.leg_chain_rad);
 
   Output out{};
   if (cmd.disable) {
@@ -50,6 +62,12 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
         state_ = State::Locking;
         state_since_us_ = in.now_us;
         runaway_since_us_ = 0U;
+        if (!legs_held_) {
+          // Fresh lock: legs go to their zero, so the height starts at max.
+          height_target_m_ = LegHeight::maxHeight();
+          knee_target_rad_ = knee_cmd_rad_ = 0.0F;
+          pose_ = LegHeight::forKnee(0.0F);
+        }
         out.engage_legs = !legs_held_;  // already holding after a fault: keep it
         legs_held_ = true;
         out.legs_locked = true;
@@ -142,7 +160,11 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
       return out;
     }
     if (config_.algo == Algo::Pid) {
+      updateHeight(in, cmd);
       out.wheel_cmd_rad_s = pidUpdate(in, cmd);
+      out.leg_hip_offset_rad = pose_.hip_offset_rad;
+      out.leg_knee_offset_rad = pose_.knee_offset_rad;
+      out.legs_moving = knee_cmd_rad_ != knee_target_rad_;
       out.state = state_;
       return out;
     }
@@ -173,7 +195,10 @@ void V3Controller::engageBalance(const Input& in, float seed) {
   runaway_since_us_ = 0U;
   lqr_.reset(ground_x_, true);
   lqr_.setBalanceTrim(seed);
-  pid_seed_ = pid_theta_b_ = pid_ref_ = seed;
+  // theta_b is the balance angle at the power-up height; the height
+  // feed-forward adds the model change on top (v3.1).
+  pid_seed_ = pid_theta_b_ = seed - ffPitch();
+  pid_ref_ = seed;
   pid_v_filt_ = pid_cmd_m_s_ = 0.0F;
   pid_x0_ = ground_x_;
   pid_x_ = pid_x_target_ = 0.0F;
@@ -191,7 +216,8 @@ void V3Controller::heldRezero(const Input& in) {
   pid_v_filt_ = 0.0F;
   pid_x0_ = ground_x_;
   pid_x_ = pid_x_target_ = 0.0F;
-  pid_seed_ = pid_theta_b_ = pid_ref_ = in.pitch_rad;
+  pid_seed_ = pid_theta_b_ = in.pitch_rad - ffPitch();
+  pid_ref_ = in.pitch_rad;
   held_quiet_ = true;
   held_outer_off_ = true;
   held_quiet_since_us_ = in.now_us;
@@ -244,6 +270,11 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
     held_outer_off_ = false;
   }
   if (held_outer_off_) {
+    // Held (stand, hands): nothing to balance, so the balance angle tracks
+    // the body. Otherwise the height feed-forward (or any small offset) is
+    // integrated into a slow wheel run-away; on release the pitch at that
+    // moment becomes the seed.
+    pid_seed_ = pid_theta_b_ = in.pitch_rad - ffPitch();
     pid_v_filt_ = 0.0F;
     pid_x0_ = ground_x_;
     pid_x_ = pid_x_target_ = 0.0F;
@@ -259,7 +290,9 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
     pid_theta_b_ = std::clamp(pid_theta_b_ - p.kix * ex * dt, pid_seed_ - p.ref_max_rad,
                               pid_seed_ + p.ref_max_rad);
   }
-  pid_ref_ = pid_theta_b_ - std::clamp(u, -p.corr_max_rad, p.corr_max_rad);
+  // v3.1: the balance angle moves with the height (CAD mass model).
+  pid_ref_ = pid_theta_b_ + ffPitch() -
+      std::clamp(u, -p.corr_max_rad, p.corr_max_rad);
   // Inner loop: nose-down (+pitch) error -> accelerate forward under it.
   const float accel = std::clamp(p.kp * (in.pitch_rad - pid_ref_) + p.kd * in.pitch_rate_rad_s,
                                  -p.accel_max_m_s2, p.accel_max_m_s2);
@@ -275,6 +308,11 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   }
   // Held/lifted: over a window the command changed but the body never
   // rotated (a free pendulum would have).
+  // Legs moving (and shortly after): wheel commands change without the body
+  // rotating by design, so the held test is suspended.
+  if (legs_moved_us_ != 0U && in.now_us - legs_moved_us_ < config_.height.held_suppress_us) {
+    held_window_start_us_ = 0U;
+  }
   held_max_rate_ = std::max(held_max_rate_, std::abs(in.pitch_rate_rad_s));
   held_accel_sum_ += std::abs(body_accel_f_);
   ++held_accel_n_;
@@ -304,6 +342,33 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
     return w + p.deadband_comp_rad_s * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
   };
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
+}
+
+void V3Controller::updateHeight(const Input& in, const Command& cmd) {
+  const Height& h = config_.height;
+  if (cmd.height_m > 0.0F) {
+    const float target = std::clamp(cmd.height_m, LegHeight::minHeight(), LegHeight::maxHeight());
+    if (std::abs(target - height_target_m_) > 1.0e-4F) {
+      height_target_m_ = target;
+      knee_target_rad_ = LegHeight::forHeight(target).knee_offset_rad;
+    }
+  }
+  if (knee_cmd_rad_ == knee_target_rad_) return;
+  // Move while the balance is settled, or while the body is held (stand,
+  // hands: the wheels are not carrying it, so leg motion cannot upset it).
+  const bool settled = held_outer_off_ ||
+      (std::abs(in.pitch_rad - pid_ref_) < h.max_pitch_error_rad &&
+       std::abs(in.pitch_rate_rad_s) < h.max_pitch_rate_rad_s && !held_quiet_);
+  if (!settled) return;
+  // Knee step for the requested height speed, via the local d height/d knee.
+  const LegPose ahead = LegHeight::forKnee(knee_cmd_rad_ - 0.01F);
+  const float dh_dk = std::max((pose_.axle_below_hip_m - ahead.axle_below_hip_m) / 0.01F, 0.02F);
+  const float step = h.rate_m_s * in.dt_s / dh_dk;
+  knee_cmd_rad_ = knee_target_rad_ < knee_cmd_rad_
+      ? std::max(knee_cmd_rad_ - step, knee_target_rad_)
+      : std::min(knee_cmd_rad_ + step, knee_target_rad_);
+  pose_ = LegHeight::forKnee(knee_cmd_rad_);
+  legs_moved_us_ = in.now_us;
 }
 
 const char* toString(V3Controller::State state) noexcept {

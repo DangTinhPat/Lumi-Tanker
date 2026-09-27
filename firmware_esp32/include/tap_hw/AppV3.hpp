@@ -41,6 +41,9 @@ class AppV3 {
   [[nodiscard]] bool imuFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] bool legsFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] float legJointRad(std::size_t leg) const noexcept;
+  // v3.1: joint angle (driver frame, rad) the lock is holding this leg at.
+  [[nodiscard]] float legTargetRad(std::size_t leg) const noexcept;
+  [[nodiscard]] float legChainRad() const noexcept;
   [[nodiscard]] const char* legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept;
 
   Mpu6500Spi mpu_{};
@@ -70,7 +73,8 @@ class AppV3 {
   bool start_pending_ = false;
   bool disable_pending_ = false;
   bool go_pending_ = false;
-  bool go_after_ready_ = false;  // GO from Idle/Fault: start, then engage at Ready
+  bool go_after_ready_ = false;
+  float height_request_m_ = 0.0F;  // SET height; 0 = no request  // GO from Idle/Fault: start, then engage at Ready
   bool estop_ = false;
   // TILTTEST: wheels follow pitch only (no velocity loop), for checking the
   // tilt->wheel direction with the robot lifted.

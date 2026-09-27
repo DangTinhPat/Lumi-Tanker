@@ -45,7 +45,12 @@ float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept
       ? std::clamp(elapsed / config_.ramp_s, 0.0F, 1.0F) : 1.0F;
   // Minimum-jerk blend: zero speed and acceleration at both ends.
   const float blend = tau * tau * tau * (10.0F + tau * (-15.0F + 6.0F * tau));
-  return start_turns_[leg] * (1.0F - blend);
+  // Height offsets (core rad) in driver turns: hip joints 0/3, knees 1/4.
+  const auto binding = board::MotorIds{}.leg_can[leg];
+  const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
+  const float offset_core = knee ? knee_offset_rad_ : hip_offset_rad_;
+  const float offset_turns = offset_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
+  return start_turns_[leg] * (1.0F - blend) + offset_turns;
 }
 
 bool LegLock::atZero(std::uint64_t now_us) const noexcept {

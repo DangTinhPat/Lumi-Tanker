@@ -201,6 +201,13 @@ class TapSerialControlApp:
         ttk.Button(actions, text="GO — sẵn sàng (bấm trên giá, rồi đặt xuống sàn và buông tay)",
                    command=self.go).grid(
             row=1, column=0, columnspan=5, padx=4, pady=6, sticky="ew")
+        # v3.1 height (hip-to-axle, mm): the legs move only while balancing.
+        for column, (label, mm) in enumerate(
+                [("Cao nhất 189", 189), ("170 mm", 170), ("150 mm", 150),
+                 ("130 mm", 130), ("Thấp nhất 110", 110)]):
+            ttk.Button(actions, text=label,
+                       command=lambda mm=mm: self._send(f"SET height {mm}")).grid(
+                row=2, column=column, padx=4, pady=3, sticky="ew")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
 

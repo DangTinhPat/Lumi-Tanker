@@ -131,6 +131,22 @@ int main() {
     assert(!lock.engaged());
   }
 
+  // v3.1 height offsets: core hip/knee offsets become driver turns per leg
+  // (8:1, driver sign); the engage ramp still starts at the measured pose.
+  {
+    FakeTransport bus;
+    LegLock lock;
+    lock.setOffsets(0.2F, -0.4F);
+    assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const float expect = (knee ? -0.4F : 0.2F) * legs[i].driver_sign * 8.0F /
+          6.28318530718F;
+      assert(near(lock.targetTurns(i, 2'000'000U), expect, 1.0e-5F));
+    }
+  }
+
   // MIT fallback: joint radians, fixed Kp/Kd.
   {
     FakeTransport bus;
@@ -327,7 +343,32 @@ int main() {
                 100.0 * spinning / 5000.0);
     assert(c.heldResets() > 0);
     assert(spinning < 5000 / 4);
-    assert(near(c.balanceRef(), 0.08F, 0.01F));  // balance angle = held pitch
+    // v3.1: lower the legs while held on the stand. The balance feed-forward
+    // must not wind the wheels up (robot log 2026-09-27: -19 rad/s).
+    V3Controller::Command hcmd{};
+    hcmd.height_m = 0.160F;
+    float max_after = 0.0F;
+    for (int k = 0; k < 3000; ++k) {
+      t += 2000U;
+      in.now_us = t;
+      in.pitch_rad = 0.08F;
+      in.pitch_rate_rad_s = 0.0F;
+      in.accel_x_m_s2 = -9.80665F * std::sin(0.08F);
+      in.accel_z_m_s2 = 9.80665F * std::cos(0.08F);
+      in.wheel_rad_s = {wheel, wheel};
+      in.wheel_pos_rad = {pos, pos};
+      o = c.update(in, hcmd);
+      const float target = 0.5F * (o.wheel_cmd_rad_s[0] + o.wheel_cmd_rad_s[1]);
+      wheel += (target - wheel) * 0.002F / 0.1F;
+      pos += wheel * 0.002F;
+      if (k > 1500) max_after = std::max(max_after, std::abs(wheel));
+      assert(o.state != V3Controller::State::Fault);
+    }
+    assert(std::abs(c.legPose().axle_below_hip_m - 0.160F) < 0.001F);  // legs moved
+    std::printf("held on stand, lowered to 160 mm: max wheel after %.2f rad/s\n", max_after);
+    assert(max_after < 2.0F);
+    // Balance angle (at the power-up height) + height feed-forward = held pitch.
+    assert(near(c.balanceRef(), 0.08F, 0.01F));  // FF off by default
   }
 
   // Closed loop: unknown balance point, hand error at release. The cascade

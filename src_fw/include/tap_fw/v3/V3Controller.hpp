@@ -5,6 +5,7 @@
 
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
+#include "tap_fw/v3/LegHeight.hpp"
 
 namespace tap_fw::v3 {
 
@@ -86,8 +87,23 @@ class V3Controller {
     float tip_pitch_rad = 0.02F;
   };
 
+  // v3.1 height change while balancing (PID only).
+  struct Height {
+    float rate_m_s = 0.015F;          // hip-axle height change speed
+    // Move only while the balance is settled; otherwise the target waits.
+    float max_pitch_error_rad = 0.05F;
+    float max_pitch_rate_rad_s = 0.5F;
+    std::uint64_t held_suppress_us = 400'000U;  // after the legs stop
+    // Scale of the CAD balance-angle feed-forward. Off: the 2026-09-27 floor
+    // run went 188 -> 110 mm with the true balance pitch -0.02 -> -0.045 rad
+    // while the CAD model predicts +0.054, so the model made the transitions
+    // worse; theta_b learns each height instead.
+    float balance_ff_scale = 0.0F;
+  };
+
   struct Config {
     Algo algo = Algo::Pid;
+    Height height{};
     Engage engage{};
     Pid pid{};
     robot_control::LqrBalancer::Config lqr{};
@@ -113,6 +129,10 @@ class V3Controller {
     float accel_z_m_s2 = 9.80665F;
     std::array<float, 2> wheel_rad_s{};    // left, right (core sign: + forward)
     std::array<float, 2> wheel_pos_rad{};
+    // Mean over both legs of (hip + knee) measured offsets from their zero,
+    // core frame [rad]: the wheel encoder turns with the shin, so axle
+    // odometry needs it once the legs move (v3.1).
+    float leg_chain_rad = 0.0F;
     bool sensors_ok = true;                 // IMU, wheels, legs fresh; no axis fault
     bool legs_ready = false;                // leg lock has reached its target
   };
@@ -123,6 +143,8 @@ class V3Controller {
     bool disable = false;     // level: stop everything
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
+    // Requested hip-axle height [m]; <= 0 keeps the current request.
+    float height_m = 0.0F;
   };
 
   struct Output {
@@ -131,6 +153,10 @@ class V3Controller {
     bool legs_locked = false;   // level: keep the legs held (also through a fault)
     bool wheels_enabled = false;
     std::array<float, 2> wheel_cmd_rad_s{};
+    // v3.1: hip/knee offsets for both legs (core rad, from their zero).
+    float leg_hip_offset_rad = 0.0F;
+    float leg_knee_offset_rad = 0.0F;
+    bool legs_moving = false;
     const char* fault = nullptr;  // set on the tick a fault is raised
   };
 
@@ -170,6 +196,9 @@ class V3Controller {
   [[nodiscard]] int readyPhase() const noexcept { return ready_phase_; }
   // Number of held/lifted re-zeroes since the balance loop engaged.
   [[nodiscard]] int heldResets() const noexcept { return held_resets_; }
+  [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  [[nodiscard]] bool legsHeld() const noexcept { return legs_held_; }
+  [[nodiscard]] const LegPose& legPose() const noexcept { return pose_; }
   // Ground velocity/position used by the balancer (axle, rolling contact).
   [[nodiscard]] float groundVelocity() const noexcept { return ground_v_; }
   [[nodiscard]] float groundPosition() const noexcept { return ground_x_; }
@@ -188,6 +217,20 @@ class V3Controller {
   bool legs_held_ = false;
   float ground_v_ = 0.0F;
   float ground_x_ = 0.0F;
+  // v3.1 height state: the knee fold is ramped (cheap per tick), the
+  // requested height is converted to a knee target once per request.
+  float height_target_m_ = 0.0F;
+  float knee_target_rad_ = 0.0F;
+  float knee_cmd_rad_ = 0.0F;
+  LegPose pose_{};
+  float chain_prev_rad_ = 0.0F;
+  float chain_rate_f_ = 0.0F;
+  bool chain_init_ = false;
+  std::uint64_t legs_moved_us_ = 0U;
+  void updateHeight(const Input& in, const Command& cmd);
+  [[nodiscard]] float ffPitch() const noexcept {
+    return config_.height.balance_ff_scale * pose_.balance_pitch_delta_rad;
+  }
   bool balance_set_ = false;
   float balance_rad_ = 0.0F;
   // PID state.

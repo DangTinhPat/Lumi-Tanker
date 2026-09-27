@@ -50,12 +50,20 @@ class LegLock {
   [[nodiscard]] float targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
   void setMode(Mode mode) noexcept { config_.mode = mode; }
+  // v3.1 height: hip/knee offsets (core frame, rad) added to every leg's
+  // zero once the engage ramp is done; applied the same to both legs.
+  void setOffsets(float hip_core_rad, float knee_core_rad) noexcept {
+    hip_offset_rad_ = hip_core_rad;
+    knee_offset_rad_ = knee_core_rad;
+  }
   void setMitGains(float kp, float kd) noexcept {
     config_.mit_kp_nm_per_rad = kp;
     config_.mit_kd_nm_s_per_rad = kd;
   }
 
  private:
+  float hip_offset_rad_ = 0.0F;
+  float knee_offset_rad_ = 0.0F;
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};

@@ -111,6 +111,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     }
     start_pending_ = true;
     tilt_test_ = line[0] == 'T';
+    if (!ctrl_.legsHeld()) height_request_m_ = 0.0F;  // fresh lock: hang height
     Serial.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
                                 "max 12 rad/s, no balance loop)"
                               : "V3 START");
@@ -132,6 +133,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     } else {
       start_pending_ = true;
       tilt_test_ = false;
+      if (!ctrl_.legsHeld()) height_request_m_ = 0.0F;
       Serial.println("V3 GO: locking legs, then wheels hold (armed; balances after the robot "
                      "is put on the floor and let go)");
     }
@@ -144,6 +146,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     disable_pending_ = true;
     tilt_test_ = false;
     go_after_ready_ = false;
+    height_request_m_ = 0.0F;
     Serial.println("V3 DISABLE");
   } else if (std::strcmp(line, "ESTOP") == 0) {
     estop_ = true;
@@ -185,6 +188,16 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "kp")) ctrl_.config().pid.kp = std::clamp(v, 0.0F, 200.0F);
     else if (!std::strcmp(key, "kd")) ctrl_.config().pid.kd = std::clamp(v, 0.0F, 30.0F);
     else if (!std::strcmp(key, "kv")) ctrl_.config().pid.kv = std::clamp(v, 0.0F, 1.0F);
+    else if (!std::strcmp(key, "height")) {
+      // Hip-to-axle height in mm (v3.1); clamped to the planner's range.
+      height_request_m_ = std::clamp(v * 0.001F, tap_fw::v3::LegHeight::minHeight(),
+                                     tap_fw::v3::LegHeight::maxHeight());
+      if (ctrl_.state() != V3Controller::State::Balancing) {
+        Serial.println("V3 SET height: stored; the legs move once balancing is settled");
+      }
+    }
+    else if (!std::strcmp(key, "hff")) ctrl_.config().height.balance_ff_scale = std::clamp(v, -2.0F, 2.0F);
+    else if (!std::strcmp(key, "hrate")) ctrl_.config().height.rate_m_s = std::clamp(v * 0.001F, 0.002F, 0.06F);
     else if (!std::strcmp(key, "dbc")) ctrl_.config().pid.deadband_comp_rad_s = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "dbe")) ctrl_.config().pid.deadband_eps_rad_s = std::clamp(v, 0.05F, 2.0F);
     else if (!std::strcmp(key, "lead")) ctrl_.config().pid.lead_s = std::clamp(v, 0.0F, 0.3F);
@@ -233,13 +246,16 @@ void AppV3::printTunables() noexcept {
   const auto& c = ctrl_.balancer().config();
   const auto& pid = ctrl_.config().pid;
   Serial.printf("V3 TUNE algo=%s (SET algo 1=PID 0=LQR) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
-                "kix=%.3f amax=%.1f lead=%.2f dbc=%.2f dbe=%.2f auto=%d balance=%s%+.4f\n",
+                "kix=%.3f amax=%.1f lead=%.2f dbc=%.2f dbe=%.2f auto=%d balance=%s%+.4f "
+                "height %.0f-%.0f mm hrate=%.0f mm/s\n",
                 ctrl_.config().algo == V3Controller::Algo::Pid ? "PID" : "LQR", pid.kp, pid.kd,
                 pid.kv, pid.kx, pid.kix, pid.accel_max_m_s2, pid.lead_s, pid.deadband_comp_rad_s,
                 pid.deadband_eps_rad_s,
                 ctrl_.config().engage.automatic ? 1 : 0,
                 ctrl_.balanceAngleSet() ? "" : "(unset, release pitch) ",
-                ctrl_.balanceAngle());
+                ctrl_.balanceAngle(), tap_fw::v3::LegHeight::minHeight() * 1000.0F,
+                tap_fw::v3::LegHeight::maxHeight() * 1000.0F,
+                ctrl_.config().height.rate_m_s * 1000.0F);
   Serial.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
                 tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
@@ -306,6 +322,22 @@ float AppV3::legJointRad(std::size_t leg) const noexcept {
   return feedback_.legEstimate(joint).pos_turns * kTwoPi / 8.0F;
 }
 
+float AppV3::legTargetRad(std::size_t leg) const noexcept {
+  const auto binding = tap_fw::board::MotorIds{}.leg_can[leg];
+  const auto& pose = ctrl_.legPose();
+  const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
+  return (knee ? pose.knee_offset_rad : pose.hip_offset_rad) * binding.driver_sign;
+}
+
+float AppV3::legChainRad() const noexcept {
+  // Mean over both legs of (hip + knee) in the core frame.
+  float sum = 0.0F;
+  for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
+    sum += legJointRad(leg) * tap_fw::board::MotorIds{}.leg_can[leg].driver_sign;
+  }
+  return 0.5F * sum;
+}
+
 const char* AppV3::legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept {
   const std::size_t joint = feedback_.firstLegAxisFault(now_us, need_closed_loop);
   if (joint == robot_control::kJointCount) return nullptr;
@@ -326,6 +358,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   V3Controller::Command cmd{};
   cmd.forward_m_s = drive_forward_;
   cmd.yaw_rad_s = drive_yaw_;
+  cmd.height_m = height_request_m_;
   cmd.disable = disable_pending_ || estop_;
   if (active && now_us - last_rx_us_ > kLeaseUs) {
     cmd.disable = true;
@@ -344,7 +377,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     } else if (const char* axis = legAxisProblem(now_us, false)) {
       refuse = axis;
     } else {
-      for (std::size_t leg = 0; leg < LegLock::kLegs && refuse == nullptr; ++leg) {
+      // Legs already held (START after a fault) may sit at a height offset.
+      for (std::size_t leg = 0; leg < LegLock::kLegs && refuse == nullptr && !ctrl_.legsHeld();
+           ++leg) {
         const float q = legJointRad(leg);
         if (std::abs(q) > kMaxStartOffsetRad) {
           std::snprintf(text, sizeof(text),
@@ -386,12 +421,13 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.accel_z_m_s2 = body_.accel_m_s2[2];
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
+  in.leg_chain_rad = legChainRad();
   const bool closed_loop_due = legs_.engaged() && now_us - engage_us_ > kClosedLoopGraceUs;
   in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFresh(now_us) && legsFresh(now_us) &&
       legAxisProblem(now_us, closed_loop_due) == nullptr;
   bool legs_ready = legs_.atZero(now_us);
   for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
-    legs_ready = legs_ready && std::abs(legJointRad(leg)) <= kLegReadyRad;
+    legs_ready = legs_ready && std::abs(legJointRad(leg) - legTargetRad(leg)) <= kLegReadyRad;
   }
   in.legs_ready = legs_ready;
   if (st == V3Controller::State::Locking && now_us - state_since_us_ > kLockTimeoutUs) {
@@ -418,12 +454,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       start[leg] = feedback_.legEstimate(tap_fw::board::MotorIds{}.leg_can[leg].joint_index).pos_turns;
     }
     engage_us_ = now_us;
+    legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
     (void)legs_.engage(start, now_us, transport_);
     Serial.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
   if (out.legs_locked) {
+    legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
     (void)legs_.update(now_us, transport_);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
@@ -471,14 +509,16 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     next_trace_us_ = now_us + kTraceUs;
     Serial.printf("TR t=%lu mode=%s pitch=%+.3f rate=%+.2f wcmd=[%+.2f %+.2f] "
                   "wmeas=[%+.2f %+.2f] axle_v=%+.3f axle_x=%+.3f trim=%+.4f "
-                  "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d\n",
+                  "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d "
+                  "h=%.1f htgt=%.1f knee=%+.3f\n",
                   static_cast<unsigned long>((now_us - state_since_us_) / 1000U),
                   tap_fw::v3::toString(out.state), imu_.pitch_rad, imu_.pitch_rate_rad_s,
                   last_wheel_cmd_[0], last_wheel_cmd_[1], in.wheel_rad_s[0], in.wheel_rad_s[1],
                   ctrl_.groundVelocity(), ctrl_.groundPosition(), ctrl_.balanceRef(),
                   legJointRad(0), legJointRad(1), legJointRad(2), legJointRad(3),
                   ctrl_.pitchRef(), ctrl_.positionError(), ctrl_.readyPhase(),
-                  ctrl_.heldResets());
+                  ctrl_.heldResets(), ctrl_.legPose().axle_below_hip_m * 1000.0F,
+                  ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad);
   }
 }
 

@@ -13,6 +13,7 @@
 #include <random>
 
 #include "robot_control/ImuStateEstimator.hpp"
+#include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 
 namespace {
@@ -21,6 +22,12 @@ using robot_control::ImuStateEstimator;
 using tap_fw::v3::V3Controller;
 
 struct Case {
+  // v3.1: height request during balancing (0 = none): lower to height_low_m
+  // at 5 s, back to the hang height at height_up_s. The true balance angle
+  // shifts by eq_delta_scale x the CAD model's prediction (model error).
+  double height_low_m = 0.0;
+  double height_up_s = 25.0;
+  double eq_delta_scale = 1.0;
   double deadband = 0.0;  // wheel stiction: no motion below |target| [rad/s]
   // Plant uncertainty around the CAD estimates, and the wheel command delay.
   double mass_scale = 1.0, inertia_scale = 1.0, l_scale = 1.0;
@@ -44,11 +51,13 @@ struct Result {
   bool fell = false;
   double x_end = 0.0, max_x = 0.0, th_rms = 0.0, theta_b = 0.0, theta_b_15s = 0.0;
   int held_resets = 0;  // a free robot must never look held
+  double max_tilt = 0.0;        // max |pitch - true balance angle| while balancing
+  double max_x_height = 0.0;    // max |x| from the start of the height change
 };
 
 Result simulate(const Case& c) {
-  const double g = 9.80665, m = 4.181 * c.mass_scale, l = 0.191 * c.l_scale,
-               J = 0.178 * c.mass_scale * c.inertia_scale * c.l_scale * c.l_scale,
+  const double g = 9.80665, m = 4.181 * c.mass_scale, l0 = 0.191 * c.l_scale,
+               J0 = 0.178 * c.mass_scale * c.inertia_scale * c.l_scale * c.l_scale,
                Mw = 0.44, Iw = 0.00029,
                R = 0.04, h_imu = 0.224, tau_max = 0.6, gyro_bias = -0.05;
   const double Mp = Mw + Iw / (R * R) + m;
@@ -138,16 +147,34 @@ Result simulate(const Case& c) {
   double applied = 0.0, sum_th2 = 0.0;
   int n_rms = 0;
   Result r;
+  const double com0 = tap_fw::v3::LegHeight::forKnee(0.0F).com_above_axle_m;
+  double l = l0, J = J0, eq = c.eq, chain_prev = 0.0;
   for (int k = 0; k < static_cast<int>(c.duration_s / dt_c); ++k) {
     const double t = k * dt_c;
+    if (c.height_low_m > 0.0) {
+      cmd.height_m = static_cast<float>(t < 5.0 ? 0.0
+          : t < c.height_up_s ? c.height_low_m : tap_fw::v3::LegHeight::maxHeight());
+    }
+    // Legs follow the commanded pose: pendulum length, inertia and the true
+    // balance angle move with it (quasi-static leg motion, axle under hip).
+    const auto& pose = ctrl.legPose();
+    const double ratio = pose.ok ? pose.com_above_axle_m / com0 : 1.0;
+    l = l0 * ratio;
+    J = J0 * ratio * ratio;
+    eq = c.eq + c.eq_delta_scale * (pose.ok ? pose.balance_pitch_delta_rad : 0.0);
+    const double chain = pose.ok ? pose.hip_offset_rad + pose.knee_offset_rad : 0.0;
+    const double chain_rate = (chain - chain_prev) / dt_c;
+    chain_prev = chain;
+    in.leg_chain_rad = static_cast<float>(chain);
     in.now_us = t_us + static_cast<std::uint64_t>(k) * 2000U;
     in.pitch_rad = imu.pitch_rad;
     in.pitch_rate_rad_s = imu.pitch_rate_rad_s;
     in.accel_x_m_s2 = last_accel[0];
     in.accel_z_m_s2 = last_accel[2];
-    const double wm = phid + n_w(rng);
+    // Wheel encoders turn with the shin: body-relative wheel minus the chain.
+    const double wm = phid - chain_rate + n_w(rng);
     in.wheel_rad_s = {static_cast<float>(wm), static_cast<float>(wm)};
-    in.wheel_pos_rad = {static_cast<float>(phi), static_cast<float>(phi)};
+    in.wheel_pos_rad = {static_cast<float>(phi - chain), static_cast<float>(phi - chain)};
     const auto out = ctrl.update(in, cmd);
     cmd.go = false;
     if (out.state == V3Controller::State::Fault) { r.fell = true; break; }
@@ -155,7 +182,7 @@ Result simulate(const Case& c) {
     if (queue.size() > c.delay_ticks) { applied = queue.front(); queue.pop_front(); }
 
     for (int s = 0; s < sub; ++s) {
-      const double psi = th - c.eq - c.slope, cs = std::cos(th - c.eq), sn = std::sin(th - c.eq);
+      const double psi = th - eq - c.slope, cs = std::cos(th - eq), sn = std::sin(th - eq);
       const double fx = (t >= 10.0 && t < 40.0) ? c.push_n : 0.0;
       const double gx = -g * std::sin(c.slope);
       auto solve = [&](double tau) {
@@ -187,8 +214,10 @@ Result simulate(const Case& c) {
     const double fxw = axw + g * std::sin(c.slope), fzw = azw + g * std::cos(c.slope);
     feed(fxw * cth - fzw * sth, fxw * sth + fzw * cth, thd);
 
-    if (std::abs(th - c.eq) > 0.6) { r.fell = true; break; }
-    if (t > c.duration_s - 10.0) { sum_th2 += (th - c.eq) * (th - c.eq); ++n_rms; }
+    if (std::abs(th - eq) > 0.6) { r.fell = true; break; }
+    if (t > c.duration_s - 10.0) { sum_th2 += (th - eq) * (th - eq); ++n_rms; }
+    if (t > 3.0) r.max_tilt = std::max(r.max_tilt, std::abs(th - eq));
+    if (t >= 5.0) r.max_x_height = std::max(r.max_x_height, std::abs(x));
     if (k == static_cast<int>(15.0 / dt_c)) r.theta_b_15s = ctrl.balanceRef();
     r.max_x = std::max(r.max_x, std::abs(x));
   }
@@ -315,6 +344,27 @@ int main() {
     const auto r = simulate(c);
     report("T9 wheel deadband", c, r);
     assert(!r.fell && r.th_rms < 0.0015);
+  }
+  // T10 (v3.1): balancing at the hang height, lower to 150 mm at 5 s, back
+  // up at 25 s, CAD balance feed-forward off (default). The true balance
+  // angle shift is -0.5 x the CAD prediction (2026-09-27 robot: -0.025 rad
+  // at 110 mm vs CAD +0.054), plus 0 and +0.5 for margin; wheel deadband
+  // and lag as on the robot.
+  for (double model_error : {-0.5, 0.0, 0.5}) {
+    Case c;
+    c.eq = 0.03;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    c.height_low_m = 0.150;
+    c.eq_delta_scale = model_error;
+    c.duration_s = 45.0;
+    const auto r = simulate(c);
+    std::printf("T10 height 188->150->188 mm model x%.1f: fell=%d max_tilt=%.4f "
+                "max|x|=%.3f x_end=%+.3f th_rms_end=%.4f held=%d\n", model_error, r.fell,
+                r.max_tilt, r.max_x_height, r.x_end, r.th_rms, r.held_resets);
+    assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
+    assert(r.held_resets == 0);
   }
   std::puts("v3_physics_tests: all checks passed");
   return 0;
