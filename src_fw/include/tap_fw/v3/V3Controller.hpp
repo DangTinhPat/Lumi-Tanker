@@ -46,6 +46,14 @@ class V3Controller {
     // the sent command leads the integrated speed by accel * lead_s (a
     // first-order servo then realises the commanded acceleration sooner).
     float lead_s = 0.12F;
+    // Wheel deadband compensation [rad/s]: the BL4820 wheels barely move
+    // below ~1 rad/s (2026-09-27 floor log; a 1 rad/s deadband in the plant
+    // reproduces the measured 0.19 deg / 1.6 cm sway at 0.46 Hz). Added
+    // smoothly: w + comp * tanh(w / deadband_eps). 0.6/0.3 cuts the plant's
+    // sway 0.0032 -> 0.0013 rad; 0.8 over-drives a light plant without a
+    // deadband (physics tests T7/T9).
+    float deadband_comp_rad_s = 0.6F;
+    float deadband_eps_rad_s = 0.3F;
     float speed_lpf_hz = 5.0F; // speed-loop measurement filter
     // Command may lead the measured wheel speed by at most this (stalls).
     float tracking_margin_m_s = 0.30F;

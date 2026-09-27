@@ -185,6 +185,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "kp")) ctrl_.config().pid.kp = std::clamp(v, 0.0F, 200.0F);
     else if (!std::strcmp(key, "kd")) ctrl_.config().pid.kd = std::clamp(v, 0.0F, 30.0F);
     else if (!std::strcmp(key, "kv")) ctrl_.config().pid.kv = std::clamp(v, 0.0F, 1.0F);
+    else if (!std::strcmp(key, "dbc")) ctrl_.config().pid.deadband_comp_rad_s = std::clamp(v, 0.0F, 2.0F);
+    else if (!std::strcmp(key, "dbe")) ctrl_.config().pid.deadband_eps_rad_s = std::clamp(v, 0.05F, 2.0F);
     else if (!std::strcmp(key, "lead")) ctrl_.config().pid.lead_s = std::clamp(v, 0.0F, 0.3F);
     else if (!std::strcmp(key, "kx")) ctrl_.config().pid.kx = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "kix")) ctrl_.config().pid.kix = std::clamp(v, 0.0F, 0.2F);
@@ -231,9 +233,10 @@ void AppV3::printTunables() noexcept {
   const auto& c = ctrl_.balancer().config();
   const auto& pid = ctrl_.config().pid;
   Serial.printf("V3 TUNE algo=%s (SET algo 1=PID 0=LQR) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
-                "kix=%.3f amax=%.1f lead=%.2f auto=%d balance=%s%+.4f\n",
+                "kix=%.3f amax=%.1f lead=%.2f dbc=%.2f dbe=%.2f auto=%d balance=%s%+.4f\n",
                 ctrl_.config().algo == V3Controller::Algo::Pid ? "PID" : "LQR", pid.kp, pid.kd,
-                pid.kv, pid.kx, pid.kix, pid.accel_max_m_s2, pid.lead_s,
+                pid.kv, pid.kx, pid.kix, pid.accel_max_m_s2, pid.lead_s, pid.deadband_comp_rad_s,
+                pid.deadband_eps_rad_s,
                 ctrl_.config().engage.automatic ? 1 : 0,
                 ctrl_.balanceAngleSet() ? "" : "(unset, release pitch) ",
                 ctrl_.balanceAngle());

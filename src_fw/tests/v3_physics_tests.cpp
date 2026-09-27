@@ -21,6 +21,7 @@ using robot_control::ImuStateEstimator;
 using tap_fw::v3::V3Controller;
 
 struct Case {
+  double deadband = 0.0;  // wheel stiction: no motion below |target| [rad/s]
   // Plant uncertainty around the CAD estimates, and the wheel command delay.
   double mass_scale = 1.0, inertia_scale = 1.0, l_scale = 1.0;
   std::size_t delay_ticks = 2;  // 2 ms control ticks
@@ -166,7 +167,10 @@ Result simulate(const Case& c) {
         xdd = (b1 * a22 - a12 * b2) / det;
         thdd = (a11 * b2 - a21 * b1) / det;
       };
-      double phidd = (applied - phid) / c.tau_s;
+      // Driver speed is whole rpm; the wheel sticks below the deadband.
+      double target = std::round(applied * 60.0 / (2.0 * M_PI)) * 2.0 * M_PI / 60.0;
+      if (std::abs(target) < c.deadband) target = 0.0;
+      double phidd = (target - phid) / c.tau_s;
       solve(0.0);
       const double x0 = xdd, t0 = thdd;
       solve(1.0);
@@ -298,6 +302,19 @@ int main() {
       report("T8 stand -> floor", c, r);
       assert(!r.fell && std::abs(r.x_end) < 0.2 && r.th_rms < 0.003);
     }
+  }
+  // T9: wheel deadband 1 rad/s (fits the 2026-09-27 floor log: 0.19 deg,
+  // 1.6 cm sway at 0.46 Hz without compensation). With the default
+  // compensation the sway must stay small.
+  {
+    Case c;
+    c.eq = -0.021;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    const auto r = simulate(c);
+    report("T9 wheel deadband", c, r);
+    assert(!r.fell && r.th_rms < 0.0015);
   }
   std::puts("v3_physics_tests: all checks passed");
   return 0;

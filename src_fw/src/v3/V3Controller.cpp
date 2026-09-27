@@ -299,7 +299,11 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   const float yaw = config_.lqr.half_wheel_base_m *
       std::clamp(cmd.yaw_rad_s, -config_.lqr.max_yaw_rate_rad_s, config_.lqr.max_yaw_rate_rad_s);
   const float sign = config_.lqr.left_wheel_sign;
-  return {sign * (sent - yaw) / radius, sign * (sent + yaw) / radius};
+  auto comp = [&](float w) {
+    if (p.deadband_comp_rad_s <= 0.0F) return w;
+    return w + p.deadband_comp_rad_s * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
+  };
+  return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
 }
 
 const char* toString(V3Controller::State state) noexcept {
