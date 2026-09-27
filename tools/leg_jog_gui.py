@@ -63,6 +63,8 @@ WHEEL_STATE_TEXT = {0: "thả lỏng", 1: "đang chạy", 2: "LỖI · nhả nú
 FIELDS_PER_WHEEL = 6
 WHEEL_RAW_MAX = 400
 WHEEL_BTN_BG = "#3a2a10"
+WHEEL_COUNTS = 1024      # Present Position counts per revolution.
+RPM_WINDOW_S = 1.0       # Sliding window for the position-derived RPM.
 
 BG = "#0a0e1a"
 CARD = "#171f30"
@@ -244,6 +246,9 @@ class LegJogApp:
         self.wheel_holds = {}  # button -> (left dir, right dir)
         self.wheel_latch_button = None  # Continuous mode: the latched button.
         self.wheel_latch = (0, 0)
+        # Position history per wheel for the measured RPM: (t, unwrapped counts).
+        self.wheel_history = {name: [] for name in WHEELS}
+        self.wheel_unwrapped = {name: None for name in WHEELS}
         self.last_status = None
         self.last_status_time = 0.0
 
@@ -425,8 +430,8 @@ class LegJogApp:
         card = self._card(parent, "2 bánh xe BL4820 (UART) · + = robot tiến · raw ≈ RPM, chưa đo")
         table = tk.Frame(card, bg=CARD)
         table.pack(fill="x", padx=14, pady=(0, 6))
-        headers = ("Bánh", "Trạng thái", "Lệnh raw", "Đo raw", "Vị trí °",
-                   "fb ms", "err", "Giữ để chạy", "")
+        headers = ("Bánh", "Trạng thái", "Lệnh raw", "Đo raw", "RPM đo",
+                   "Vị trí °", "fb ms", "err", "Giữ để chạy", "")
         for c, h in enumerate(headers):
             tk.Label(table, text=h, bg=CARD, fg=TEXT_DIM,
                      font=("Segoe UI", 9, "bold")).grid(row=0, column=c, padx=4, sticky="w")
@@ -436,8 +441,8 @@ class LegJogApp:
                      font=("Segoe UI", 10, "bold")).grid(row=r, column=0, sticky="w",
                                                          padx=4, pady=3)
             cells = {}
-            for c, key in enumerate(("state", "target", "speed", "pos", "age", "err"),
-                                    start=1):
+            for c, key in enumerate(("state", "target", "speed", "rpm", "pos", "age",
+                                     "err"), start=1):
                 lbl = tk.Label(table, text="—", bg=CARD, fg=CYAN, font=MONO,
                                width=13 if key == "state" else 6, anchor="e")
                 lbl.grid(row=r, column=c, padx=4)
@@ -446,8 +451,8 @@ class LegJogApp:
             left_only = (-1, 0) if name == "LW" else (0, -1)
             back = self._button(table, "◀ Lùi", None, WHEEL_BTN_BG, ORANGE, width=7)
             fwd = self._button(table, "Tiến ▶", None, WHEEL_BTN_BG, ORANGE, width=7)
-            back.grid(row=r, column=7, padx=2)
-            fwd.grid(row=r, column=8, padx=2)
+            back.grid(row=r, column=8, padx=2)
+            fwd.grid(row=r, column=9, padx=2)
             self._bind_wheel_hold(back, left_only)
             self._bind_wheel_hold(fwd, tuple(-d for d in left_only))
 
@@ -727,6 +732,8 @@ class LegJogApp:
                               fg={0: TEXT_DIM, 1: GREEN, 2: RED}.get(w["state"], TEXT))
             c["target"].config(text=f"{w['target']:+d}")
             c["speed"].config(text=f"{w['speed']:+d}")
+            rpm = self._measured_rpm(name, w["pos_raw"])
+            c["rpm"].config(text="—" if rpm is None else f"{rpm:+.0f}")
             c["pos"].config(text=f"{w['pos_raw'] * 360.0 / 1024.0:.1f}")
             age_ok = 0 <= w["age_ms"] <= 50
             c["age"].config(text=str(w["age_ms"]), fg=CYAN if age_ok else RED)
@@ -734,6 +741,30 @@ class LegJogApp:
             if w["state"] == 2 and self.wheel_latch_button is not None:
                 self._stop_wheel_latch()
                 self._log("err", f"{name} mất feedback: đã dừng quay liên tục.")
+
+    def _measured_rpm(self, name, pos_raw):
+        """RPM from Present Position deltas over RPM_WINDOW_S, independent of
+        the raw speed unit; compare it with the commanded raw speed (C2)."""
+        now = time.monotonic()
+        previous = self.wheel_unwrapped[name]
+        if previous is None:
+            unwrapped = pos_raw
+        else:
+            delta = pos_raw - (previous % WHEEL_COUNTS)
+            if delta > WHEEL_COUNTS // 2:
+                delta -= WHEEL_COUNTS
+            elif delta < -WHEEL_COUNTS // 2:
+                delta += WHEEL_COUNTS
+            unwrapped = previous + delta
+        self.wheel_unwrapped[name] = unwrapped
+        history = self.wheel_history[name]
+        history.append((now, unwrapped))
+        while history and now - history[0][0] > RPM_WINDOW_S:
+            history.pop(0)
+        span = history[-1][0] - history[0][0]
+        if len(history) < 3 or span < 0.3:
+            return None
+        return (history[-1][1] - history[0][1]) / WHEEL_COUNTS / span * 60.0
 
     def _refresh_mode(self):
         if not self.link.is_open():

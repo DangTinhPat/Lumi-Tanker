@@ -122,6 +122,25 @@ class LqrBalancer {
     float station_hold_velocity_servo_gain_hz = 0.0F;
     bool hold_station_during_pose = false;
     float station_velocity_decay_gain_hz = 0.0F;
+
+    // Adaptive balance angle (hardware bring-up). The measured equilibrium of
+    // a real robot differs from the model's pitch reference (IMU mounting
+    // tilt, CAD mass error, joint zero error). With that offset the pitch +
+    // velocity loop's only steady state is rolling at constant speed while
+    // leaning at the true equilibrium. An integral of the wheel speed error
+    // moves the reference to the true equilibrium instead - the same job as
+    // the velocity loop's position integral in a cascaded PID balancer.
+    // Units: rad of reference per metre of accumulated speed error. 0 = off.
+    float balance_trim_gain_rad_per_m = 0.0F;
+    float balance_trim_max_rad = 0.15F;
+    // Only adapt while the body is near the (trimmed) reference, not while a
+    // fall or a large transient is in progress.
+    float balance_trim_pitch_gate_rad = 0.25F;
+    // Anti-windup: keep the integrated wheel speed command within this band
+    // of the measured ground speed. A wheel that cannot realize the command
+    // (torque limit, stall, a held body) otherwise lets the command ramp to
+    // max_ground_velocity_m_s. 0 = off.
+    float command_velocity_tracking_margin_m_s = 0.0F;
   };
 
   struct DebugState {
@@ -140,6 +159,7 @@ class LqrBalancer {
     bool station_hold_active = false;
     unsigned riccati_iterations = 0U;
     float leg_velocity_error_m_s = 0.0F;
+    float balance_trim_rad = 0.0F;
   };
 
   LqrBalancer();
@@ -186,10 +206,56 @@ class LqrBalancer {
     return active_length_m_;
   }
 
+  // Adaptive balance angle state (see Config::balance_trim_gain_rad_per_m).
+  // The learned value is a property of the robot and survives reset().
+  void setBalanceTrim(float trim_rad) noexcept {
+    balance_trim_rad_ = std::isfinite(trim_rad)
+        ? std::clamp(trim_rad, -std::abs(config_.balance_trim_max_rad),
+                     std::abs(config_.balance_trim_max_rad))
+        : 0.0F;
+  }
+  [[nodiscard]] float balanceTrim() const noexcept { return balance_trim_rad_; }
+  // Runtime tuning hooks for hardware bring-up.
+  void setBalanceTrimGain(float gain) noexcept {
+    config_.balance_trim_gain_rad_per_m = std::isfinite(gain) ? std::max(gain, 0.0F) : 0.0F;
+  }
+  void setBalanceTrimMax(float max_rad) noexcept {
+    config_.balance_trim_max_rad = std::isfinite(max_rad) ? std::abs(max_rad) : 0.0F;
+    setBalanceTrim(balance_trim_rad_);
+  }
+  void setCommandTrackingMargin(float margin_m_s) noexcept {
+    config_.command_velocity_tracking_margin_m_s =
+        std::isfinite(margin_m_s) ? std::max(margin_m_s, 0.0F) : 0.0F;
+  }
+  void setMaxGroundAccel(float accel_m_s2) noexcept {
+    if (std::isfinite(accel_m_s2) && accel_m_s2 > 0.0F) {
+      config_.max_ground_accel_m_s2 = accel_m_s2;
+    }
+  }
+  [[nodiscard]] const Config& config() const noexcept { return config_; }
+
+  // Embedded gain schedule. The DARE solve runs in double precision, which an
+  // ESP32-S3 (single-precision FPU only) takes ~50 ms to finish - far over the
+  // 2 ms control period, and it reruns whenever the COM height moves 2 mm.
+  // A target can precompute the gains over [min, max] pendulum length before
+  // it enables, one point per call so the caller can yield between points;
+  // afterwards every rebuild is a bounded linear interpolation. Callers that
+  // never build the table (the native simulator) keep the exact online solve.
+  static constexpr unsigned kMaxGainTablePoints = 64U;
+  bool buildGainTableStep(unsigned points);
+  [[nodiscard]] bool gainTableReady() const noexcept { return table_ready_; }
+  [[nodiscard]] unsigned onlineSolveCount() const noexcept { return online_solves_; }
+  [[nodiscard]] const StateVec& activeGain() const noexcept { return gain_; }
+  [[nodiscard]] const StateVec& activeStationGain() const noexcept {
+    return station_gain_;
+  }
+
  private:
   using GainVec = StateVec;
 
   void rebuildGain();
+  void solveGainsAt(float length, GainVec& gain, GainVec& station_gain,
+                    GainVec& posture_station_gain) const;
   [[nodiscard]] float solveGroundAcceleration(
       const StateVec& state, float station_gain_blend) const noexcept;
   [[nodiscard]] float stationGainBlend(float pitch_error, float pitch_rate,
@@ -205,9 +271,17 @@ class LqrBalancer {
 
   Config config_{};
   float active_length_m_ = 0.24F;
+  float balance_trim_rad_ = 0.0F;
   GainVec gain_{};
   GainVec station_gain_{};
   GainVec posture_station_gain_{};
+  std::array<GainVec, kMaxGainTablePoints> table_gain_{};
+  std::array<GainVec, kMaxGainTablePoints> table_station_gain_{};
+  std::array<GainVec, kMaxGainTablePoints> table_posture_station_gain_{};
+  unsigned table_points_ = 0U;
+  unsigned table_built_ = 0U;
+  bool table_ready_ = false;
+  unsigned online_solves_ = 0U;
   float commanded_ground_velocity_m_s_ = 0.0F;
   float station_gain_quiet_elapsed_s_ = 0.0F;
   float station_gain_blend_ = 0.0F;

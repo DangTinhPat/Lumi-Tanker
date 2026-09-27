@@ -37,6 +37,7 @@ class CallbackBusTransport final : public motor_transport::Transport {
       : can_(can), uarts_{uart1, uart2} {}
 
   bool sendCan(std::uint16_t id, const motor_frame::MitBytes& data) noexcept override;
+  bool sendCanFrame(const motor_transport::CanFrame& frame) noexcept override;
   bool receiveCan(motor_transport::CanFrame& frame) noexcept override;
   bool sendUart(std::uint8_t bus, const motor_frame::DxlFrame& frame) noexcept override;
   bool receiveUart(std::uint8_t bus, motor_frame::DxlFrame& frame) noexcept override;

@@ -122,7 +122,56 @@ float LqrBalancer::clampFinite(float value, float lo, float hi) noexcept {
 }
 
 void LqrBalancer::rebuildGain() {
-  const float length = std::max(active_length_m_, 0.02F);
+  if (!table_ready_) {
+    solveGainsAt(active_length_m_, gain_, station_gain_, posture_station_gain_);
+    ++online_solves_;
+    return;
+  }
+  // Linear interpolation in pendulum length between precomputed solves.
+  const float lo = config_.min_pendulum_length_m;
+  const float hi = std::max(config_.max_pendulum_length_m, lo);
+  const float span = hi - lo;
+  const float position = span > 0.0F
+      ? std::clamp((active_length_m_ - lo) / span, 0.0F, 1.0F) *
+            static_cast<float>(table_points_ - 1U)
+      : 0.0F;
+  const unsigned index = std::min(static_cast<unsigned>(position), table_points_ - 2U);
+  const float frac = position - static_cast<float>(index);
+  for (int i = 0; i < kStateDim; ++i) {
+    gain_[i] = table_gain_[index][i] +
+        frac * (table_gain_[index + 1U][i] - table_gain_[index][i]);
+    station_gain_[i] = table_station_gain_[index][i] +
+        frac * (table_station_gain_[index + 1U][i] - table_station_gain_[index][i]);
+    posture_station_gain_[i] = table_posture_station_gain_[index][i] +
+        frac * (table_posture_station_gain_[index + 1U][i] -
+                table_posture_station_gain_[index][i]);
+  }
+}
+
+bool LqrBalancer::buildGainTableStep(unsigned points) {
+  if (table_ready_) return true;
+  points = std::clamp(points, 2U, kMaxGainTablePoints);
+  if (table_points_ != points) {
+    table_points_ = points;
+    table_built_ = 0U;
+  }
+  const float lo = config_.min_pendulum_length_m;
+  const float hi = std::max(config_.max_pendulum_length_m, lo);
+  const float length = lo + (hi - lo) * static_cast<float>(table_built_) /
+      static_cast<float>(points - 1U);
+  solveGainsAt(length, table_gain_[table_built_], table_station_gain_[table_built_],
+               table_posture_station_gain_[table_built_]);
+  if (++table_built_ >= points) {
+    table_ready_ = true;
+    rebuildGain();
+  }
+  return table_ready_;
+}
+
+void LqrBalancer::solveGainsAt(float length_m, GainVec& gain,
+                               GainVec& station_gain,
+                               GainVec& posture_station_gain) const {
+  const float length = std::max(length_m, 0.02F);
   const float gravity = std::max(config_.gravity_m_s2, 0.1F);
   const float dt = std::clamp(config_.sampling_period_s, 1.0e-4F, 0.05F);
   const float omega = std::sqrt(gravity / length);
@@ -183,18 +232,17 @@ void LqrBalancer::rebuildGain() {
     return result;
   };
 
-  gain_ = solve_gain(config_.position_cost_scale, config_.pitch_cost_scale,
-                     config_.velocity_cost_scale, config_.pitch_rate_cost_scale,
-                     config_.input_cost_scale);
-  station_gain_ = solve_gain(
+  gain = solve_gain(config_.position_cost_scale, config_.pitch_cost_scale,
+                    config_.velocity_cost_scale, config_.pitch_rate_cost_scale,
+                    config_.input_cost_scale);
+  station_gain = solve_gain(
       config_.station_position_cost_scale, config_.station_pitch_cost_scale,
       config_.station_velocity_cost_scale,
       config_.station_pitch_rate_cost_scale, config_.station_input_cost_scale);
-  posture_station_gain_ = solve_gain(
+  posture_station_gain = solve_gain(
       3.0F * config_.station_position_cost_scale,
       config_.station_pitch_cost_scale, config_.station_velocity_cost_scale,
       config_.station_pitch_rate_cost_scale, config_.station_input_cost_scale);
-  last_debug_.riccati_iterations = iterations;
 }
 
 void LqrBalancer::setComHeight(float com_height_m) {
@@ -457,8 +505,21 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       ? state.imu.pitch_rate_bias_corrected_rad_s : raw_rate;
   const float pitch_scale = std::clamp(config_.wheel_pitch_feedback_scale,
                                        0.0F, 1.0F);
+  // Adaptive balance angle: integrate the ground speed error into the pitch
+  // reference. Rolling forward in steady state means the reference sits ahead
+  // of the true equilibrium, so lean the reference back (and vice versa).
+  const float trim_max = std::abs(config_.balance_trim_max_rad);
+  if (config_.balance_trim_gain_rad_per_m > 0.0F && integrate &&
+      state.floor_contact &&
+      std::abs(state.imu.pitch_rad - balance_pitch_ref_rad - balance_trim_rad_) <
+          std::max(config_.balance_trim_pitch_gate_rad, 0.0F)) {
+    balance_trim_rad_ -= config_.balance_trim_gain_rad_per_m *
+        (state.wheel.velocity_m_s - forward) * dt;
+    balance_trim_rad_ = std::clamp(balance_trim_rad_, -trim_max, trim_max);
+  }
+  const float trimmed_pitch_ref = balance_pitch_ref_rad + balance_trim_rad_;
   const float base_pitch_error = pitch_scale *
-      (state.imu.pitch_rad - balance_pitch_ref_rad);
+      (state.imu.pitch_rad - trimmed_pitch_ref);
   const float pitch_rate = pitch_scale * corrected_rate;
   const bool preserve_anchor = hold_station && config_.position_anchor_hold;
   if (preserve_anchor) {
@@ -484,7 +545,7 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       -std::max(config_.station_pitch_return_max_rad, 0.0F),
       std::max(config_.station_pitch_return_max_rad, 0.0F));
   const float pitch_error = pitch_scale *
-      (state.imu.pitch_rad - balance_pitch_ref_rad - station_pitch_bias);
+      (state.imu.pitch_rad - trimmed_pitch_ref - station_pitch_bias);
   // Station return is allowed to alter the LQR velocity reference only after
   // the pitch capture has been quiet long enough to arm station_gain_blend.
   // Slewing this reference prevents a position error from competing with the
@@ -546,6 +607,14 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
           1.0F - config_.station_velocity_decay_gain_hz * dt, 0.0F, 1.0F);
     }
   }
+  // Anti-windup against a wheel that is not realizing the command.
+  const float tracking_margin = config_.command_velocity_tracking_margin_m_s;
+  if (tracking_margin > 0.0F && integrate && state.floor_contact) {
+    commanded_ground_velocity_m_s_ = std::clamp(
+        commanded_ground_velocity_m_s_,
+        state.wheel.velocity_m_s - tracking_margin,
+        state.wheel.velocity_m_s + tracking_margin);
+  }
   commanded_ground_velocity_m_s_ = clampFinite(commanded_ground_velocity_m_s_,
                                                -config_.max_ground_velocity_m_s,
                                                config_.max_ground_velocity_m_s);
@@ -556,7 +625,8 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   last_debug_.target_ground_position_m = ground_position_target_m_;
   last_debug_.optimal_command_m_s = ground_accel;
   last_debug_.balance_pitch_ref_rad = balance_pitch_ref_rad;
-  last_debug_.lqr_pitch_ref_rad = balance_pitch_ref_rad + station_pitch_bias;
+  last_debug_.lqr_pitch_ref_rad = trimmed_pitch_ref + station_pitch_bias;
+  last_debug_.balance_trim_rad = balance_trim_rad_;
   last_debug_.lqr_pitch_state_rad = state.imu.pitch_rad;
   last_debug_.effective_pendulum_length_m = active_length_m_;
   last_debug_.adaptive_gain_scale = adaptiveStationGain(capture_distance);

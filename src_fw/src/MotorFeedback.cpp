@@ -1,7 +1,9 @@
 #include "tap_fw/MotorFeedback.hpp"
 
 #include <cmath>
+#include <limits>
 
+#include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/WheelFrame.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_hal/MotorMapping.hpp"
@@ -18,8 +20,11 @@ constexpr std::uint16_t kWheelEncoderCounts = 1024U;
 constexpr std::int32_t kWheelHalfTurn = kWheelEncoderCounts / 2;
 constexpr float kWheelRadiansPerCount =
     6.28318530717958647692F / static_cast<float>(kWheelEncoderCounts);
-constexpr float kLegRadiansPerEstimateTurn = 6.28318530717958647692F /
-    mapping::kGds68EstimateTurnsPerOutputTurn;
+
+float neutralPose(std::size_t joint) noexcept {
+  return joint == 0U || joint == 3U ? robot_control::geometry::neutral_hip_rad
+                                    : robot_control::geometry::neutral_knee_rad;
+}
 
 }  // namespace
 
@@ -39,6 +44,17 @@ bool MotorFeedback::poll(motor_transport::Transport& transport,
     }
   }
 
+  if (now_us - last_vbus_poll_us_ >= board::kBusVoltagePollUs) {
+    last_vbus_poll_us_ = now_us;
+    const auto legs = board::MotorIds{}.leg_can;
+    vbus_poll_slot_ = (vbus_poll_slot_ + 1U) % legs.size();
+    motor_transport::CanFrame request{};
+    request.id = frame::canId(legs[vbus_poll_slot_].node_id,
+                              frame::kGetBusVoltageCurrentCmdId);
+    request.dlc = 0U;
+    ok = transport.sendCanFrame(request) && ok;
+  }
+
   if (!wheel_poll_initialized_ ||
       now_us - last_wheel_poll_us_ >= board::kWheelFeedbackPeriodUs) {
     wheel_poll_initialized_ = true;
@@ -56,26 +72,69 @@ bool MotorFeedback::ingestCan(const motor_transport::CanFrame& input,
                               std::uint64_t now_us) noexcept {
   const auto node_id = static_cast<std::uint8_t>(input.id >> 5U);
   const auto command_id = static_cast<std::uint8_t>(input.id & 0x1FU);
-  // GDS68 MIT feedback uses bytes 0-5 only and arrives with DLC 6 on the
-  // robot (verified 2026-09-25); encoder estimates are two float32s.
-  if (command_id == frame::kMitControlCmdId) {
-    if (input.dlc < 6U || input.dlc > 8U) return false;
-  } else if (command_id == frame::kGetEncoderEstimatesCmdId) {
-    if (input.dlc != 8U) return false;
-  } else {
-    return false;
-  }
-
   const auto binding = [&]() -> const mapping::LegCanBinding* {
     for (const auto& item : mapping::kVerifiedLegCanBindings) {
       if (item.node_id == node_id) return &item;
     }
     return nullptr;
   }();
-  if (binding == nullptr) return false;
-  return command_id == frame::kMitControlCmdId
-      ? ingestMit(*binding, node_id, input, now_us)
-      : ingestEncoderEstimates(*binding, input, now_us);
+  if (binding == nullptr || input.dlc > 8U) return false;
+
+  // ODrive heartbeat: axis_error u32 LE, axis_state u8.
+  if (command_id == frame::kHeartbeatCmdId) {
+    if (input.dlc < 5U) return false;
+    auto& axis = axis_[binding->joint_index];
+    axis.error = static_cast<std::uint32_t>(input.data[0]) |
+        (static_cast<std::uint32_t>(input.data[1]) << 8U) |
+        (static_cast<std::uint32_t>(input.data[2]) << 16U) |
+        (static_cast<std::uint32_t>(input.data[3]) << 24U);
+    axis.state = input.data[4];
+    axis.stamp_us = now_us;
+    axis.valid = true;
+    return true;
+  }
+
+  if (command_id == frame::kGetEncoderEstimatesCmdId) {
+    if (input.dlc < 8U) return false;
+    const auto est = frame::unpackEncoderEstimates(input.data);
+    if (!std::isfinite(est.pos_turns) || !std::isfinite(est.vel_turns_s)) return false;
+    auto& out = estimate_[binding->joint_index];
+    out.pos_turns = est.pos_turns;
+    out.vel_turns_s = est.vel_turns_s;
+    out.stamp_us = now_us;
+    out.valid = true;
+    return true;
+  }
+
+  if (command_id == frame::kGetBusVoltageCurrentCmdId) {
+    if (input.dlc < 4U) return false;
+    const float volts = frame::unpackBusVoltageCurrent(input.data).voltage_v;
+    if (!std::isfinite(volts)) return false;
+    bus_voltage_min_v_ = bus_voltage_seen_ ? std::min(bus_voltage_min_v_, volts) : volts;
+    bus_voltage_seen_ = true;
+    return true;
+  }
+
+  // GDS68 MIT feedback uses bytes 0-5 only and arrives with DLC 6 on the
+  // robot (verified 2026-09-25). Get_Encoder_Estimates (0x009) is not a
+  // joint source: its scale and zero differ from MIT and are unverified, and
+  // the drivers already answer the MIT probes while IDLE.
+  if (command_id != frame::kMitControlCmdId || input.dlc < 6U) return false;
+  return ingestMit(*binding, node_id, input, now_us);
+}
+
+std::size_t MotorFeedback::firstLegAxisFault(
+    std::uint64_t now_us, bool require_closed_loop) const noexcept {
+  for (const std::size_t joint : kLegJoints) {
+    const auto& axis = axis_[joint];
+    const bool stale = !axis.valid || now_us < axis.stamp_us ||
+        now_us - axis.stamp_us > board::kHeartbeatMaxAgeUs;
+    if (stale || axis.error != 0U ||
+        (require_closed_loop && axis.state != frame::kAxisStateClosedLoop)) {
+      return joint;
+    }
+  }
+  return robot_control::kJointCount;
 }
 
 bool MotorFeedback::ingestMit(const mapping::LegCanBinding& binding,
@@ -89,40 +148,83 @@ bool MotorFeedback::ingestMit(const mapping::LegCanBinding& binding,
   }
 
   const std::size_t joint = binding.joint_index;
-  position_rad_[joint] = binding.driver_sign * feedback.pos_rad;
+  const float uncalibrated = binding.driver_sign * feedback.pos_rad;
+  if (legs_homed_ && leg_silent_[joint] &&
+      std::abs(uncalibrated) < board::kLegRebootZeroRad &&
+      std::abs(leg_uncalibrated_rad_[joint]) > board::kLegRebootMinTravelRad) {
+    // Back from silence at ~0 after a non-zero position: driver rebooted.
+    dropLegZero();
+  }
+  leg_silent_[joint] = false;
+  leg_uncalibrated_rad_[joint] = uncalibrated;
+  position_rad_[joint] = leg_uncalibrated_rad_[joint] + leg_offset_rad_[joint];
   velocity_rad_s_[joint] = binding.driver_sign * feedback.vel_rad_s;
   effort_nm_[joint] = binding.driver_sign * feedback.torque_nm;
   stamp_us_[joint] = now_us;
-  mit_stamp_us_[joint] = now_us;
   valid_[joint] = true;
   ++sequence_;
   return true;
 }
 
-bool MotorFeedback::ingestEncoderEstimates(
-    const mapping::LegCanBinding& binding,
-    const motor_transport::CanFrame& input, std::uint64_t now_us) noexcept {
-  const std::size_t joint = binding.joint_index;
-  if (mit_stamp_us_[joint] != 0U && now_us >= mit_stamp_us_[joint] &&
-      now_us - mit_stamp_us_[joint] <= board::kFeedbackMaxAgeUs) {
-    return false;
-  }
-  const auto estimate = frame::unpackEncoderEstimates(input.data);
-  if (!std::isfinite(estimate.pos_turns) ||
-      !std::isfinite(estimate.vel_turns_s)) {
-    return false;
-  }
+MotorFeedback::HomeResult MotorFeedback::homeLegs(std::uint64_t now_us) noexcept {
+  robot_control::JointArray pose{};
+  for (const std::size_t joint : kLegJoints) pose[joint] = neutralPose(joint);
+  return homeLegsAt(pose, now_us);
+}
 
-  position_rad_[joint] =
-      binding.driver_sign * estimate.pos_turns * kLegRadiansPerEstimateTurn;
-  velocity_rad_s_[joint] =
-      binding.driver_sign * estimate.vel_turns_s * kLegRadiansPerEstimateTurn;
-  // 0x009 carries no torque estimate.
-  effort_nm_[joint] = 0.0F;
-  stamp_us_[joint] = now_us;
-  valid_[joint] = true;
-  ++sequence_;
-  return true;
+MotorFeedback::HomeResult MotorFeedback::homeLegsAt(
+    const robot_control::JointArray& pose, std::uint64_t now_us) noexcept {
+  if (!allLegsFresh(now_us)) return HomeResult::StaleFeedback;
+  for (const std::size_t joint : kLegJoints) {
+    if (std::abs(velocity_rad_s_[joint]) > board::kHomingMaxJointSpeedRadS) {
+      return HomeResult::Moving;
+    }
+  }
+  for (const std::size_t joint : kLegJoints) {
+    leg_offset_rad_[joint] = pose[joint] - leg_uncalibrated_rad_[joint];
+    position_rad_[joint] = pose[joint];
+  }
+  legs_homed_ = true;
+  return HomeResult::Homed;
+}
+
+void MotorFeedback::restoreLegOffsets(const robot_control::JointArray& offsets) noexcept {
+  for (const std::size_t joint : kLegJoints) {
+    leg_offset_rad_[joint] = offsets[joint];
+    position_rad_[joint] = leg_uncalibrated_rad_[joint] + offsets[joint];
+    leg_silent_[joint] = false;
+  }
+  legs_homed_ = true;
+}
+
+void MotorFeedback::dropLegZero() noexcept {
+  legs_homed_ = false;
+  leg_zero_dropped_ = true;
+  for (const std::size_t leg : kLegJoints) {
+    leg_offset_rad_[leg] = 0.0F;
+    position_rad_[leg] = leg_uncalibrated_rad_[leg];
+  }
+}
+
+bool MotorFeedback::superviseLegZero(std::uint64_t now_us) noexcept {
+  if (legs_homed_) {
+    for (const std::size_t joint : kLegJoints) {
+      if (valid_[joint] && now_us >= stamp_us_[joint] &&
+          now_us - stamp_us_[joint] <= board::kLegZeroLossUs) {
+        continue;
+      }
+      // Silent: keep the zero, judge it when the leg talks again.
+      leg_silent_[joint] = true;
+      if (!valid_[joint] || now_us < stamp_us_[joint] ||
+          now_us - stamp_us_[joint] > board::kLegZeroForgetUs) {
+        dropLegZero();
+        break;
+      }
+    }
+  }
+  const bool dropped = leg_zero_dropped_;
+  leg_zero_dropped_ = false;
+  return dropped;
 }
 
 bool MotorFeedback::ingestUart(std::uint8_t bus,
@@ -153,7 +255,8 @@ bool MotorFeedback::ingestUart(std::uint8_t bus,
   const std::size_t joint = bindings[bus].joint_index;
   position_rad_[joint] = wheel_unwrapped_rad_[bus];
   velocity_rad_s_[joint] = bindings[bus].driver_sign *
-      frame::wheelRawSpeedToRadPerSec(present.speed_raw);
+      frame::wheelRawSpeedToRadPerSec(present.speed_raw) *
+      mapping::kWheelPresentSpeedScale;
   effort_nm_[joint] = 0.0F;
   stamp_us_[joint] = now_us;
   valid_[joint] = true;
@@ -214,6 +317,23 @@ bool MotorFeedback::allWheelsFresh(std::uint64_t now_us) const noexcept {
 
 bool MotorFeedback::ready(std::uint64_t now_us) const noexcept {
   return allLegsFresh(now_us) && allWheelsFresh(now_us);
+}
+
+bool MotorFeedback::readyToHold(std::uint64_t now_us) const noexcept {
+  for (const std::size_t joint : kLegJoints) {
+    if (!valid_[joint] || now_us < stamp_us_[joint] ||
+        now_us - stamp_us_[joint] > board::kLegRideThroughUs) {
+      return false;
+    }
+  }
+  return allWheelsFresh(now_us);
+}
+
+float MotorFeedback::takeMinBusVoltage() noexcept {
+  const float out = bus_voltage_seen_ ? bus_voltage_min_v_
+                                      : std::numeric_limits<float>::quiet_NaN();
+  bus_voltage_seen_ = false;
+  return out;
 }
 
 }  // namespace tap_fw

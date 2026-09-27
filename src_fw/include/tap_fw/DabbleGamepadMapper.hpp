@@ -29,6 +29,11 @@ class DabbleGamepadMapper {
     float natural_height_m = robot_control::geometry::neutral_spawn_z_m;
     float max_stand_height_m = 0.245F;
     float deep_squat_height_m = 0.140F;
+    // Start = ENABLE + FIXTURE_RELEASE (straight into balance). When false,
+    // the first Start = ENABLE only (controller holds in FixtureHold) and a
+    // second Start within the live session = FIXTURE_RELEASE, so the operator
+    // can stand the robot at its balance point before releasing it.
+    bool auto_fixture_release = true;
   };
 
   explicit DabbleGamepadMapper(CommandEndpoint& endpoint) noexcept

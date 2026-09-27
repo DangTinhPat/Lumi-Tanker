@@ -36,11 +36,18 @@ constexpr std::uint8_t kSetLimitsCmdId = 0x00F;
 // while the axis is IDLE; MIT feedback (0x008) only answers in closed loop.
 constexpr std::uint8_t kHeartbeatCmdId = 0x001;
 constexpr std::uint8_t kGetEncoderEstimatesCmdId = 0x009;
+// Get_Bus_Voltage_Current: request with DLC 0, answer float V, float A (LE).
+constexpr std::uint8_t kGetBusVoltageCurrentCmdId = 0x017;
 
 constexpr std::int32_t kAxisStateIdle = 1;
 constexpr std::int32_t kAxisStateClosedLoop = 8;
 constexpr std::int32_t kControlModePosition = 3;
 constexpr std::int32_t kInputModeMit = 9;
+// Position control, input passed straight to the driver's position loop.
+constexpr std::int32_t kInputModePassthrough = 1;
+// Set_Input_Pos: float input_pos [rotor turns], int16 vel_ff [0.001 rev/s],
+// int16 torque_ff [0.001 N.m], little endian (ODrive CAN Simple).
+constexpr std::uint8_t kSetInputPosCmdId = 0x00C;
 
 using MitBytes = std::array<std::uint8_t, 8>;
 
@@ -208,6 +215,43 @@ inline EncoderEstimates unpackEncoderEstimates(const MitBytes& b) {
   EncoderEstimates out;
   std::memcpy(&out.pos_turns, &b[0], 4U);
   std::memcpy(&out.vel_turns_s, &b[4], 4U);
+  return out;
+}
+
+inline MitBytes packSetInputPos(float pos_turns, std::int16_t vel_ff_milli,
+                                std::int16_t torque_ff_milli) {
+  MitBytes b{};
+  std::memcpy(&b[0], &pos_turns, 4U);
+  b[4] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(vel_ff_milli) & 0xFFU);
+  b[5] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(vel_ff_milli) >> 8U);
+  b[6] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(torque_ff_milli) & 0xFFU);
+  b[7] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(torque_ff_milli) >> 8U);
+  return b;
+}
+
+inline float unpackSetInputPosTurns(const MitBytes& b) {
+  float out = 0.0F;
+  std::memcpy(&out, &b[0], 4U);
+  return out;
+}
+
+// Set_Limits (0x00F): float vel_limit [rotor turns/s], float current_limit [A].
+inline MitBytes packSetLimits(float vel_limit_turns_s, float current_limit_a) {
+  MitBytes b{};
+  std::memcpy(&b[0], &vel_limit_turns_s, 4U);
+  std::memcpy(&b[4], &current_limit_a, 4U);
+  return b;
+}
+
+struct BusVoltageCurrent {
+  float voltage_v = 0.0F;
+  float current_a = 0.0F;
+};
+
+inline BusVoltageCurrent unpackBusVoltageCurrent(const MitBytes& b) {
+  BusVoltageCurrent out;
+  std::memcpy(&out.voltage_v, &b[0], 4U);
+  std::memcpy(&out.current_a, &b[4], 4U);
   return out;
 }
 

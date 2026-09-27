@@ -15,6 +15,11 @@ bool CallbackBusTransport::sendCan(
   return can_.send(can_.context, frame);
 }
 
+bool CallbackBusTransport::sendCanFrame(const motor_transport::CanFrame& frame) noexcept {
+  if (!open_ || can_.send == nullptr) return false;
+  return can_.send(can_.context, frame);
+}
+
 bool CallbackBusTransport::receiveCan(motor_transport::CanFrame& frame) noexcept {
   return open_ && can_.receive != nullptr && can_.receive(can_.context, frame);
 }

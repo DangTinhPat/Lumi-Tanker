@@ -14,6 +14,7 @@ add_library(tap_control_core STATIC
   src/StateMachine.cpp
   src/StationKeeper.cpp
   src/TorqueResidualEstimator.cpp
+  src/TunedConfig.cpp
   src/WholeBodyModel.cpp
   src/WholeBodyStanceController.cpp)
 target_include_directories(tap_control_core PUBLIC
@@ -36,7 +37,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR
     foreach(test core_allocation_tests core_tests height_pose_tests imu_state_estimator_tests flight_observer_tests
                  torque_residual_estimator_tests station_keeper_tests
                  deep_squat_tests jump_tests jump_quality_tests wheel_frame_tests
-                 whole_body_stance_tests)
+                 whole_body_stance_tests tuned_config_tests balance_trim_tests)
       add_executable(${test} ../tests/${test}.cpp)
       target_link_libraries(${test} PRIVATE tap_control_core)
       if(MSVC)

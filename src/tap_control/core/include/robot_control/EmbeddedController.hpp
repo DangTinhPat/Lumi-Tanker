@@ -182,6 +182,35 @@ class EmbeddedController {
     // reflex/impedance outputs) live while the wheels alone brake to a stop -
     // see EmbeddedController::update's own comment at the fallen branch.
     bool keep_legs_active_when_fallen = false;
+    // Hardware bring-up: on the fixture release (FixtureHold -> BalanceRamp), seed the
+    // LQR adaptive balance trim with the measured pitch minus the model
+    // reference, so a robot released at its true (unknown) equilibrium does
+    // not start by chasing the CAD one. false keeps the trim untouched.
+    bool seed_balance_trim_from_pitch = false;
+    // Hardware bring-up with the body held up in the air: FixtureHold moves
+    // the legs from the pose captured on entry (e.g. hanging free) to
+    // command.target_joint_position_rad on a minimum-jerk path whose peak
+    // joint speed is this value (zero speed and acceleration at both ends;
+    // position gain and feed-forward fade in over the first 0.5 s), with leg-only
+    // gravity feed-forward (no body load is carried in the air). The fixture
+    // release is held back until every leg joint has arrived. 0 keeps the
+    // legacy hold-the-measured-pose FixtureHold.
+    float fixture_hold_slew_rad_s = 0.0F;
+    float fixture_hold_arrival_tolerance_rad = 0.08F;
+    // Optional first segment of that path: from the entry pose to this leg
+    // pose (e.g. the homing reference, legs hanging straight), then to the
+    // target. Each leg decides and times its own path independently; a leg
+    // skips the via pose when it is already there or within 0.1 rad of the
+    // target.
+    // Leg position integral (hardware bring-up): while the motors are enabled
+    // each leg joint accumulates gain * (commanded - measured position) into
+    // its feed-forward torque, clamped to +-max, so a load, gearbox friction or
+    // a soft joint gain no longer leaves a steady position error. Reset
+    // whenever the motors are disabled. 0 disables it.
+    float leg_position_integral_gain_nm_per_rad_s = 0.0F;
+    float leg_position_integral_max_nm = 2.5F;
+    bool fixture_hold_via_enabled = false;
+    JointArray fixture_hold_via_rad{};
   };
 
   EmbeddedController();
@@ -232,6 +261,42 @@ class EmbeddedController {
     return state_machine_.fallPitchRad();
   }
   [[nodiscard]] const LqrBalancer::DebugState& lqrDebugState() const noexcept;
+
+  // Embedded targets precompute the LQR gain schedule before enabling; see
+  // LqrBalancer::buildGainTableStep(). One pendulum length per call.
+  bool buildLqrGainTableStep(unsigned points) {
+    return lqr_.buildGainTableStep(points);
+  }
+  [[nodiscard]] bool lqrGainTableReady() const noexcept {
+    return lqr_.gainTableReady();
+  }
+  [[nodiscard]] unsigned lqrOnlineSolveCount() const noexcept {
+    return lqr_.onlineSolveCount();
+  }
+  // Live bring-up tuning of the adaptive balance angle (firmware serial).
+  void setBalanceTrim(float trim_rad) noexcept { lqr_.setBalanceTrim(trim_rad); }
+  [[nodiscard]] float balanceTrim() const noexcept { return lqr_.balanceTrim(); }
+  void setBalanceTrimGain(float gain) noexcept { lqr_.setBalanceTrimGain(gain); }
+  void setBalanceTrimMax(float max_rad) noexcept { lqr_.setBalanceTrimMax(max_rad); }
+  void setCommandTrackingMargin(float margin_m_s) noexcept {
+    lqr_.setCommandTrackingMargin(margin_m_s);
+  }
+  void setMaxGroundAccel(float accel_m_s2) noexcept {
+    lqr_.setMaxGroundAccel(accel_m_s2);
+  }
+  void setWheelPitchFeedbackScale(float scale) noexcept {
+    lqr_.setWheelPitchFeedbackScale(scale);
+  }
+  [[nodiscard]] const LqrBalancer::Config& lqrConfig() const noexcept {
+    return lqr_.config();
+  }
+  // FixtureHold slew (Config::fixture_hold_slew_rad_s) has reached the target.
+  [[nodiscard]] bool fixtureHoldArrived() const noexcept {
+    return fixture_hold_arrived_;
+  }
+  [[nodiscard]] const JointArray& legPositionIntegralNm() const noexcept {
+    return leg_position_integral_nm_;
+  }
   // Controller-side command snapshot for native diagnostics and embedded
   // bring-up. This is actuator intent, not simulator pose feedback.
   [[nodiscard]] const MotorCommand& lastOutput() const noexcept {
@@ -364,6 +429,15 @@ class EmbeddedController {
   bool station_hold_active_ = false;
   float station_reanchor_cooldown_s_ = 0.0F;
   float stationary_stop_hold_s_ = 0.0F;
+  JointArray fixture_hold_target_{};
+  JointArray fixture_hold_start_{};
+  // Per leg (0 left, 1 right): each leg runs its own path independently.
+  std::array<float, 2> fixture_hold_leg_elapsed_s_{};
+  std::array<bool, 2> fixture_hold_leg_on_via_{};
+  float fixture_hold_elapsed_s_ = 0.0F;  // since entry, for the gain fade
+  bool fixture_hold_fade_done_ = false;
+  JointArray leg_position_integral_nm_{};
+  bool fixture_hold_arrived_ = false;
   bool yaw_only_handoff_done_ = false;
   bool station_eligible_ = false;
   float station_capture_distance_m_ = 0.0F;

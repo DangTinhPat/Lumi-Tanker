@@ -602,7 +602,7 @@ bool EmbeddedController::standingUp() const noexcept {
 MotorCommand EmbeddedController::update(const RobotState& input_state,
                                         const ControlCommand& input) {
   const float finish_dt = std::max(input_state.dt_s, 0.0F);
-  const auto finish = [this, finish_dt](MotorCommand output) {
+  const auto finish = [this, finish_dt, &input_state](MotorCommand output) {
     // Single chokepoint for every return path - see the config note on
     // leg_command_max_rate_rad_s. Only rate-limit while the motors were and
     // remain armed; an enable/disable edge legitimately re-references the
@@ -622,6 +622,21 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
           output.position_rad[joint] = limited;
         }
       }
+    }
+    // Leg position integral on the final command (see Config).
+    const float ki = config_.leg_position_integral_gain_nm_per_rad_s;
+    if (ki > 0.0F && output.enable_motors && finish_dt > 0.0F) {
+      const float limit = std::max(config_.leg_position_integral_max_nm, 0.0F);
+      for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
+        const float error = output.position_rad[joint] -
+            input_state.joints.position_rad[joint];
+        if (!std::isfinite(error) || !(output.kp_scale[joint] > 0.0F)) continue;
+        leg_position_integral_nm_[joint] = std::clamp(
+            leg_position_integral_nm_[joint] + ki * error * finish_dt, -limit, limit);
+        output.feedforward_nm[joint] += leg_position_integral_nm_[joint];
+      }
+    } else if (!output.enable_motors) {
+      leg_position_integral_nm_.fill(0.0F);
     }
     last_output_ = output;
     return output;
@@ -1457,6 +1472,11 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   }
 
   const ControlMode previous_mode = state_machine_.mode();
+  if (config_.fixture_hold_slew_rad_s > 0.0F &&
+      previous_mode == ControlMode::FixtureHold && !fixture_hold_arrived_) {
+    // Do not release onto legs that are still folding toward the stance.
+    command.request_fixture_release = false;
+  }
   last_flight_estimate_ = flight_observer_.update(state);
   state.floor_contact = last_flight_estimate_.support_contact;
   state.left_floor_contact = last_flight_estimate_.left_support_contact;
@@ -1488,6 +1508,12 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   if (usesBalance(mode) && !usesBalance(previous_mode)) {
     setBalanceFallPitch(config_.lqr.fall_pitch_rad);
     resetBalance(state.wheel.position_m, state.floor_contact);
+    // Only a fixture release is an operator-chosen balance point; a
+    // StandingUp/recovery entry happens at whatever pitch the rise left.
+    if (config_.seed_balance_trim_from_pitch && state.floor_contact &&
+        previous_mode == ControlMode::FixtureHold) {
+      lqr_.setBalanceTrim(state.imu.pitch_rad - balance_pitch_ref_rad_);
+    }
     // Fresh re-entry into Balance/Drive/PoseChange (e.g. after Fallen or
     // StandingUp) must not replay a stale latched airborne/catch offset from
     // before the mode left balancing.
@@ -1560,6 +1586,93 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
   if (mode == ControlMode::SensorQualify) {
     // No actuator torque while the fixture and IMU are being qualified.
     writeSafeStop(output, state);
+    return finish(output);
+  }
+
+  if (mode == ControlMode::FixtureHold && config_.fixture_hold_slew_rad_s > 0.0F) {
+    // Body held up in the air: bring the legs from the entry pose to the
+    // stance target at a bounded joint speed.
+    resetBalance(state.wheel.position_m, state.floor_contact);
+    constexpr std::array<std::array<std::size_t, 2>, 2> kLegPairs{{
+        {left_hip, left_knee}, {right_hip, right_knee}}};
+    const auto distanceTo = [](const std::array<std::size_t, 2>& pair,
+                               const JointArray& from, const JointArray& to) {
+      return std::max(std::abs(to[pair[0]] - from[pair[0]]),
+                      std::abs(to[pair[1]] - from[pair[1]]));
+    };
+    if (previous_mode != ControlMode::FixtureHold) {
+      fixture_hold_start_ = state.joints.position_rad;
+      fixture_hold_target_ = state.joints.position_rad;
+      fixture_hold_elapsed_s_ = 0.0F;
+      fixture_hold_arrived_ = false;
+      fixture_hold_fade_done_ = false;
+      for (std::size_t leg = 0; leg < 2U; ++leg) {
+        fixture_hold_leg_elapsed_s_[leg] = 0.0F;
+        fixture_hold_leg_on_via_[leg] = config_.fixture_hold_via_enabled &&
+            distanceTo(kLegPairs[leg], fixture_hold_start_, config_.fixture_hold_via_rad) > 0.02F &&
+            distanceTo(kLegPairs[leg], fixture_hold_start_,
+                       command.target_joint_position_rad) > 0.10F;
+      }
+    }
+    const float dt = std::max(state.dt_s, 0.0F);
+    fixture_hold_elapsed_s_ += dt;
+    const float tolerance = std::max(config_.fixture_hold_arrival_tolerance_rad, 0.0F);
+    bool arrived = true;
+    for (std::size_t leg = 0; leg < 2U; ++leg) {
+      const auto& pair = kLegPairs[leg];
+      fixture_hold_leg_elapsed_s_[leg] += dt;
+      const JointArray& goal = fixture_hold_leg_on_via_[leg]
+          ? config_.fixture_hold_via_rad : command.target_joint_position_rad;
+      // Minimum-jerk segment: peak speed = 1.875 * distance / duration.
+      const float distance = distanceTo(pair, fixture_hold_start_, goal);
+      // Already there: nothing to move, the next segment/release may follow.
+      const float duration = distance < 1.0e-3F
+          ? 0.0F
+          : std::max(1.875F * distance / config_.fixture_hold_slew_rad_s, 0.5F);
+      const float tau = duration <= 0.0F
+          ? 1.0F
+          : std::clamp(fixture_hold_leg_elapsed_s_[leg] / duration, 0.0F, 1.0F);
+      const float blend = tau * tau * tau * (10.0F + tau * (-15.0F + 6.0F * tau));
+      for (const auto joint : pair) {
+        fixture_hold_target_[joint] = fixture_hold_start_[joint] +
+            blend * (goal[joint] - fixture_hold_start_[joint]);
+      }
+      if (fixture_hold_leg_on_via_[leg] && tau >= 1.0F) {
+        // This leg reached the via pose: its second segment starts there.
+        fixture_hold_leg_on_via_[leg] = false;
+        for (const auto joint : pair) fixture_hold_start_[joint] = fixture_hold_target_[joint];
+        fixture_hold_leg_elapsed_s_[leg] = 0.0F;
+      }
+      arrived = arrived && !fixture_hold_leg_on_via_[leg] && tau >= 1.0F;
+      for (const auto joint : pair) {
+        arrived = arrived && std::abs(state.joints.position_rad[joint] -
+                                      command.target_joint_position_rad[joint]) <= tolerance;
+      }
+    }
+    // Position gain and feed-forward fade in over the first 0.5 s after entry.
+    const float fade = fixture_hold_fade_done_
+        ? 1.0F : std::clamp(fixture_hold_elapsed_s_ / 0.5F, 0.0F, 1.0F);
+    if (fade >= 1.0F) fixture_hold_fade_done_ = true;
+    fixture_hold_arrived_ = arrived;
+    writePostureHold(output, fixture_hold_target_, state);
+    for (const auto joint : {left_hip, left_knee, right_hip, right_knee}) {
+      output.kp_scale[joint] *= fade;
+    }
+    // In the air the legs carry only their own weight: no body-support share.
+    output.feedforward_nm.fill(0.0F);
+    if (config_.whole_body_gravity_feedforward) {
+      const float scale = std::clamp(
+          config_.whole_body_gravity_feedforward_scale, 0.0F, 1.0F);
+      const auto left = WholeBodyModel::legGravityTorque(
+          state.joints.position_rad[left_hip], state.joints.position_rad[left_knee]);
+      const auto right = WholeBodyModel::legGravityTorque(
+          state.joints.position_rad[right_hip], state.joints.position_rad[right_knee]);
+      const float ff_scale = scale * fade;
+      output.feedforward_nm[left_hip] = ff_scale * left.hip_nm;
+      output.feedforward_nm[left_knee] = ff_scale * left.knee_nm;
+      output.feedforward_nm[right_hip] = ff_scale * right.hip_nm;
+      output.feedforward_nm[right_knee] = ff_scale * right.knee_nm;
+    }
     return finish(output);
   }
 

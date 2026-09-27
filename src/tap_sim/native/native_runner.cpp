@@ -495,6 +495,9 @@ class NativeRunner {
   }
 
   void configureController() {
+    // The firmware uses a verbatim copy of this profile:
+    // robot_control::tunedControllerConfig() (core TunedConfig.cpp). Change
+    // both together until this function calls it directly.
     EmbeddedController::Config cfg;
     auto& lqr = cfg.lqr;
     lqr.wheel_radius_m = robot_control::geometry::wheel_radius_m;

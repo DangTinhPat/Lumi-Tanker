@@ -92,7 +92,12 @@ bool CommandEndpoint::motionAllowed() const noexcept {
 }
 
 bool CommandEndpoint::timedOut(std::uint64_t now_us) const noexcept {
-  return !has_rx_ || now_us - last_rx_us_ > config_.heartbeat_timeout_us;
+  // A command stamped after the caller's `now` (the USB console stamps with
+  // the time it parsed the line, later than the control loop's tick time) is
+  // fresh; the unsigned difference would otherwise wrap to a huge age and
+  // disable the robot on every console heartbeat.
+  return !has_rx_ ||
+      (now_us > last_rx_us_ && now_us - last_rx_us_ > config_.heartbeat_timeout_us);
 }
 
 WriteResult CommandEndpoint::onWrite(const std::uint8_t* data,

@@ -153,6 +153,8 @@ void engage(Bench& bench) {
 }  // namespace
 
 int main() {
+  // Fake wheel drivers see driver raw = core raw * driver_sign.
+  const int kS = static_cast<int>(robot_control::motor_mapping::kWheelUartBindings[0].driver_sign);
   // Disabled: IDLE to all 4 nodes plus zero-gain MIT probes.
   {
     Bench bench;
@@ -390,14 +392,14 @@ int main() {
       bench.command("WHEEL 60 -60");
       bench.step();
     }
-    assert(bench.wheel_speed[0] == 60 && bench.wheel_speed[1] == -60);  // sign +1
+    assert(bench.wheel_speed[0] == kS * 60 && bench.wheel_speed[1] == -kS * 60);
     assert(bench.jog.wheel(0).speed_raw == 60 && bench.jog.wheel(1).speed_raw == -60);
     assert(bench.jog.mode() == Mode::Disabled);  // Legs untouched.
 
     // Clamp to the protocol range.
     bench.command("WHEEL 900 0");
     bench.step();
-    assert(bench.wheel_speed[0] == 400 && bench.wheel_speed[1] == 0);
+    assert(bench.wheel_speed[0] == kS * 400 && bench.wheel_speed[1] == 0);
 
     // Release: brake at 0, then coast after wheel_brake_us.
     bench.command("WHEEL 0 0");
@@ -417,7 +419,7 @@ int main() {
       bench.command("WHEEL 80 80");
       bench.step();
     }
-    assert(bench.wheel_speed[0] == 80);
+    assert(bench.wheel_speed[0] == kS * 80);
     bench.run(0.35);
     assert(bench.wheel_speed[0] == 0);
     bench.run(0.4);
@@ -444,7 +446,7 @@ int main() {
       bench.command("WHEEL 80 80");
       bench.step();
     }
-    assert(bench.wheel_speed[0] == 80);
+    assert(bench.wheel_speed[0] == kS * 80);
   }
 
   // Wheel stops answering while running -> torque off and an event.
@@ -480,7 +482,7 @@ int main() {
       bench.command("WHEEL 50 50");
       bench.step();
     }
-    assert(bench.wheel_speed[0] == 50 && !bench.jog.wheel(0).fault);
+    assert(bench.wheel_speed[0] == kS * 50 && !bench.jog.wheel(0).fault);
   }
 
   // Leg FAULT also stops the wheels.

@@ -20,6 +20,11 @@ class Transport {
 
   virtual bool sendCan(std::uint16_t id,
                        const motor_frame::MitBytes& data) noexcept = 0;
+  // A frame with its own DLC (e.g. a DLC-0 CAN Simple getter request).
+  // Transports that only carry 8-byte frames fall back to sendCan().
+  virtual bool sendCanFrame(const CanFrame& frame) noexcept {
+    return sendCan(frame.id, frame.data);
+  }
   virtual bool receiveCan(CanFrame& frame) noexcept = 0;
   virtual bool sendUart(std::uint8_t bus,
                         const motor_frame::DxlFrame& frame) noexcept = 0;

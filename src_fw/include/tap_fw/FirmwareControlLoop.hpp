@@ -4,6 +4,7 @@
 
 #include "robot_control/EmbeddedController.hpp"
 #include "tap_fw/ControllerActuatorBridge.hpp"
+#include "tap_fw/FirmwareProfile.hpp"
 
 namespace tap_fw {
 
@@ -13,7 +14,8 @@ namespace tap_fw {
 class FirmwareControlLoop {
  public:
   FirmwareControlLoop(motor_transport::Transport& transport,
-                      robot_control::EmbeddedController::Config controller_config = {},
+                      robot_control::EmbeddedController::Config controller_config =
+                          firmwareControllerConfig(),
                       ControllerActuatorBridge::Config actuator_config = {}) noexcept;
 
   [[nodiscard]] ControllerActuatorBridge::Result step(
@@ -27,6 +29,27 @@ class FirmwareControlLoop {
 
   [[nodiscard]] robot_control::EmbeddedController& controller() noexcept {
     return controller_;
+  }
+  [[nodiscard]] const robot_control::EmbeddedController& controller() const noexcept {
+    return controller_;
+  }
+
+  void setLegOffsets(const robot_control::JointArray* offsets) noexcept {
+    actuators_.setLegOffsets(offsets);
+  }
+  void onCanReceived(const motor_transport::CanFrame& frame) noexcept {
+    actuators_.onCanReceived(frame);
+  }
+  void setLegCurrentLimit(float amps) noexcept { actuators_.setLegCurrentLimit(amps); }
+  void setLegFixedGains(float kp, float kd) noexcept { actuators_.setLegFixedGains(kp, kd); }
+  [[nodiscard]] float legFixedKp() const noexcept { return actuators_.legFixedKp(); }
+  [[nodiscard]] float legFixedKd() const noexcept { return actuators_.legFixedKd(); }
+  [[nodiscard]] const robot_control::JointArray& legTargetIntegral() const noexcept {
+    return actuators_.legTargetIntegral();
+  }
+  [[nodiscard]] float legCurrentLimit() const noexcept { return actuators_.legCurrentLimit(); }
+  [[nodiscard]] std::uint32_t mitDeferred() const noexcept {
+    return actuators_.mitDeferred();
   }
 
  private:

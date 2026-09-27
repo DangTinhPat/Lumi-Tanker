@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "robot_control/GeneratedGeometry.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_hal/MotorMapping.hpp"
 #include "robot_hal/MotorTransport.hpp"
@@ -84,20 +85,31 @@ int main() {
 
   RobotState state{};
   feedback.writeTo(state);
-  assert(near(state.joints.position_rad[0], 0.4F));
+  // Signs: LH -1, LK -1, RH +1, RK +1.
+  assert(near(state.joints.position_rad[0], -0.4F));
   assert(near(state.joints.position_rad[1], -0.5F));
-  assert(near(state.joints.position_rad[3], -0.6F));
+  assert(near(state.joints.position_rad[3], 0.6F));
   assert(near(state.joints.position_rad[4], 0.7F));
-  assert(near(state.joints.velocity_rad_s[0], 0.2F));
+  assert(near(state.joints.velocity_rad_s[0], -0.2F));
   assert(near(state.joints.velocity_rad_s[1], -0.3F));
-  assert(near(state.joints.velocity_rad_s[3], -0.4F));
+  assert(near(state.joints.velocity_rad_s[3], 0.4F));
   assert(near(state.joints.velocity_rad_s[4], 0.5F));
 
   constexpr float kRadiansPerCount = 6.28318530717958647692F / 1024.0F;
-  assert(near(state.joints.position_rad[2], 8.0F * kRadiansPerCount));
-  assert(near(state.joints.position_rad[5], -10.0F * kRadiansPerCount));
-  assert(near(state.joints.velocity_rad_s[2], 12.0F * 6.28318530718F / 60.0F));
-  assert(near(state.joints.velocity_rad_s[5], -12.0F * 6.28318530718F / 60.0F));
+  // Core wheel = driver_sign * driver reading, on the joint each UART bus is
+  // bound to (MotorMapping.hpp): bus 0 moved +8 counts at 12 raw, bus 1 -10
+  // counts at -12 raw.
+  const auto& bus0 = motor_mapping::kWheelUartBindings[0];
+  const auto& bus1 = motor_mapping::kWheelUartBindings[1];
+  const float speed_scale = motor_mapping::kWheelPresentSpeedScale;
+  assert(near(state.joints.position_rad[bus0.joint_index],
+              bus0.driver_sign * 8.0F * kRadiansPerCount));
+  assert(near(state.joints.position_rad[bus1.joint_index],
+              bus1.driver_sign * -10.0F * kRadiansPerCount));
+  assert(near(state.joints.velocity_rad_s[bus0.joint_index],
+              bus0.driver_sign * speed_scale * 12.0F * 6.28318530718F / 60.0F));
+  assert(near(state.joints.velocity_rad_s[bus1.joint_index],
+              bus1.driver_sign * speed_scale * -12.0F * 6.28318530718F / 60.0F));
 
   // The robot's GDS68 drivers send MIT feedback with DLC 6.
   tap_fw::MotorFeedback short_frames;
@@ -108,7 +120,7 @@ int main() {
   assert(short_frames.ingestCan(dlc6, 1'000U));
   RobotState dlc6_state{};
   short_frames.writeTo(dlc6_state);
-  assert(near(dlc6_state.joints.position_rad[0], 0.25F));
+  assert(near(dlc6_state.joints.position_rad[0], -0.25F));  // LH sign -1
   CanFrame dlc5 = dlc6;
   dlc5.dlc = 5U;
   assert(!short_frames.ingestCan(dlc5, 1'000U));
@@ -119,50 +131,136 @@ int main() {
   auto bad_wheel = buildPresentResponse(2U, 0U, 0, 0);
   assert(!feedback.ingestUart(0U, bad_wheel, 3'000U));
 
-  // GDS68 encoder estimates (0x009) are the leg feedback while axes are IDLE.
-  const auto estimateFrame = [](std::uint8_t node, float turns, float turns_s) {
+  // Get_Encoder_Estimates (0x009) is kept as the raw driver estimate (v3 leg
+  // lock) but is not a joint source for the MIT path.
+  {
+    tap_fw::MotorFeedback estimates;
     CanFrame frame{};
-    frame.id = canId(node, kGetEncoderEstimatesCmdId);
+    frame.id = canId(3U, kGetEncoderEstimatesCmdId);
     frame.dlc = 8U;
-    frame.data = packEncoderEstimates(turns, turns_s);
-    return frame;
-  };
-  const auto decoded = unpackEncoderEstimates(packEncoderEstimates(1.25F, -0.5F));
-  assert(decoded.pos_turns == 1.25F && decoded.vel_turns_s == -0.5F);
+    frame.data = packEncoderEstimates(2.0F, 0.5F);
+    assert(estimates.ingestCan(frame, 1'000U));
+    assert(!estimates.allLegsFresh(1'000U));
+    const auto& est = estimates.legEstimate(0U);  // node 3 = LH
+    assert(est.valid && near(est.pos_turns, 2.0F) && near(est.vel_turns_s, 0.5F) &&
+           est.stamp_us == 1'000U);
+  }
 
-  constexpr float kTwoPi = 6.28318530717958647692F;
-  const float per_turn = kTwoPi / motor_mapping::kGds68EstimateTurnsPerOutputTurn;
-  tap_fw::MotorFeedback idle;
-  assert(idle.ingestCan(estimateFrame(3U, 2.0F, 0.5F), 100'000U));   // LH, +1
-  assert(idle.ingestCan(estimateFrame(4U, 2.0F, 0.5F), 100'000U));   // LK, -1
-  assert(idle.ingestCan(estimateFrame(1U, 2.0F, 0.5F), 100'000U));   // RH, -1
-  assert(idle.ingestCan(estimateFrame(2U, 2.0F, 0.5F), 100'000U));   // RK, +1
-  assert(idle.allLegsFresh(100'000U));
-  RobotState idle_state{};
-  idle.writeTo(idle_state);
-  assert(near(idle_state.joints.position_rad[0], 2.0F * per_turn, 1.0e-5F));
-  assert(near(idle_state.joints.position_rad[1], -2.0F * per_turn, 1.0e-5F));
-  assert(near(idle_state.joints.position_rad[3], -2.0F * per_turn, 1.0e-5F));
-  assert(near(idle_state.joints.position_rad[4], 2.0F * per_turn, 1.0e-5F));
-  assert(near(idle_state.joints.velocity_rad_s[0], 0.5F * per_turn, 1.0e-5F));
-  assert(near(idle_state.joints.velocity_rad_s[1], -0.5F * per_turn, 1.0e-5F));
-  assert(idle_state.joints.effort_nm[0] == 0.0F);
+  // Driver heartbeats: stale, axis error and not-closed-loop are all faults.
+  {
+    tap_fw::MotorFeedback axes;
+    const auto heartbeat = [&](std::uint8_t node, std::uint8_t state,
+                               std::uint32_t error, std::uint64_t now) {
+      CanFrame frame{};
+      frame.id = canId(node, kHeartbeatCmdId);
+      frame.dlc = 8U;
+      frame.data[0] = static_cast<std::uint8_t>(error & 0xFFU);
+      frame.data[1] = static_cast<std::uint8_t>((error >> 8U) & 0xFFU);
+      frame.data[2] = static_cast<std::uint8_t>((error >> 16U) & 0xFFU);
+      frame.data[3] = static_cast<std::uint8_t>(error >> 24U);
+      frame.data[4] = state;
+      return axes.ingestCan(frame, now);
+    };
+    constexpr std::size_t kNone = robot_control::kJointCount;
+    assert(axes.firstLegAxisFault(0U, false) == 0U);  // No heartbeat yet (LH).
+    for (std::uint8_t node = 1U; node <= 4U; ++node) {
+      assert(heartbeat(node, kAxisStateIdle, 0U, 1'000U));
+    }
+    assert(axes.firstLegAxisFault(1'000U, false) == kNone);  // IDLE is fine to enable.
+    assert(axes.firstLegAxisFault(1'000U, true) == 0U);      // ...but is not holding.
+    for (std::uint8_t node = 1U; node <= 4U; ++node) {
+      assert(heartbeat(node, kAxisStateClosedLoop, 0U, 2'000U));
+    }
+    assert(axes.firstLegAxisFault(2'000U, true) == kNone);
+    assert(heartbeat(2U, kAxisStateClosedLoop, 0x40U, 3'000U));  // RK error.
+    assert(axes.firstLegAxisFault(3'000U, false) == 4U);
+    assert(axes.legAxis(4U).error == 0x40U);
+    assert(heartbeat(2U, kAxisStateClosedLoop, 0U, 3'000U));
+    // Heartbeat older than kHeartbeatMaxAgeUs is stale.
+    assert(axes.firstLegAxisFault(2'000U + tap_fw::board::kHeartbeatMaxAgeUs + 1U,
+                                  true) == 0U);
+    CanFrame short_heartbeat{};
+    short_heartbeat.id = canId(3U, kHeartbeatCmdId);
+    short_heartbeat.dlc = 4U;
+    assert(!axes.ingestCan(short_heartbeat, 4'000U));
+  }
 
-  // Short frames, unknown nodes and non-finite values are rejected.
-  auto short_estimate = estimateFrame(3U, 1.0F, 0.0F);
-  short_estimate.dlc = 4U;
-  assert(!idle.ingestCan(short_estimate, 101'000U));
-  assert(!idle.ingestCan(estimateFrame(9U, 1.0F, 0.0F), 101'000U));
-  assert(!idle.ingestCan(estimateFrame(3U, std::nanf(""), 0.0F), 101'000U));
+  // Leg homing on the fixture: driver positions restart at 0 on power-up,
+  // the fixture holds the neutral pose, so core = sign * raw + offset.
+  {
+    tap_fw::MotorFeedback homing;
+    const auto feedAll = [&](std::uint64_t now, float velocity) {
+      // Raw driver positions per node (1 RH, 2 RK, 3 LH, 4 LK).
+      assert(homing.ingestCan(legFeedback(3U, 0.10F, velocity, 0.0F), now));
+      assert(homing.ingestCan(legFeedback(4U, -0.20F, velocity, 0.0F), now));
+      assert(homing.ingestCan(legFeedback(1U, 0.30F, velocity, 0.0F), now));
+      assert(homing.ingestCan(legFeedback(2U, -0.40F, velocity, 0.0F), now));
+    };
+    using Home = tap_fw::MotorFeedback::HomeResult;
+    assert(homing.homeLegs(1'000U) == Home::StaleFeedback);
+    feedAll(1'000U, 0.5F);
+    assert(homing.homeLegs(1'000U) == Home::Moving);
+    assert(!homing.legsHomed());
+    feedAll(2'000U, 0.0F);
+    assert(homing.homeLegs(2'000U) == Home::Homed);
+    assert(homing.legsHomed());
 
-  // Fresh MIT feedback owns the joint; estimates resume once it goes stale.
-  assert(idle.ingestCan(legFeedback(3U, 0.4F, 0.0F, 0.0F), 102'000U));
-  assert(!idle.ingestCan(estimateFrame(3U, 5.0F, 0.0F), 110'000U));
-  idle.writeTo(idle_state);
-  assert(near(idle_state.joints.position_rad[0], 0.4F));
-  assert(idle.ingestCan(estimateFrame(3U, 5.0F, 0.0F), 122'001U));
-  idle.writeTo(idle_state);
-  assert(near(idle_state.joints.position_rad[0], 5.0F * per_turn, 1.0e-5F));
+    RobotState homed{};
+    homing.writeTo(homed);
+    assert(near(homed.joints.position_rad[0], geometry::neutral_hip_rad, 1.0e-5F));
+    assert(near(homed.joints.position_rad[1], geometry::neutral_knee_rad, 1.0e-5F));
+    assert(near(homed.joints.position_rad[3], geometry::neutral_hip_rad, 1.0e-5F));
+    assert(near(homed.joints.position_rad[4], geometry::neutral_knee_rad, 1.0e-5F));
+    // offset = neutral - sign*raw, per joint and sign (LH -1, LK -1, RH +1, RK +1).
+    const auto& offsets = homing.legOffsets();
+    assert(near(offsets[0], geometry::neutral_hip_rad + 0.10F, 1.0e-3F));
+    assert(near(offsets[1], geometry::neutral_knee_rad - 0.20F, 1.0e-3F));
+    assert(near(offsets[3], geometry::neutral_hip_rad - 0.30F, 1.0e-3F));
+    assert(near(offsets[4], geometry::neutral_knee_rad + 0.40F, 1.0e-3F));
+
+    // A later reading moves in core coordinates by sign * driver delta.
+    assert(homing.ingestCan(legFeedback(3U, 0.30F, 0.0F, 0.0F), 3'000U));  // LH driver +0.2
+    assert(homing.ingestCan(legFeedback(1U, 0.50F, 0.0F, 0.0F), 3'000U));  // RH driver +0.2
+    homing.writeTo(homed);
+    assert(near(homed.joints.position_rad[0], geometry::neutral_hip_rad - 0.20F, 1.0e-3F));
+    assert(near(homed.joints.position_rad[3], geometry::neutral_hip_rad + 0.20F, 1.0e-3F));
+
+    // A short silence (CAN bus-off recovery, drivers still counting) keeps
+    // the zero; a leg that comes back at ~0 after a non-zero position
+    // rebooted, which drops it once.
+    const std::uint64_t silent = 3'000U + tap_fw::board::kLegZeroLossUs + 1'000U;
+    assert(!homing.superviseLegZero(silent));
+    assert(homing.legsHomed());
+    const auto feedRest = [&](std::uint64_t now) {
+      assert(homing.ingestCan(legFeedback(4U, -0.20F, 0.0F, 0.0F), now));
+      assert(homing.ingestCan(legFeedback(1U, 0.50F, 0.0F, 0.0F), now));
+      assert(homing.ingestCan(legFeedback(2U, -0.40F, 0.0F, 0.0F), now));
+    };
+    assert(homing.ingestCan(legFeedback(3U, 0.31F, 0.0F, 0.0F), silent + 1'000U));  // continuous
+    feedRest(silent + 1'000U);
+    assert(!homing.superviseLegZero(silent + 2'000U));
+    assert(homing.legsHomed());
+    homing.writeTo(homed);
+    assert(near(homed.joints.position_rad[0], geometry::neutral_hip_rad - 0.21F, 1.0e-3F));
+
+    const std::uint64_t silent2 = silent + 2'000U + tap_fw::board::kLegZeroLossUs + 1'000U;
+    assert(!homing.superviseLegZero(silent2));
+    assert(homing.ingestCan(legFeedback(3U, 0.0F, 0.0F, 0.0F), silent2 + 1'000U));  // rebooted
+    assert(homing.superviseLegZero(silent2 + 2'000U));
+    assert(!homing.legsHomed());
+    assert(!homing.superviseLegZero(silent2 + 3'000U));
+    homing.writeTo(homed);
+    assert(near(homed.joints.position_rad[0], 0.0F, 1.0e-3F));  // Uncalibrated again.
+    assert(near(homing.legOffsets()[0], 0.0F));
+
+    // Silent past kLegZeroForgetUs: dropped without waiting for the answer.
+    feedRest(silent2 + 4'000U);
+    assert(homing.ingestCan(legFeedback(3U, 0.0F, 0.0F, 0.0F), silent2 + 4'000U));
+    assert(homing.homeLegs(silent2 + 4'000U) == Home::Homed);
+    assert(!homing.superviseLegZero(silent2 + 4'000U + tap_fw::board::kLegZeroForgetUs));
+    assert(homing.superviseLegZero(silent2 + 4'000U + tap_fw::board::kLegZeroForgetUs + 1'000U));
+    assert(!homing.legsHomed());
+  }
 
   return 0;
 }

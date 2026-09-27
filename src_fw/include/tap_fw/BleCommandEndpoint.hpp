@@ -46,6 +46,8 @@ class CommandEndpoint {
   void onDisconnect() noexcept;
 
   [[nodiscard]] bool timedOut(std::uint64_t now_us) const noexcept;
+  // An ENABLE session is live: enabled, not disabled or e-stopped.
+  [[nodiscard]] bool motionAllowed() const noexcept;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
 
  private:
@@ -54,7 +56,6 @@ class CommandEndpoint {
   void resetCommand() noexcept;
   void safeStop() noexcept;
   void refresh(std::uint64_t now_us) noexcept;
-  [[nodiscard]] bool motionAllowed() const noexcept;
 
   Config config_{};
   robot_control::ControlCommand command_{};

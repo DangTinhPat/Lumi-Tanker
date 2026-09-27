@@ -164,3 +164,119 @@ encoder tuyệt đối `pos_abs` là một vòng rotor trước hộp số 8:1. 
 Tải bus: ở trạng thái disable firmware gửi Set_Axis_State(IDLE) cho 4 node mỗi
 tick 2 ms cộng MIT probe 10 ms (~2000 frame/s, `arb_lost` cao). Nên giảm nhịp
 gửi IDLE trước khi thêm tải điều khiển.
+
+## Controller lên robot: Start → cân bằng (2026-09-26)
+
+Thay đổi trong firmware controller:
+
+- **Cấu hình đã tune**: `FirmwareControlLoop` dùng
+  `tap_fw::firmwareControllerConfig()` = `robot_control::tunedControllerConfig()`
+  cộng các thay đổi phần cứng ở mục "Góc cân bằng tự động" bên dưới.
+  `tunedControllerConfig()` (core `TunedConfig.cpp`) là bản sao
+  nguyên văn `configureController()` của `native_runner.cpp` (không sửa code sim
+  vì máy không build được MuJoCo; hai bản phải đổi cùng nhau). Trước đây
+  firmware chạy `Config{}` mặc định (mô-men chân 1.0 N·m, hông [-0.2, 1.0]).
+  `tuned_config_tests` cố định các giá trị chính và chạy chuỗi fixture → Balance.
+- **Mốc góc chân (homing)**: GDS68 báo vị trí tương đối từ lúc driver bật nguồn.
+  Lần bấm Start đầu tiên khi robot nằm yên trên giá (tư thế neutral: hông
+  1.0105, gối −1.0683 rad) chụp offset: `core = sign·raw + offset`; bridge đổi
+  ngược `driver = sign·(core − offset)`. Từ chối nếu thiếu feedback MIT, chân
+  đang chuyển động (> 0.1 rad/s) hoặc IMU chưa yên. Mất feedback chân > 300 ms
+  (driver khởi động lại) hoặc ESP khởi động lại → mất mốc, phải gá lại.
+  `0x009` không còn là nguồn góc khớp.
+- **Giám sát driver**: đọc heartbeat `0x001` của 4 GDS68. ENABLE bị từ chối
+  nếu mất heartbeat hoặc có `axis_error`; sau khi enable 0.5 s mà một khớp
+  chưa ở CLOSED_LOOP (hoặc báo lỗi) thì DISABLE và log tên khớp — phản hồi MIT
+  vẫn về từ driver đã từ chối closed loop nên không thể dựa vào nó. Lấy mốc
+  dùng gyro + tốc độ khớp để kiểm tra đứng yên (không dùng |a| − g vì offset
+  accel). LED2 sáng khi đã có mốc.
+- **Tải CAN 500 kbit/s**: lệnh MIT chân 250 Hz (controller vẫn 500 Hz), bánh
+  500 Hz; khi disable lặp IDLE/Torque Disable 50 Hz (gửi ngay ở cạnh disable).
+- **Giới hạn mô-men chân trong bridge**: kẹp T_ff và sai số vị trí sao cho
+  |kp·e + kd·(v − dq) + T_ff| ≤ `torque_nm` (3 N·m), giống `SimGds68Joint`.
+- **BLE lease**: D-pad chỉ có hiệu lực khi điện thoại vừa gửi gói trong
+  `kBleMotionLeaseUs` (tạm 500 ms, chờ đo); log `BLE rx packets/gap_max`.
+- **Chẩn đoán**: SENS thêm `homed`, pitch rate, yaw rate, accel và thời gian
+  chu kỳ điều khiển `cycle_us max/avg` (Rule 4). CANDIAG thưa hơn khi đang chạy.
+- **`kAutoFixtureRelease = true`** (luồng người vận hành chọn): gá robot ở tư
+  thế natural → Start → lấy mốc + cân bằng → tháo giá kê. Đặt `false` nếu chỉ
+  muốn kiểm tra giữ chân ở FixtureHold.
+
+Khóa enable còn giữ: `kWheelSpeedScaleVerified`, `kImuFrameVerified`, và mốc
+chân (runtime).
+
+Kiểm tra trên robot (robot trên giá, có người giữ, mỗi bước mở khóa bước sau):
+
+1. **C1 Dabble**: kết nối BLE, giữ một nút D-pad, đọc `BLE rx ... gap_max`
+   → chọn `kBleMotionLeaseUs`.
+2. **C2 Tốc độ bánh**: firmware jog + GUI, chế độ quay liên tục 60 và 120
+   raw, so cột "RPM đo" với lệnh raw → đặt `kWheelSpeedScaleVerified=true`
+   hoặc sửa hệ số trong `MotorFrameCodec.hpp`.
+3. **C3 Chiều IMU**: firmware chính, disable. Nghiêng mũi về phía robot chạy
+   tới (chiều bánh dương) → `pitch` dương, `pitch_rate` dương khi đang nghiêng;
+   xoay ngược chiều kim đồng hồ nhìn từ trên → `yaw_rate` dương → đặt
+   `kImuFrameVerified=true` hoặc thêm phép đổi trục trong `Mpu6500Spi`.
+4. **C4 Mốc góc**: Start trên giá → log `LEG ZERO homed`, `joint_q` ≈ neutral,
+   hai bên đối xứng; lắc robot khi bấm Start → phải bị từ chối.
+5. **C5 Giữ chân**: `kAutoFixtureRelease=false` → FixtureHold, chân giữ không
+   giật, `cycle_us` trong ngân sách 2000 µs.
+6. **C6 Cân bằng**: `kAutoFixtureRelease=true`, Start → cân bằng; ESTOP (nút
+   vuông) sẵn sàng, tốc độ chạy thấp.
+
+Test lõi có sẵn đang fail cả ở HEAD trước thay đổi này (build `src/tap_control/core`
+độc lập): `core_allocation_tests`, `jump_tests`, `jump_quality_tests`,
+`lqr_tests` ("station return reference governor failed").
+
+## Góc cân bằng tự động (2026-09-26)
+
+Log run7/run8: robot chạy tới rồi chúi đầu. Nguyên nhân: controller giữ góc
+pitch tham chiếu cố định 0 (theo CAD), trong khi điểm cân bằng thật lệch vài độ
+(IMU gắn nghiêng, khối lượng CAD ước lượng, sai mốc khớp do homing trên giá).
+Lúc khởi động chưa có vòng vị trí, nên lệch θ chỉ có một trạng thái dừng:
+nghiêng θ và lăn đều → trôi tới giới hạn tốc độ. Lệnh vận tốc còn bị "wind-up"
+khi bánh UART không theo kịp.
+
+Thuật toán (giống vòng tốc độ ngoài của Impulse, `LqrBalancer`, mặc định TẮT
+nên sim không đổi):
+
+- `balance_trim_rad`: góc cân bằng học được, cộng vào pitch tham chiếu.
+  Khi robot trôi tới (v_đo > v_đích) thì giảm trim (ngả về sau), tích phân
+  `trim -= k·(v_đo − v_đích)·dt`, kẹp ±`balance_trim_max_rad`, chỉ học khi
+  |pitch − ref| < 0.25 rad và bánh chạm đất.
+- Mồi (seed) trim = pitch đo lúc thả khỏi giá (`seed_balance_trim_from_pitch`).
+- Anti-windup: lệnh vận tốc LQR kẹp trong ±margin quanh vận tốc bánh đo.
+- Trim giữ qua `reset()` (thuộc tính của robot), `TRIM RESET` để xóa.
+
+Profile firmware (`FirmwareProfile.cpp`): k = 0.30 rad/m, max 0.20 rad,
+margin 0.25 m/s, gia tốc giữ 1.4 m/s² (0.8 không kịp đỡ trên mô hình rút gọn),
+tắt stance COM task (chân giữ tư thế natural + bù trọng lực, như Impulse).
+`balance_trim_tests` (mô hình con lắc bánh xe rút gọn, servo bánh τ 40 ms):
+tắt trim → trôi; mồi + k 0.3 → hội tụ với điểm cân bằng ±5°/±8° và sai tay
+±2° lúc thả; bánh chỉ theo 30 % → lệnh không vượt đo + margin.
+
+Quy trình trên robot (`kAutoFixtureRelease = false`):
+
+1. Gá robot tư thế natural, cấp nguồn, chạy console:
+   `python3 tools/controller_console.py --log runN.log --fifo /tmp/tap_console`
+   (mở cổng sẽ reset ESP — mở trước khi bấm Start).
+2. Kết nối BLE, **Start lần 1**: lấy mốc khớp, chân giữ cứng (FixtureHold).
+3. Nhấc robot khỏi giá, dựng bánh chạm đất ở điểm "nhẹ tay" (cân bằng).
+4. **Start lần 2**: thả vào cân bằng; log in `RELEASE pitch=… seeded_trim=…`
+   và `TR` 10 s ở 25 Hz (thêm `vcmd`, `pref`, `trim`).
+5. Không giữ thân robot; trim hội tụ về hằng số. Select = dừng.
+
+Chỉnh trực tiếp qua console (không cần nạp lại): `GET`,
+`SET trim_gain|trim_max|trim|margin|accel <giá trị>`, `TRIM RESET`.
+Điều kiện tiên quyết: hai bánh phải theo được lệnh khi có tải (log trước cho
+thấy bánh UART1 kẹt 34–46 % thời gian) — phần mềm không bù được bánh không quay.
+
+## Hướng IMU trên PCB (2026-09-26)
+
+Người vận hành cập nhật PCB đã hàn MPU6500 theo hướng làm hoán đổi vai trò
+Pitch/Roll: trục roll dương của chip tương ứng robot chúi mũi xuống. Cấu hình
+hiện ánh xạ `body X = -chip Y`, `body Y = +chip X`, `body Z = chip Z` qua
+`BoardConfig::kImuAxisMap` (`kChipXLeftYBack`) trước estimator. Vì vậy pitch
+và pitch-rate của controller lấy từ trục roll/+X của chip với dấu dương là
+chúi mũi. Ma trận vẫn là phép quay thuận tay phải (định thức +1). SENS in cả
+`acc` (thân) và `chip_acc` (chip); khi kiểm tra tĩnh, chúc đầu robot xuống thì
+pitch phải dương và `chip_acc` Y phải dương theo mapping hiện tại.

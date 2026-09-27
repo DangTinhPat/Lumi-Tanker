@@ -6,7 +6,13 @@ add_library(tap_fw STATIC
   src/DabbleGamepadMapper.cpp
   src/MotorFeedback.cpp
   src/ControllerActuatorBridge.cpp
-  src/FirmwareControlLoop.cpp)
+  src/FirmwareControlLoop.cpp
+  src/FirmwareProfile.cpp
+  src/ImpulseStartupSequencer.cpp
+  src/SerialTuning.cpp
+  src/LegHoming.cpp
+  src/v3/LegLock.cpp
+  src/v3/V3Controller.cpp)
 target_include_directories(tap_fw PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -47,4 +53,44 @@ if(BUILD_TESTING)
     target_compile_options(motor_feedback_tests PRIVATE -UNDEBUG)
   endif()
   add_test(NAME motor_feedback_tests COMMAND motor_feedback_tests)
+  add_executable(firmware_profile_tests tests/firmware_profile_tests.cpp)
+  target_link_libraries(firmware_profile_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(firmware_profile_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(firmware_profile_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME firmware_profile_tests COMMAND firmware_profile_tests)
+  add_executable(imu_mount_tests tests/imu_mount_tests.cpp)
+  target_link_libraries(imu_mount_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(imu_mount_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(imu_mount_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME imu_mount_tests COMMAND imu_mount_tests)
+  add_executable(impulse_startup_sequencer_tests tests/impulse_startup_sequencer_tests.cpp)
+  target_link_libraries(impulse_startup_sequencer_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(impulse_startup_sequencer_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(impulse_startup_sequencer_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME impulse_startup_sequencer_tests COMMAND impulse_startup_sequencer_tests)
+  add_executable(v3_tests tests/v3_tests.cpp)
+  target_link_libraries(v3_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(v3_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(v3_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME v3_tests COMMAND v3_tests)
+  add_executable(v3_physics_tests tests/v3_physics_tests.cpp)
+  target_link_libraries(v3_physics_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(v3_physics_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(v3_physics_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME v3_physics_tests COMMAND v3_physics_tests)
 endif()
