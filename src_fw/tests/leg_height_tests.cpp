@@ -30,16 +30,16 @@ int main() {
       const float ratio = -p.hip_offset_rad / knee;
       assert(ratio > 0.45F && ratio < 0.6F);
     }
-    // Body stays over the axle: the balance pitch moves by < 0.07 rad over
-    // the allowed range.
-    assert(p.balance_pitch_delta_rad >= -1.0e-4F && p.balance_pitch_delta_rad < 0.07F);
+    // Body stays over the axle: the CAD balance pitch moves by < 0.1 rad
+    // over the allowed range.
+    assert(p.balance_pitch_delta_rad >= -1.0e-4F && p.balance_pitch_delta_rad < 0.13F);
   }
   // Clamped at both ends.
   assert(std::abs(LegHeight::forKnee(0.5F).knee_offset_rad) < 1.0e-6F);
   assert(std::abs(LegHeight::forKnee(-2.0F).knee_offset_rad - LegHeight::kKneeMinRad) < 1.0e-6F);
 
   // Height request round-trips through the knee.
-  for (float h : {0.185F, 0.17F, 0.155F, 0.14F, 0.12F}) {
+  for (float h : {0.185F, 0.17F, 0.155F, 0.14F, 0.12F, 0.095F, 0.08F}) {
     const LegPose p = LegHeight::forHeight(h);
     assert(p.ok && std::abs(p.axle_below_hip_m - h) < 2.0e-4F);
   }

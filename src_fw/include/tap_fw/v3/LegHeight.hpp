@@ -29,10 +29,11 @@ struct LegPose {
 
 class LegHeight {
  public:
-  // Deepest fold allowed (CAD knee travel reaches -1.2 rad). The robot's
-  // knee was hand-set to -1.069 rad (CAD natural pose) on 2026-09-26 without
-  // interference, so -1.05 rad (about 110 mm hip-axle) stays inside it.
-  static constexpr float kKneeMinRad = -1.05F;
+  // Deepest fold allowed: -1.38 rad, about 78 mm hip-axle. The CAD knee
+  // envelope (-1.2 rad) is a simulation value, not a measured stop; on
+  // 2026-09-28 the robot reached 89 mm and the operator saw about 1 cm more
+  // room. The physics plant still balances at CoM 43 % of the hang height.
+  static constexpr float kKneeMinRad = -1.38F;
 
   // Pose for a knee fold (clamped to [kKneeMinRad, 0]).
   [[nodiscard]] static LegPose forKnee(float knee_offset_rad) noexcept;

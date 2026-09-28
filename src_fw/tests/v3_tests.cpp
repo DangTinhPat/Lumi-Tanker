@@ -332,6 +332,28 @@ int main() {
     max_wheel = 0.0F;
     run_held(0.08F, 200);      // operator tilts it nose-down on the stand
     assert(max_wheel > 2.0F);   // wheels answer the tilt (forward)
+    // Held with a small uncorrected gyro bias (as on the robot): the wheel
+    // command must not creep.
+    {
+      float max_creep = 0.0F;
+      for (int k = 0; k < 15000; ++k) {  // 30 s
+        t += 2000U;
+        in.now_us = t;
+        in.pitch_rad = -0.02F;
+        in.pitch_rate_rad_s = 0.01F;
+        in.accel_x_m_s2 = -9.80665F * std::sin(-0.02F);
+        in.accel_z_m_s2 = 9.80665F * std::cos(-0.02F);
+        in.wheel_rad_s = {wheel, wheel};
+        in.wheel_pos_rad = {pos, pos};
+        o = c.update(in, cmd);
+        const float target = 0.5F * (o.wheel_cmd_rad_s[0] + o.wheel_cmd_rad_s[1]);
+        wheel += (target - wheel) * 0.002F / 0.1F;
+        pos += wheel * 0.002F;
+        if (k > 5000) max_creep = std::max(max_creep, std::abs(wheel));
+      }
+      std::printf("held with gyro bias 0.01 rad/s: max wheel %.2f rad/s\n", max_creep);
+      assert(max_creep < 1.0F);  // below the ~1 rad/s wheel deadband
+    }
     // Held there for 10 s: short bursts are re-zeroed, never a fault, and
     // the wheels are mostly still.
     int spinning = 0;

@@ -1,4 +1,12 @@
+// Dabble GamePad, declared only: FirmwareApp.cpp (same build) defines the
+// GamePad object with CUSTOM_SETTINGS; without it the header emits extern.
+#define INCLUDE_GAMEPAD_MODULE
 #include "tap_hw/AppV3.hpp"
+
+#include <atomic>
+
+#include <BLEDevice.h>
+#include <DabbleESP32.h>
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +38,25 @@ constexpr std::uint64_t kWheelSettleUs = 20'000U;   // Torque Enable -> Moving S
 // A leg further than this from its power-up pose at START is refused: the
 // ramp would otherwise swing it back a long way.
 constexpr float kMaxStartOffsetRad = 0.35F;
+constexpr std::uint64_t kHeightHoldUs = 300'000U;  // HMOVE refresh window
+// BLE gamepad.
+constexpr std::uint64_t kBlePollUs = 10'000U;
+constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
+constexpr float kBleDriveSpeedMS = 0.15F;   // full stick forward
+constexpr float kBleYawRateRadS = 0.6F;     // full stick sideways
+
+std::atomic<int> g_v3_ble_links{0};
+std::atomic<bool> g_v3_ble_readvertise{false};
+
+void onV3GattsEvent(esp_gatts_cb_event_t event, esp_gatt_if_t, esp_ble_gatts_cb_param_t*) {
+  if (event == ESP_GATTS_CONNECT_EVT) {
+    g_v3_ble_links.fetch_add(1);
+  } else if (event == ESP_GATTS_DISCONNECT_EVT) {
+    int links = g_v3_ble_links.load();
+    while (links > 0 && !g_v3_ble_links.compare_exchange_weak(links, links - 1)) {}
+    g_v3_ble_readvertise.store(true);
+  }
+}
 constexpr float kPitchAvgTauS = 0.5F;       // balance-angle measurement average
 constexpr float kTiltTestGain = 80.0F;      // rad/s wheel per rad pitch (0.1 rad -> 8 rad/s)
 constexpr float kTiltTestMaxRadS = 12.0F;   // below the 15 rad/s runaway guard
@@ -64,7 +91,10 @@ bool AppV3::begin() noexcept {
   Serial.println("V3 procedure: arrange the legs BEFORE switching the motor supply on "
                  "(that pose is zero). Stand the robot on its wheels, press START, "
                  "let go (loose tether). DISABLE / ESTOP stop everything.");
-  Serial.println("BLE off: control over USB serial (tools/tap_serial_control_gui.py)");
+  Dabble.begin("TAP-RB");
+  BLEDevice::setCustomGattsHandler(onV3GattsEvent);
+  Serial.println("BLE: Dabble GamePad as TAP-RB (joystick drive, Start=START, Select=GO, "
+                 "Triangle/Cross hold = raise/lower); USB serial GUI also works");
   printTunables();
   const std::uint64_t now_us = nowUs();
   next_control_us_ = now_us;
@@ -75,6 +105,7 @@ bool AppV3::begin() noexcept {
 void AppV3::loop() noexcept {
   const std::uint64_t now_us = nowUs();
   pollSerial(now_us);
+  pollBle(now_us);
   can_.service(now_us);
   drainFeedback(now_us);
   if (now_us >= next_control_us_) {
@@ -137,6 +168,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       Serial.println("V3 GO: locking legs, then wheels hold (armed; balances after the robot "
                      "is put on the floor and let go)");
     }
+  } else if (std::strncmp(line, "HMOVE ", 6U) == 0) {
+    int dir = 0;
+    if (std::sscanf(line + 6, "%d", &dir) == 1) setHeightMove(dir, now_us);
   } else if (std::strcmp(line, "GO NOW") == 0) {
     if (ctrl_.state() == V3Controller::State::Ready) {
       go_pending_ = true;
@@ -147,6 +181,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     tilt_test_ = false;
     go_after_ready_ = false;
     height_request_m_ = 0.0F;
+    hmove_dir_ = 0;
     Serial.println("V3 DISABLE");
   } else if (std::strcmp(line, "ESTOP") == 0) {
     estop_ = true;
@@ -238,7 +273,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     printTunables();
   } else {
     Serial.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
-                  "GO LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST)\n", line);
+                  "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST)\n", line);
   }
 }
 
@@ -322,6 +357,107 @@ float AppV3::legJointRad(std::size_t leg) const noexcept {
   return feedback_.legEstimate(joint).pos_turns * kTwoPi / 8.0F;
 }
 
+void AppV3::setHeightMove(int dir, std::uint64_t now_us) noexcept {
+  dir = dir > 0 ? 1 : dir < 0 ? -1 : 0;
+  if (dir == 0) {
+    if (hmove_dir_ != 0) freezeHeight();
+  } else {
+    height_request_m_ = dir > 0 ? tap_fw::v3::LegHeight::maxHeight()
+                                : tap_fw::v3::LegHeight::minHeight();
+  }
+  hmove_dir_ = dir;
+  hmove_last_us_ = now_us;
+}
+
+void AppV3::pollBle(std::uint64_t now_us) noexcept {
+  if (now_us < next_ble_poll_us_) return;
+  next_ble_poll_us_ = now_us + kBlePollUs;
+  // Bytes waiting from the phone = a Dabble packet (kept for diagnostics).
+  if (esp32ble.available() > 0) last_phone_rx_us_ = now_us;
+  Dabble.processInput();
+
+  const bool link_up = g_v3_ble_links.load() > 0;
+  if (link_up != ble_link_up_) {
+    ble_link_up_ = link_up;
+    ble_inputs_armed_ = false;
+    Serial.printf("BLE %s\n", link_up ? "connected" : "disconnected");
+    if (!link_up) {
+      // Phone gone: stop driving and height moves (the session lease then
+      // follows the USB rules: no serial either -> disabled after 0.5 s).
+      if (ble_driving_) drive_forward_ = drive_yaw_ = 0.0F;
+      ble_driving_ = false;
+      if (ble_height_dir_ != 0) setHeightMove(0, now_us);
+      ble_height_dir_ = 0;
+    }
+  }
+  if (g_v3_ble_readvertise.exchange(false)) ble_advertise_at_us_ = now_us + kBleAdvertiseDelayUs;
+  if (ble_advertise_at_us_ != 0U && now_us >= ble_advertise_at_us_) {
+    ble_advertise_at_us_ = 0U;
+    BLEDevice::startAdvertising();
+  }
+  if (!link_up) return;
+  // A connected phone keeps the session lease alive (Dabble need not send
+  // while nothing changes).
+  last_rx_us_ = now_us;
+
+  bool start = GamePad.isStartPressed();
+  bool select = GamePad.isSelectPressed();
+  bool triangle = GamePad.isTrianglePressed();
+  bool cross = GamePad.isCrossPressed();
+  // Joystick mode: radius 0..7 at a 15 deg angle step (0 = right, 90 = up);
+  // D-pad mode reports the arrows instead.
+  const float radius = static_cast<float>(GamePad.getRadius()) / 7.0F;
+  const float angle = static_cast<float>(GamePad.getAngle()) * 0.01745329F;
+  float x = radius * std::cos(angle);
+  float y = radius * std::sin(angle);
+  if (radius <= 0.0F) {
+    x = static_cast<float>(GamePad.isRightPressed()) - static_cast<float>(GamePad.isLeftPressed());
+    y = static_cast<float>(GamePad.isUpPressed()) - static_cast<float>(GamePad.isDownPressed());
+  }
+  // After (re)connect ignore inputs until everything is released once.
+  const bool any = start || select || triangle || cross || std::abs(x) > 0.0F || std::abs(y) > 0.0F;
+  if (!ble_inputs_armed_) {
+    if (!any) ble_inputs_armed_ = true;
+    start = select = triangle = cross = false;
+    x = y = 0.0F;
+  }
+  // Dabble sends a packet only when an input changes, not while it is held
+  // (2026-09-28: holding Cross moved the legs ~0.5 s per press with a packet
+  // lease). So held inputs stay valid while the link is up; a disconnect
+  // releases everything (above).
+
+  if (start && !ble_start_prev_) handleLine("START", now_us);
+  if (select && !ble_select_prev_) handleLine("GO", now_us);
+  ble_start_prev_ = start;
+  ble_select_prev_ = select;
+
+  const int height_dir = triangle ? 1 : cross ? -1 : 0;
+  if (height_dir != 0) {
+    setHeightMove(height_dir, now_us);  // refreshed every poll while held
+  } else if (ble_height_dir_ != 0) {
+    setHeightMove(0, now_us);
+  }
+  ble_height_dir_ = height_dir;
+
+  const bool stick = std::abs(x) > 0.05F || std::abs(y) > 0.05F;
+  if (stick) {
+    // Up = forward; right = turn right. On the robot (2026-09-28) a positive
+    // DRIVE yaw turns it RIGHT, so stick right = + yaw.
+    drive_forward_ = kBleDriveSpeedMS * y;
+    drive_yaw_ = kBleYawRateRadS * x;
+    ble_driving_ = true;
+  } else if (ble_driving_) {
+    drive_forward_ = drive_yaw_ = 0.0F;
+    ble_driving_ = false;
+  }
+}
+
+void AppV3::freezeHeight() noexcept {
+  // Hold the height the legs are commanded to right now.
+  const float h = ctrl_.legPose().axle_below_hip_m;
+  if (h > 0.0F) height_request_m_ = h;
+}
+
 float AppV3::legTargetRad(std::size_t leg) const noexcept {
   const auto binding = tap_fw::board::MotorIds{}.leg_can[leg];
   const auto& pose = ctrl_.legPose();
@@ -358,6 +494,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   V3Controller::Command cmd{};
   cmd.forward_m_s = drive_forward_;
   cmd.yaw_rad_s = drive_yaw_;
+  // HMOVE held but no refresh (GUI closed, link lost): stop where it is.
+  if (hmove_dir_ != 0 && now_us - hmove_last_us_ > kHeightHoldUs) {
+    freezeHeight();
+    hmove_dir_ = 0;
+  }
   cmd.height_m = height_request_m_;
   cmd.disable = disable_pending_ || estop_;
   if (active && now_us - last_rx_us_ > kLeaseUs) {

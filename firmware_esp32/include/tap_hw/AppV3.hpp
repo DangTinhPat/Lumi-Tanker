@@ -74,7 +74,26 @@ class AppV3 {
   bool disable_pending_ = false;
   bool go_pending_ = false;
   bool go_after_ready_ = false;
-  float height_request_m_ = 0.0F;  // SET height; 0 = no request  // GO from Idle/Fault: start, then engage at Ready
+  float height_request_m_ = 0.0F;  // SET height; 0 = no request
+  // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;
+  // released (0) or silent for kHeightHoldUs -> freeze at the current height.
+  int hmove_dir_ = 0;
+  std::uint64_t hmove_last_us_ = 0U;
+  void freezeHeight() noexcept;
+  void setHeightMove(int dir, std::uint64_t now_us) noexcept;
+
+  // BLE (Dabble GamePad): joystick drives, Start = START, Select = GO,
+  // Triangle / Cross held = raise / lower the height. USB serial stays on.
+  void pollBle(std::uint64_t now_us) noexcept;
+  std::uint64_t next_ble_poll_us_ = 0U;
+  std::uint64_t last_phone_rx_us_ = 0U;
+  std::uint64_t ble_advertise_at_us_ = 0U;
+  bool ble_link_up_ = false;
+  bool ble_inputs_armed_ = false;
+  bool ble_start_prev_ = false;
+  bool ble_select_prev_ = false;
+  int ble_height_dir_ = 0;
+  bool ble_driving_ = false;  // GO from Idle/Fault: start, then engage at Ready
   bool estop_ = false;
   // TILTTEST: wheels follow pitch only (no velocity loop), for checking the
   // tilt->wheel direction with the robot lifted.

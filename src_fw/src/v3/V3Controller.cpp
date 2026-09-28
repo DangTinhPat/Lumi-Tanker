@@ -298,6 +298,11 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
                                  -p.accel_max_m_s2, p.accel_max_m_s2);
   const float wheel_ground = radius * 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
   pid_cmd_m_s_ = std::clamp(pid_cmd_m_s_ + accel * dt, -vmax, vmax);
+  // Held: nothing is balanced, so leak the command to zero (0.5 s). Without
+  // it the uncorrected gyro bias (x kd) crept the wheels to ~2.7 rad/s on the
+  // stand (2026-09-28 log). Release is caught by the pitch-rate / body-accel
+  // exit above, which switches the full loop back on.
+  if (held_outer_off_) pid_cmd_m_s_ -= pid_cmd_m_s_ * std::min(dt / 0.5F, 1.0F);
   // Anti-windup: the command may not run ahead of the measured wheel speed
   // by more than the margin (stalled wheel). It is never pulled up to a
   // faster wheel: after a held re-zero the wheels may still be spinning.
@@ -338,7 +343,8 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
       std::clamp(cmd.yaw_rad_s, -config_.lqr.max_yaw_rate_rad_s, config_.lqr.max_yaw_rate_rad_s);
   const float sign = config_.lqr.left_wheel_sign;
   auto comp = [&](float w) {
-    if (p.deadband_comp_rad_s <= 0.0F) return w;
+    // Held: no deadband push, so a near-zero command leaves the wheels still.
+    if (p.deadband_comp_rad_s <= 0.0F || held_outer_off_) return w;
     return w + p.deadband_comp_rad_s * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
   };
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};

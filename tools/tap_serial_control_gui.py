@@ -30,6 +30,10 @@ BAUD = 115200
 # so a second tool can read the robot log without opening the serial port.
 LOG_DIR = os.path.expanduser("~/tap_logs")
 HEARTBEAT_S = 0.20
+HMOVE_REPEAT_S = 0.10   # firmware stops a height move not refreshed in 0.3 s
+JOY_SIZE = 180          # joystick canvas [px]
+JOY_KNOB = 18           # knob radius [px]
+JOY_DEADZONE = 0.08
 MODE_RE = re.compile(r"CONTROL mode=(\S+) enable=(\d+)")
 SENS_RE = re.compile(
     r"SENS .*?can_legs=(\d+) uart_wheels=(\d+) homed=(\d+) "
@@ -129,7 +133,7 @@ class TapSerialControlApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("TAP — điều khiển qua USB")
-        root.geometry("850x690")
+        root.geometry("850x800")
         root.minsize(760, 600)
 
         self.incoming: queue.Queue[str] = queue.Queue()
@@ -146,6 +150,15 @@ class TapSerialControlApp:
         self.firmware_ready = False
         self.last_heartbeat = 0.0
         self.held: set[str] = set()
+        # Virtual joystick (-1..1): x right, y forward. Height hold: +1/-1/0.
+        self.joy_x = 0.0
+        self.joy_y = 0.0
+        self.joy_active = False
+        self.last_drive_sent = 0.0
+        self.last_drive_cmd = ""
+        self.height_dir = 0
+        self.last_hmove_sent = 0.0
+        self.height_var = tk.StringVar(value="Chiều cao: —")
 
         self._build_ui()
         self.root.bind("<KeyPress>", self._key_press)
@@ -201,13 +214,16 @@ class TapSerialControlApp:
         ttk.Button(actions, text="GO — sẵn sàng (bấm trên giá, rồi đặt xuống sàn và buông tay)",
                    command=self.go).grid(
             row=1, column=0, columnspan=5, padx=4, pady=6, sticky="ew")
-        # v3.1 height (hip-to-axle, mm): the legs move only while balancing.
-        for column, (label, mm) in enumerate(
-                [("Cao nhất 189", 189), ("170 mm", 170), ("150 mm", 150),
-                 ("130 mm", 130), ("Thấp nhất 110", 110)]):
-            ttk.Button(actions, text=label,
-                       command=lambda mm=mm: self._send(f"SET height {mm}")).grid(
-                row=2, column=column, padx=4, pady=3, sticky="ew")
+        # v3.1 height (hip-to-axle): hold to raise/lower, release to stop.
+        up = ttk.Button(actions, text="▲ Nâng chiều cao (giữ)  R")
+        up.grid(row=2, column=0, columnspan=2, padx=4, pady=3, sticky="ew")
+        down = ttk.Button(actions, text="▼ Hạ chiều cao (giữ)  F")
+        down.grid(row=2, column=2, columnspan=2, padx=4, pady=3, sticky="ew")
+        for button, direction in ((up, 1), (down, -1)):
+            button.bind("<ButtonPress-1>", lambda _e, d=direction: self._height_hold(d))
+            button.bind("<ButtonRelease-1>", lambda _e: self._height_hold(0))
+        ttk.Label(actions, textvariable=self.height_var).grid(
+            row=2, column=4, padx=4, pady=3, sticky="w")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
 
@@ -234,13 +250,24 @@ class TapSerialControlApp:
             row=1, column=2, sticky="e")
         drive.columnconfigure(1, weight=1)
 
-        pad = ttk.Frame(drive, padding=(0, 10, 0, 2))
-        pad.grid(row=2, column=0, columnspan=3)
-        self._direction_button(pad, "↑\nTiến  W", "up", 0, 1)
-        self._direction_button(pad, "←\nQuay trái  A", "left", 1, 0)
-        self._direction_button(pad, "↓\nLùi  S", "down", 1, 1)
-        self._direction_button(pad, "→\nQuay phải  D", "right", 1, 2)
-        ttk.Label(drive, text="Phím tắt W/A/S/D; nhả phím hoặc mất focus sẽ gửi lệnh dừng.").grid(
+        # Virtual joystick: drag the knob; speed scales with the distance.
+        # Up = forward, right = turn right. Release -> knob recentres, stop.
+        size = JOY_SIZE
+        self.joy = tk.Canvas(drive, width=size, height=size, highlightthickness=0)
+        self.joy.grid(row=2, column=0, columnspan=3, pady=(10, 2))
+        c = size / 2
+        r = size / 2 - 6
+        self.joy.create_oval(c - r, c - r, c + r, c + r, outline="#888", width=2)
+        self.joy.create_line(c, c - r, c, c + r, fill="#ccc")
+        self.joy.create_line(c - r, c, c + r, c, fill="#ccc")
+        k = JOY_KNOB
+        self.joy_knob = self.joy.create_oval(c - k, c - k, c + k, c + k,
+                                             fill="#3b7dd8", outline="")
+        self.joy.bind("<ButtonPress-1>", self._joy_move)
+        self.joy.bind("<B1-Motion>", self._joy_move)
+        self.joy.bind("<ButtonRelease-1>", self._joy_release)
+        ttk.Label(drive, text="Kéo joystick bằng chuột (thả ra là dừng). Phím W/A/S/D vẫn dùng "
+                              "được; R/F giữ để nâng/hạ chiều cao.").grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         warning = ttk.Label(
@@ -386,9 +413,12 @@ class TapSerialControlApp:
         self._publish_drive()
 
     def _release_all(self) -> None:
-        if self.held:
+        if self.held or self.joy_active:
             self.held.clear()
+            self.joy_active = False
+            self.joy_x = self.joy_y = 0.0
             self._publish_drive()
+        self._height_hold(0)
 
     def send_console(self) -> None:
         text = self.command_var.get().strip()
@@ -403,6 +433,10 @@ class TapSerialControlApp:
     def _key_press(self, event: tk.Event) -> None:
         if event.widget is getattr(self, "command_entry", None):
             return  # typing a console command must not drive the robot
+        height = {"r": 1, "f": -1}.get(event.keysym.lower())
+        if height:
+            self._height_hold(height)
+            return
         direction = {"w": "up", "s": "down", "a": "left", "d": "right"}.get(
             event.keysym.lower())
         if direction:
@@ -411,17 +445,59 @@ class TapSerialControlApp:
     def _key_release(self, event: tk.Event) -> None:
         if event.widget is getattr(self, "command_entry", None):
             return
+        if event.keysym.lower() in ("r", "f"):
+            self._height_hold(0)
+            return
         direction = {"w": "up", "s": "down", "a": "left", "d": "right"}.get(
             event.keysym.lower())
         if direction:
             self._release(direction)
 
+    def _drive_command(self) -> str:
+        if self.joy_active:
+            fwd_in, turn_in = self.joy_y, self.joy_x
+        else:
+            fwd_in = int("up" in self.held) - int("down" in self.held)
+            turn_in = int("right" in self.held) - int("left" in self.held)
+        forward = self.speed_var.get() * fwd_in
+        # On the robot (2026-09-28) a positive DRIVE yaw turns it right.
+        yaw = self.yaw_var.get() * turn_in
+        return f"DRIVE {forward:.3f} {yaw:.3f}"
+
     def _publish_drive(self) -> None:
-        forward = self.speed_var.get() * (
-            int("up" in self.held) - int("down" in self.held))
-        yaw = self.yaw_var.get() * (
-            int("right" in self.held) - int("left" in self.held))
-        self._send(f"DRIVE {forward:.3f} {yaw:.3f}")
+        command = self._drive_command()
+        self._send(command)
+        self.last_drive_cmd = command
+        self.last_drive_sent = time.monotonic()
+
+    def _joy_move(self, event: tk.Event) -> None:
+        c = JOY_SIZE / 2
+        r = JOY_SIZE / 2 - 6 - JOY_KNOB
+        dx, dy = event.x - c, event.y - c
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist > r:
+            dx, dy = dx * r / dist, dy * r / dist
+        self.joy.coords(self.joy_knob, c + dx - JOY_KNOB, c + dy - JOY_KNOB,
+                        c + dx + JOY_KNOB, c + dy + JOY_KNOB)
+        x, y = dx / r, -dy / r
+        # Dead zone around the centre.
+        self.joy_x = 0.0 if abs(x) < JOY_DEADZONE else x
+        self.joy_y = 0.0 if abs(y) < JOY_DEADZONE else y
+        self.joy_active = True
+
+    def _joy_release(self, _event: tk.Event) -> None:
+        c = JOY_SIZE / 2
+        self.joy.coords(self.joy_knob, c - JOY_KNOB, c - JOY_KNOB, c + JOY_KNOB, c + JOY_KNOB)
+        self.joy_x = self.joy_y = 0.0
+        self.joy_active = False
+        self._publish_drive()
+
+    def _height_hold(self, direction: int) -> None:
+        if direction == self.height_dir:
+            return
+        self.height_dir = direction
+        self._send(f"HMOVE {direction}")
+        self.last_hmove_sent = time.monotonic()
 
     def _tick(self) -> None:
         while True:
@@ -433,12 +509,32 @@ class TapSerialControlApp:
             self._append_log(line)
 
         now = time.monotonic()
+        if self.link.connected:
+            # Joystick: send when it changes (>=50 ms apart) or refresh 5 Hz.
+            if self.joy_active:
+                command = self._drive_command()
+                if (command != self.last_drive_cmd or now - self.last_drive_sent >= 0.2):
+                    self.link.send(command)
+                    self.last_drive_cmd = command
+                    self.last_drive_sent = now
+            # Height hold-to-run: the firmware stops if not refreshed in 0.3 s.
+            if self.height_dir and now - self.last_hmove_sent >= HMOVE_REPEAT_S:
+                self.link.send(f"HMOVE {self.height_dir}")
+                self.last_hmove_sent = now
         if self.link.connected and self.session_active and now - self.last_heartbeat >= HEARTBEAT_S:
             self.link.send("HEARTBEAT")
             self.last_heartbeat = now
         self.root.after(50, self._tick)
 
     def _parse_status(self, line: str) -> None:
+        if line.startswith("TR "):
+            height = re.search(r"\bh=([0-9.]+)", line)
+            target = re.search(r"\bhtgt=([0-9.]+)", line)
+            if height:
+                text = f"Chiều cao: {float(height.group(1)):.0f} mm"
+                if target and abs(float(target.group(1)) - float(height.group(1))) > 0.5:
+                    text += f" → {float(target.group(1)):.0f}"
+                self.height_var.set(text)
         if match := MODE_RE.search(line):
             self.mode_var.set(match.group(1))
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")
