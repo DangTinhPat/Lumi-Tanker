@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box regression for native runner command transactions.
-
-This deliberately exercises only the public line IPC.  It proves that the
-runner stops, re-arms, retires a pose request and resets the physical model;
-it does not use VIEW as controller input.
-"""
+"""Black-box regression for V3.1 lifecycle and public line IPC."""
 
 from __future__ import annotations
 
@@ -69,7 +64,12 @@ class Session:
     def close(self):
         if self.process.poll() is None:
             self.send("QUIT")
-            self.process.wait(timeout=2.0)
+            deadline = time.monotonic() + 5.0
+            while self.process.poll() is None and time.monotonic() < deadline:
+                self.read(0.1)  # Drain telemetry so the child cannot block on stdout.
+            if self.process.poll() is None:
+                self.process.terminate()
+                self.process.wait(timeout=1.0)
         self.selector.close()
 
 
@@ -86,7 +86,7 @@ def main() -> int:
         session.wait_state(lambda state: state.get("mode") == "Balance", 15.0)
 
         session.send("DISABLE")
-        session.wait_state(lambda state: state.get("mode") == "EmergencyStop")
+        session.wait_state(lambda state: state.get("mode") == "Disabled")
         session.send("ENABLE")
         session.wait_state(lambda state: state.get("mode") == "Balance" and
                            state.get("station_eligible") == "1" and
@@ -105,13 +105,23 @@ def main() -> int:
         reset_state = session.wait_state(lambda state: state.get("mode") == "Disabled")
         view = session.wait_view()
         assert abs(float(view["x"])) < 0.02
-        assert abs(float(view["z"]) - 0.134000000) < 1.0e-6
-        assert abs(float(view["lh"]) - 1.123132841) < 0.03
-        assert abs(float(view["rh"]) - 1.121352471) < 0.03
-        assert abs(float(view["lk"]) + 1.214584702) < 0.03
-        assert abs(float(view["rk"]) + 1.213451540) < 0.03
+        assert abs(float(view["z"]) - 0.2285603142) < 1.0e-6
+        assert abs(float(view["lh"]) - 0.3882076041) < 0.03
+        assert abs(float(view["rh"]) - 0.3882076041) < 0.03
+        assert abs(float(view["lk"])) < 0.03
+        assert abs(float(view["rk"])) < 0.03
         assert reset_state["ground_truth_to_controller"] == "0"
-        print("PASS native lifecycle: DISABLE/ENABLE, automatic POSE completion, physical RESET")
+
+        home = subprocess.run(
+            [str(args.runner), "--model", str(args.model), "--keyframe",
+             "home_offset", "--rate", "3000", "--sensor-rate", "500",
+             "--run-for", "0.5"],
+            input="ENABLE\n", check=True, capture_output=True, text=True)
+        assert "ERROR|v3_start_rejected=legs_not_at_hang_zero" in home.stdout
+        assert not any(fields(line).get("mode") == "Balance"
+                       for line in home.stdout.splitlines()
+                       if line.startswith("STATE|"))
+        print("PASS V3.1 lifecycle: lock/balance, height, reset, reject folded HOME")
         return 0
     finally:
         session.close()

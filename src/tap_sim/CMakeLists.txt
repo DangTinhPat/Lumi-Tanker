@@ -55,14 +55,8 @@ install(PROGRAMS
   scripts/mujoco_sensor_actuator_backend.py
   tests/native_runner_contract_test.py
   tests/native_runner_lifecycle_test.py
-  tests/native_drive_stop_guard_test.py
-  tests/native_stop_balance_test.py
-  tests/native_leg_speed_loop_test.py
   tests/native_neutral_balance_test.py
   tests/native_assist_mechanism_test.py
-  tests/native_yaw_station_test.py
-  tests/native_posture_transition_test.py
-  tests/native_dance_skill_test.py
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
@@ -103,27 +97,9 @@ if(BUILD_TESTING)
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
-    NAME tap_mujoco_native_drive_stop_guard
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_drive_stop_guard_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
     NAME tap_mujoco_native_neutral_balance
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_neutral_balance_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_stop_balance
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_stop_balance_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_leg_speed_loop
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_leg_speed_loop_test.py
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   add_test(
@@ -131,50 +107,11 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_assist_mechanism_test.py
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_yaw_station
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_yaw_station_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_posture_transition
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_posture_transition_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_dance_skill
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_dance_skill_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml
-            --duration-s 120)
-  add_test(
-    NAME tap_mujoco_native_landing_cmf
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_landing_contract_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
-  add_test(
-    NAME tap_mujoco_native_multirate_cmf
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_multirate_cmf_test.py
-            --runner $<TARGET_FILE:tap_mujoco_native>
-            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml)
   # These tests own a native runner and sensor clock. Prevent a parallel CTest
   # job from turning host contention into a false lifecycle/control failure.
   set_tests_properties(
     tap_mujoco_native_runner_contract
     tap_mujoco_native_runner_lifecycle
-    tap_mujoco_native_drive_stop_guard
     tap_mujoco_native_neutral_balance
-    tap_mujoco_native_stop_balance
-    tap_mujoco_native_leg_speed_loop
-    tap_mujoco_native_yaw_station
-    tap_mujoco_native_posture_transition
-    tap_mujoco_native_dance_skill
-    tap_mujoco_native_landing_cmf
-    tap_mujoco_native_multirate_cmf
     PROPERTIES RUN_SERIAL TRUE)
 endif()

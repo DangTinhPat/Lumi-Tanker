@@ -75,9 +75,11 @@ encoder calibration must replace them before hardware bring-up.
 
 ## Power-off rocker fixture
 
-`home_offset` remains the controller-compatible powered spawn fixture at root
-`z=0.134 m`; changing the encoder zero must not make the current ENABLE path
-start from a collapsed pose. The saved `power_off_collapse_current` keyframe is
+The V3.1 native runner now starts at the `v3_hang` keyframe: hip `0.3882 rad`,
+knee `0 rad`, root `z=0.22856 m`. This is the controller's internal zero pose;
+the existing driver encoder calibration below is unchanged. `home_offset`
+remains available as the HOME/folded start fixture for the future stand-up
+sequence. The saved `power_off_collapse_current` keyframe is
 the angle-zero rocker reference: both hips are `2.27392 rad`, both knees are
 `-1.2 rad`, root `z=0.0698965 m`, and the wheel collision envelopes are
 tangent to the ground while the body remains low. `power_off_deep_front`

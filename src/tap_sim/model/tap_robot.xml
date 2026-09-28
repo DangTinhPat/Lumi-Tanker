@@ -260,6 +260,8 @@
     <!-- Natural ENABLE reference: 30 mm below the previous pose;
          q_hip=1.0104670525, q_knee=-1.0682730675; not a limit or standing pose. -->
     <key name="neutral" qpos="0 0 0.1484350375 1 0 0 0 1.0104670525 -1.0682730675 0 1.0104670525 -1.0682730675 0"/>
+    <!-- V3.1 controller zero: gravity-hang legs, axle directly below the hip. -->
+    <key name="v3_hang" qpos="0 0 0.2285603142 1 0 0 0 0.3882076041 0 0 0.3882076041 0 0"/>
     <!-- Controller-compatible powered spawn fixture. The angle-zero
          calibration is stored in encoder_zero_rad and in the saved rocker
          keyframe below; this spawn remains usable by the current ENABLE path. -->

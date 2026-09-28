@@ -1,10 +1,10 @@
 #include <mujoco/mujoco.h>
 
-#include "robot_control/EmbeddedController.hpp"
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_control/WholeBodyModel.hpp"
+#include "tap_fw/v3/V3Controller.hpp"
 #include "SimActuatorBus.hpp"
 
 #include <algorithm>
@@ -29,14 +29,14 @@
 namespace {
 
 using robot_control::ControlCommand;
-using robot_control::EmbeddedController;
 using robot_control::ImuStateEstimator;
-using robot_control::LandingController;
 using robot_control::JointArray;
 using robot_control::JointId;
 using robot_control::MotorCommand;
 using robot_control::RobotState;
 using robot_control::WholeBodyModel;
+using tap_fw::v3::V3Controller;
+using V3LegHeight = tap_fw::v3::LegHeight;
 namespace motor_frame = robot_control::motor_frame;
 namespace motor_transport = robot_control::motor_transport;
 
@@ -77,49 +77,14 @@ constexpr float kLegTaskStiffnessForeAftNPerM = 4618.0F;
 // left a 4--5 mm model/contact residual with no restoring authority, so the
 // knee slowly collapsed even though the gravity term had the right sign.
 constexpr float kLegTaskStiffnessVerticalNPerM = 3000.0F;
-// Keep the dance inside the already tested posture envelope.  The runner
-// chooses only the next target; EmbeddedController owns each height path.
-// Keep differential-wheel demand below the plant's low-torque capture margin.
-// The station gate can still reduce this to zero on live capture energy; the
-// nominal rate must not consume the wheel authority needed to catch pitch.
-constexpr float kDanceYawRateRadS = 0.18F;
-constexpr float kDanceHighHeightM = 0.200F;
-constexpr float kDanceLowHeightM = 0.155F;
-constexpr double kDanceHalfPeriodS = 12.0;
-constexpr double kDanceYawRampS = 1.2;
-constexpr float kDanceYawSlewRateRadS2 = 0.5F;
-// The HEIGHT endpoint flag means that the C2 leg path reached its target;
-// it does not mean the body has finished exchanging pitch momentum with the
-// wheels.  Require the same sensor-derived station dwell used by the core
-// before handing differential-wheel authority back to the presentation task.
-constexpr double kDancePostHeightQuietS = 0.50;
-// The low endpoint is close to the leg/ground torque envelope. Reserve all
-// differential-wheel authority there for pitch capture; the high posture
-// retains the full presentation yaw and the height transaction remains live.
-constexpr float kDanceLowPostureYawScale = 0.0F;
-// The next leg move is released only after the previous path has retired and
-// the station has had one bounded settling interval. This is a handoff guard,
-// not a phase clock: slow capture naturally stretches the dance.
-constexpr double kDanceHeightDwellS = 4.0;
-constexpr double kDanceLowHeightDwellS = 1.0;
-// The native plant has no identified leg/ground torque margin for indefinite
-// repeated height cycles. Complete one low->high presentation cycle, then
-// keep the safer high posture while continuing the yaw performance.
-constexpr unsigned kDanceLowHeightCycles = 1U;
-// A finite yaw budget prevents a presentation turn from consuming the wheel
-// capture margin indefinitely.  1.8 rad remains above the regression's
-// 1.5-rad presentation requirement; after that the skill holds station.
-constexpr float kDanceYawBudgetRad = 1.7F;
-
 struct Options {
   std::string model;
-  std::string initial_keyframe = "home_offset";
+  std::string initial_keyframe = "v3_hang";
   double rate_hz = 3000.0;
   double sensor_rate_hz = 500.0;
   double run_for_s = 0.0;
   bool realtime = false;
   bool gds68_feedback = true;
-  bool landing_30cm = false;
   unsigned seed = 6814U;
 };
 
@@ -130,16 +95,6 @@ double asDouble(const char* text, const char* option) {
     throw std::invalid_argument(std::string("invalid ") + option);
   }
   return value;
-}
-
-const char* landingPhaseName(LandingController::Phase phase) noexcept {
-  switch (phase) {
-    case LandingController::Phase::Grounded: return "Grounded";
-    case LandingController::Phase::Flight: return "Flight";
-    case LandingController::Phase::Impact: return "Impact";
-    case LandingController::Phase::Recovery: return "Recovery";
-  }
-  return "Unknown";
 }
 
 Options parseOptions(int argc, char** argv) {
@@ -157,11 +112,10 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--run-for") options.run_for_s = asDouble(value("--run-for"), "--run-for");
     else if (arg == "--seed") options.seed = static_cast<unsigned>(std::stoul(value("--seed")));
     else if (arg == "--no-gds68") options.gds68_feedback = false;
-    else if (arg == "--landing-30cm") options.landing_30cm = true;
     else if (arg == "--realtime") options.realtime = true;
     else if (arg == "--help") {
       std::cout << "tap_mujoco_native --model FILE [--keyframe NAME] [--rate 3000|4000] "
-                    "[--sensor-rate 500] [--landing-30cm] [--realtime] [--run-for SEC]\n";
+                    "[--sensor-rate 500] [--realtime] [--run-for SEC]\n";
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + arg);
@@ -202,16 +156,8 @@ class NativeRunner {
     data_ = mj_makeData(model_);
     if (data_ == nullptr) throw std::runtime_error("MuJoCo data allocation failed");
     initializeState();
-    configureController();
+    configureV3Controller();
     configureSensors();
-    RobotState initial;
-    initial.dt_s = static_cast<float>(model_->opt.timestep);
-    for (std::size_t i = 0; i < 6; ++i) {
-      initial.joints.position_rad[i] = static_cast<float>(data_->qpos[kJointQpos[i]]);
-      initial.joints.velocity_rad_s[i] = static_cast<float>(data_->qvel[kJointQvel[i]]);
-    }
-    initial.imu.accel_magnitude_m_s2 = 9.81F;
-    controller_.reset(initial);
     resetSensorPipeline();
     setNonBlockingStdin();
     std::cout << "READY|backend=mujoco_native|physics_hz=" << options_.rate_hz
@@ -220,7 +166,7 @@ class NativeRunner {
               << "|ground_truth_to_controller=0"
               << "|gds68_feedback=" << (options_.gds68_feedback ? 1 : 0)
               << "|imu_startup_qualification=1"
-              << "|scenario=" << (options_.landing_30cm ? "landing_30cm_v1p5_delayed_seed" : "neutral")
+              << "|scenario=v3_hang"
               << std::endl;
   }
 
@@ -384,22 +330,13 @@ class NativeRunner {
     const int home_keyframe = mj_name2id(
         model_, mjOBJ_KEY, options_.initial_keyframe.c_str());
     if (home_keyframe >= 0) {
-      // Spawn at the powered-home offset. The disabled lifecycle pauses this
-      // pose; POWER_OFF explicitly releases it so MuJoCo gravity produces the
-      // natural collapse seen by the sensors.
+    // Spawn at the selected keyframe; V3.1's default is its straight-hang zero.
       mj_resetDataKeyframe(model_, data_, home_keyframe);
     } else {
       throw std::runtime_error("missing initial keyframe: " +
                                options_.initial_keyframe);
     }
     std::fill(data_->qvel, data_->qvel + model_->nv, 0.0);
-    // The landing scenario deliberately starts on the supported natural
-    // ENABLE reference. The robot must first acquire a valid MPU6500 tilt seed before
-    // it reaches the ledge; spawning directly in free fall makes pitch
-    // unobservable to a 6-axis IMU and leaves the estimator at its zero
-    // initial value.  The ledge/drop event is injected later by
-    // startLandingScenario(), strictly as simulator setup, never as a
-    // controller input.
     mj_forward(model_, data_);
   }
 
@@ -467,14 +404,7 @@ class NativeRunner {
         robot_control::geometry::neutral_knee_rad, 0.0F,
         robot_control::geometry::neutral_hip_rad,
         robot_control::geometry::neutral_knee_rad, 0.0F};
-    // A landing run is an explicit fixture, so RESET restarts its approach.
-    // Ordinary runs remain disabled until the operator sends ENABLE.
-    if (options_.landing_30cm) {
-      command_.target_forward_velocity_m_s = 1.5F;
-      enable_request_ = true;
-    } else {
-      enable_request_ = false;
-    }
+    enable_request_ = false;
     disable_request_ = false;
     power_off_free_ = false;
     estop_ = false;
@@ -486,18 +416,7 @@ class NativeRunner {
     // target surviving a sim reset would be a false positive nothing else
     // catches.
     motor_transport_.reset();
-    dance_active_ = false;
-    dance_started_s_ = sim_time_s_;
-    dance_direction_ = 1.0F;
-    dance_height_target_m_ = kDanceHighHeightM;
-    dance_low_height_cycles_ = 0U;
-    dance_yaw_budget_rad_ = 0.0F;
-    dance_yaw_command_rad_s_ = 0.0F;
-    dance_height_request_active_ = false;
-    height_request_rejected_ = false;
-    dance_last_height_done_s_ = sim_time_s_;
     last_command_s_ = -1.0e9;
-    height_request_started_ = false;
     boot_hold_until_s_ = sim_time_s_ + boot_hold_duration_s_;
     disable_hold_until_s_ = sim_time_s_;
   }
@@ -508,372 +427,125 @@ class NativeRunner {
     mj_resetData(model_, data_);
     initializeState();
     state_ = sensorResetState();
-    controller_.reset(state_);
+    v3_controller_ = V3Controller(v3_config_);
+    v3HomeReset();
     imu_estimator_.reset();
     resetSensorPipeline();
     resetCommandPipeline();
-    seen_ballistic_ = false;
-    seen_touchdown_ = false;
     imu_seeded_ = false;
     imu_tilt_valid_ = false;
-    landing_scenario_started_ = false;
-    landing_drop_time_s_ = sim_time_s_ + landing_drop_delay_s_;
   }
 
-  void startLandingScenario() {
-    if (!options_.landing_30cm || landing_scenario_started_ ||
-        sim_time_s_ < landing_drop_time_s_) {
-      return;
+  static float v3HangHip(float knee_rad) {
+    float hip = 0.4F;
+    for (int i = 0; i < 30; ++i) {
+      const auto leg = WholeBodyModel::legHeight(hip, knee_rad);
+      if (std::abs(leg.x_m) < 1.0e-7F || std::abs(leg.d_x_d_hip) < 1.0e-6F) break;
+      hip -= leg.x_m / leg.d_x_d_hip;
     }
-    // Scenario setup only: model state is changed to represent driving off a
-    // sharp ledge.  No qpos/qvel/contact value is copied into RobotState or
-    // used by CMF, the FSM, MPC, or landing control.  The controller sees
-    // only the subsequent delayed/noisy MPU6500 and encoder streams.
-    data_->qpos[2] += landing_height_m_;
-    data_->qvel[0] = landing_command_speed_m_s_;
-    mj_forward(model_, data_);
-    landing_scenario_started_ = true;
+    return hip;
   }
 
-  void configureController() {
-    EmbeddedController::Config cfg;
-    auto& lqr = cfg.lqr;
-    lqr.wheel_radius_m = robot_control::geometry::wheel_radius_m;
-    lqr.half_wheel_base_m = 0.1545F;
-    lqr.left_wheel_sign = 1.0F;
-    // The speed actuator is torque-limited at 0.13 N.m. Keep the operator
-    // envelope wider than the validated cruise range so the feedback loop can
-    // spend speed to catch pitch without violating the physical cap.
-    // Stay below the native Moving Speed frame envelope while leaving enough
-    // translational authority to catch a pitch transient after the wheel has
-    // already crossed the quiet station speed.
-    lqr.max_ground_velocity_m_s = 1.50F;
-    cfg.wheel_max_torque_nm = 0.13F;
-    const float wheel_torque_accel_m_s2 = 2.0F * cfg.wheel_max_torque_nm /
-        (lqr.wheel_radius_m * robot_control::geometry::total_mass_kg);
-    lqr.max_ground_accel_m_s2 = std::min(1.40F, wheel_torque_accel_m_s2);
-    lqr.wheel_ground_mu = 0.8F;
-    lqr.wheel_velocity_reference_from_measured = true;
-    lqr.target_velocity_slew_rate_m_s2 = 0.30F;
-    lqr.target_velocity_jerk_m_s3 = 1.0F;
-    // Releasing DRIVE uses a faster but still torque-feasible profile. The
-    // 0.65 factor leaves pitch-capture margin below the two-wheel torque cap;
-    // both speed and acceleration remain continuous at the command edge.
-    const float brake_capacity_m_s2 = std::min(
-        wheel_torque_accel_m_s2, lqr.wheel_ground_mu * lqr.gravity_m_s2);
-    lqr.stop_velocity_slew_rate_m_s2 = 0.65F * brake_capacity_m_s2;
-    lqr.stop_velocity_jerk_m_s3 = 4.0F;
-    lqr.target_yaw_slew_rate_rad_s2 = 1.0F;
-    lqr.yaw_rate_feedback_kp = 1.0F;
-    // Fail safe before the supported floor-side posture observed in the
-    // native model (~0.69 rad).
-    lqr.fall_pitch_rad = 0.55F;
-    // Let the leg-side gimbal absorb the small supported pitch error. The
-    // wheel LQR remains the fast catch controller for larger transients.
-    lqr.wheel_pitch_feedback_scale = 0.70F;
-    lqr.leg_length_m = 0.234F;
-    lqr.pendulum_length_per_com_height = 1.077F;
-    lqr.min_pendulum_length_m = 0.10F;
-    lqr.max_pendulum_length_m = 0.27F;
-    // LQR is solved for the fresh 500 Hz sensor interval, not the 3 kHz
-    // actuator/cache loop. Gains are rebuilt only when the live COM height
-    // changes enough to warrant a new reduced-order model.
-    lqr.sampling_period_s = 0.002F;
-    // Pitch capture is the primary safety objective.  A former MPC-shaped
-    // velocity weight made the LQR brake odometry before it arrested pitch;
-    // station return remains an adaptive outer target, not the fast state.
-    lqr.position_cost_scale = 100.0F;
-    lqr.pitch_cost_scale = 400.0F;
-    lqr.velocity_cost_scale = 300.0F;
-    lqr.pitch_rate_cost_scale = 40.0F;
-    lqr.input_cost_scale = 10.0F;
-    lqr.station_position_cost_scale = 200.0F;
-    lqr.station_pitch_cost_scale = 400.0F;
-    lqr.station_velocity_cost_scale = 300.0F;
-    lqr.station_pitch_rate_cost_scale = 40.0F;
-    lqr.station_input_cost_scale = 10.0F;
-    lqr.station_gain_pitch_start_rad = 0.12F;
-    lqr.station_gain_pitch_quiet_rad = 0.05F;
-    lqr.station_gain_rate_start_rad_s = 0.60F;
-    lqr.station_gain_rate_quiet_rad_s = 0.20F;
-    lqr.station_gain_entry_dwell_s = 0.10F;
-    lqr.station_gain_transition_s = 0.20F;
-    lqr.station_pitch_return_gain_rad_per_m_s = 0.0F;
-    lqr.station_pitch_return_max_rad = 0.0F;
-    lqr.riccati_iterations = 80U;
-    // A zero command is the natural ENABLE balance hold. Keep a local
-    // odometry anchor in Balance so small IMU/encoder bias does not look like
-    // continuous wheel slip. EmbeddedController releases this anchor whenever
-    // a nonzero Drive/Yaw command or a pose transition is active.
-    // Height transactions own a local support point. Re-anchor only at their
-    // supported endpoint instead of pulling a long dance back to the initial
-    // odometry sample after every shape change.
-    lqr.position_anchor_hold = true;
-    // Do not bleed the integrated wheel reference during a posture move: the
-    // 0.13 N.m wheel servo needs the retained catch command to arrest pitch.
-    // Position/velocity station feedback still owns the return target.
-    lqr.station_velocity_decay_gain_hz = 0.0F;
-    // The estimator's corrected rate remains exposed and calibrated, but the
-    // current CAD plant profile keeps raw rate in the fast MPC until the
-    // corrected-rate adoption trial clears all posture/stop envelopes.
-    lqr.use_bias_corrected_pitch_rate = false;
-    // The station return is an outer position loop around the same LQR.  A
-    // 15 Hz return gain drove the bounded target straight into +/-0.10 m/s
-    // on encoder quantisation, then reversed it every few hundred ms.  Keep
-    // the return inside the measured wheel damping envelope so the body does
-    // not trade a few millimetres of odometry for visible pitch chatter.
-    lqr.station_hold_gain_hz = 5.0F;
-    lqr.station_hold_yaw_return = true;
-    lqr.station_hold_max_v = 0.06F;
-    lqr.station_posture_hold_max_v = 0.25F;
-    // Keep the integrated station command inside the posture envelope. The
-    // live capture schedule still decides when this ceiling is approached;
-    // it is distinct from the wider internal MPC catch acceleration limit.
-    lqr.station_hold_command_max_v = 0.10F;
-    // The station command starts quiet, then expands with the measured capture
-    // distance in LqrBalancer. Do not cap a real posture catch at the quiet
-    // 0.25 m/s envelope; that leaves the wheel without authority exactly when
-    // pitch/velocity evidence says it must brake.
-    lqr.station_hold_dynamic_max_v = lqr.station_posture_hold_max_v;
-    // Once pitch/rate have been quiet, station return may move the LQR speed
-    // reference back toward the local anchor.  Keep that outer reference
-    // slower than the wheel pitch-capture loop so the two objectives cannot
-    // fight during the first transient.
-    lqr.station_hold_command_slew_rate_m_s2 = 0.10F;
-    // station_target is fed into the LQR's own velocity_target, so this term
-    // does not act as an independent outer damper: it scales the velocity
-    // state the DARE already weights. At 5.0 it made x2 = 6*v + 15*pos_err,
-    // i.e. ~6x the designed velocity feedback and ~48x K0's position gain,
-    // which sat on the 0.25 m/s station clamp and limit-cycled. Keep this
-    // small and let position/velocity regulation come from the costs below,
-    // where the Riccati solve co-designs it against the pitch gains.
-    lqr.station_hold_velocity_damping_gain = 1.00F;
-    // Fade the slow station return to 25% inside a 100 mm capture envelope.
-    // The fast pitch-capture MPC remains untouched, so this removes quiet
-    // encoder chatter without sacrificing recovery authority.
-    lqr.station_adaptive_full_capture_distance_m = 0.10F;
-    lqr.station_quiet_gain_scale = 0.25F;
-    // Capture-point scheduling supplies the slow, height-adaptive position
-    // term; the separate damping term remains the high-frequency damper.
-    // Keep the capture-point path available to callers, but do not enable it
-    // in the native profile until it clears the closed-loop envelope; the
-    // plant's provisional friction/torque model currently amplifies it.
-    lqr.station_capture_gain = 0.0F;
-    // Do not add a second velocity servo around the pitch LQR.  The first
-    // closed-loop trial showed that this term uses the stale integrated
-    // command, not the measured wheel state, and can reinforce a saturated
-    // correction.  Keep it disabled until an actuator-aware reference
-    // governor is proven in simulation.
-    lqr.station_hold_velocity_servo_gain_hz = 0.0F;
-    // Posture transitions must remain in place. The leg motion changes the
-    // encoder-derived wheel odometry and COM geometry at the same time; if the
-    // station anchor is released, the balance loop can turn that transient
-    // into metres of unintended rolling. EmbeddedController re-anchors at the
-    // actual endpoint, so this does not pull the robot back after a pose.
-    lqr.hold_station_during_pose = true;
-    // Station anchoring is adaptive: this is the allowable residual capture
-    // distance, not a speed gate.  The core recomputes the required distance
-    // from the live pendulum length and sensor state before resetting MPC.
-    cfg.station_capture_margin_m = 0.025F;
-    cfg.station_capture_filter_period_s = 0.08F;
-    cfg.station_settle_dwell_s = 0.35F;
-    cfg.posture_settle_dwell_s = 0.25F;
-    // A posture path starts only after the wheel capture transient has mostly
-    // decayed; otherwise the leg motion and the retained wheel velocity add
-    // instead of sharing the same stationary anchor.
-    cfg.posture_settle_wheel_velocity_m_s = 0.03F;
-    cfg.height_pending_timeout_s = 2.0F;
-    cfg.posture_reanchor_settle_s = 0.50F;
-    // Riccati iterations are fixed and bounded; no online optimizer or
-    // horizon storage remains in the native balance path.
-    // Keep the provisional leg actuator envelope at the independently checked
-    // 3 N.m value.  A larger clamp hides posture/geometry faults and has no
-    // motor-spec evidence behind it.
-    cfg.leg_max_torque_nm = 3.0F;
-    cfg.leg_command_max_rate_rad_s = 12.0F;
-    cfg.posture_abort_blend_s = 0.35F;
-    cfg.hip_min_rad = robot_control::geometry::native_hip_min_rad;
-    cfg.hip_max_rad = robot_control::geometry::native_hip_max_rad;
-    cfg.knee_min_rad = robot_control::geometry::native_knee_min_rad;
-    cfg.knee_max_rad = robot_control::geometry::native_knee_max_rad;
-    // Height changes are task-space trajectories; the duration scales with
-    // joint travel, while the balance loop catches the changing CoM.  Keep the
-    // same measured rate in both directions so the GUI does not make one half
-    // of the slider appear stuck.
-    cfg.pose_change_duration_s = 2.5F;
-    cfg.pose_max_joint_velocity_rad_s = 0.18F;
-    cfg.pose_max_duration_s = 16.0F;
-    cfg.height_min_duration_s = 5.0F;
-    cfg.height_max_rate_m_s = 0.012F;
-    cfg.height_lowering_rate_m_s = 0.012F;
-    cfg.height_max_duration_s = 16.0F;
-    cfg.height_capture_slowdown_min_scale = 0.02F;
-    // Allow the final extension near the straight-leg branch to finish while
-    // LQR is still inside its recoverable pitch envelope.  Pausing at 50 mm
-    // froze the path around 0.237 m and then rejected a valid 0.245 m target.
-    cfg.height_capture_pause_distance_m = 0.080F;
-    cfg.height_capture_abort_s = 8.00F;
-    // The fake driver has a steady-state load sag near the straight-leg and
-    // natural branches; settle within 25 mm after the quiet-rate dwell.
-    cfg.height_reached_tolerance_m = 0.025F;
-    // LQR owns measured body pitch through the wheels. WBC/VMC owns only the
-    // body-frame COM line through the leg Jacobian.
-    cfg.whole_body_compensation = false;
-    cfg.whole_body_pitch_gain = 1.0F;
-    cfg.height_whole_body_compensation = true;
-    cfg.height_whole_body_pitch_gain = cfg.whole_body_pitch_gain;
-    // The legs are the fast sagittal body suspension. Its dimensionless gains
-    // are scheduled from the live COM height inside the stance controller;
-    // the wheel MPC remains the capture loop for translation.
-    cfg.whole_body_stance.enabled = true;
-    cfg.whole_body_stance.vmc_enabled = true;
-    // Leave gravity to the wheel MPC. VMC is damping-only until the two
-    // loops have separate physical state variables and model contracts.
-    cfg.whole_body_stance.vmc_stiffness_ratio = 0.20F;
-    // Keep the COM-line damper below the saturation-prone old profile.
-    cfg.whole_body_stance.vmc_damping_ratio = 0.70F;
-    // Give the fast leg damper most of the provisional joint envelope.  The
-    // inner position servo and gravity feed-forward still retain 20% headroom;
-    // a 40% VMC cap was reached before the wheels could catch a real transient.
-    cfg.whole_body_stance.vmc_max_torque_nm =
-        0.80F * cfg.leg_max_torque_nm;
-    // Keep the low-gain leg damper alive through a real rolling transient;
-    // its independent 1.2 N.m clamp remains the actuator safety boundary.
-    // Keep the leg damper alive through the first wheel-capture transient.
-    // Keep the damper available through the bounded pre-fall capture window;
-    // the independent fall detector still owns the final stop. These are
-    // bounded safety limits, not a second angle owner, and release remains
-    // ramped instead of becoming a one-sample cut.
-    cfg.whole_body_stance.vmc_max_pitch_rad = 0.80F;
-    cfg.whole_body_stance.vmc_max_pitch_rate_rad_s = 10.0F;
-    cfg.whole_body_stance.vmc_release_time_s = 0.15F;
-    cfg.whole_body_stance.gravity_m_s2 = cfg.lqr.gravity_m_s2;
-    cfg.whole_body_stance.com_position_gain = 3.00F;
-    cfg.whole_body_stance.com_velocity_damping_s = 0.02F;
-    // Give the legs a slow COM-line position task. The wheel LQR remains the
-    // fast body-pitch capture loop; no IMU-pitch-to-leg path exists.
-    cfg.whole_body_stance.max_pitch_for_trim_rad = 0.35F;
-    cfg.whole_body_stance.roll_position_gain = 0.25F;
-    cfg.whole_body_stance.height_position_weight = 1.0F;
-    cfg.whole_body_stance.axle_position_weight = 0.10F;
-    cfg.whole_body_stance.symmetric_task_damping = 1.0e-4F;
-    cfg.whole_body_stance.correction_filter_hz = 4.0F;
-    // Let the bounded correction_ set-point remove FK/model COM bias only in
-    // settled stationary Balance; HEIGHT owns the leg target while active.
-    cfg.whole_body_stance.com_integrator_gain_hz = 2.0F;
-    cfg.whole_body_stance.max_correction_rad = 0.12F;
-    // Leg COM motion is intentionally slower than the wheel capture loop;
-    // otherwise the wheel spends its authority chasing the moving axle.
-    cfg.whole_body_stance.max_correction_rate_rad_s = 0.30F;
-    cfg.whole_body_stance.com_deadband_m = 0.0003F;
-    cfg.whole_body_stance.body_pitch_task_enabled = true;
-    cfg.whole_body_stance.body_pitch_task_gain = 0.80F;
-    cfg.whole_body_stance.body_pitch_task_weight = 2.0F;
-    cfg.whole_body_stance.body_pitch_task_max_axle_error_m = 0.020F;
-    // Let the legs supply the accelerating lean geometrically. 1.0 = full
-    // h*a/g compensation; the envelope below caps it at ~0.83 m/s2 worth of
-    // COM travel, past which the wheels own the rest as before.
-    // Legs own the outer speed loop; wheels own balance only. tau is the
-    // speed-loop time constant the body shift alone would produce.
-    cfg.whole_body_stance.speed_loop_tau_s = 0.55F;
-    cfg.whole_body_stance.speed_loop_integral_hz = 0.0F;
-    cfg.whole_body_stance.speed_loop_inertia_lead = 1.0F;
-    cfg.whole_body_stance.speed_loop_filter_hz = 6.0F;
-    cfg.whole_body_stance.speed_loop_max_rad = 0.18F;
-    cfg.whole_body_stance.speed_loop_max_rate_rad_s = 1.50F;
-    cfg.whole_body_stance.speed_loop_release_pitch_rad = 0.06F;
-    cfg.whole_body_stance.speed_loop_release_span_rad = 0.09F;
-    cfg.whole_body_stance_owns_static_com = true;
-    cfg.whole_body_gravity_feedforward = true;
-    cfg.whole_body_gravity_feedforward_scale = 1.0F;
-    cfg.whole_body_stance.hip_min_rad = robot_control::geometry::native_hip_min_rad;
-    cfg.whole_body_stance.hip_max_rad = robot_control::geometry::native_hip_max_rad;
-    cfg.whole_body_stance.knee_min_rad = robot_control::geometry::native_knee_min_rad;
-    cfg.whole_body_stance.knee_max_rad = robot_control::geometry::native_knee_max_rad;
-    cfg.keep_legs_active_when_fallen = true;
-    cfg.landing_controller.enabled = true;
-    cfg.landing_controller.flight_extension_delay_s = 0.05F;
-    cfg.landing_controller.flight_extension_max_m = 0.025F;
-    cfg.landing_controller.flight_hip_offset_max_rad = 0.035F;
-    cfg.landing_controller.flight_knee_offset_max_rad = 0.18F;
-    cfg.landing_controller.flight_kp_scale = 0.65F;
-    cfg.landing_controller.impact_kp_scale = 1.0F;
-    cfg.landing_controller.impact_kd_scale = 1.0F;
-    cfg.landing_controller.height_kp_n_m = 20.0F;
-    cfg.landing_controller.height_kd_n_s_m = 8.0F;
-    cfg.landing_controller.max_virtual_force_n = 30.0F;
-    cfg.landing_controller.max_feedforward_torque_nm = 2.0F;
-    cfg.landing_controller.min_impact_s = 0.04F;
-    cfg.landing_controller.max_impact_s = 0.35F;
-    cfg.landing_controller.recovery_drive_ramp_s = 0.50F;
-    cfg.landing_controller.recovery_settle_pitch_rad = 0.22F;
-    cfg.landing_controller.recovery_settle_pitch_rate_rad_s = 0.55F;
-    cfg.landing_controller.recovery_settle_hold_s = 0.12F;
-    // Keep the native CMF scenario aligned with the checked-in 30 cm profile.
-    // These are all sensor-only landing mechanisms; their phase input still
-    // comes from FlightObserver, never from MuJoCo contact or pose.
-    cfg.landing_reflex.active_extension_gravity_m_s2 = 9.81F;
-    cfg.landing_reflex.active_extension_max_rad = 0.12F;
-    cfg.landing_reflex.active_extension_max_hip_rad = 0.035F;
-    cfg.landing_reflex.active_extension_delay_s = 0.05F;
-    cfg.landing_reflex.unloading_accel_mps2 = 4.0F;
-    cfg.landing_reflex.unloading_debounce_s = 0.025F;
-    cfg.landing_reflex.target_slew_rate_rad_s = 2.0F;
-    cfg.landing_reflex.catch_hold_s = 0.12F;
-    cfg.landing_reflex.catch_blend_s = 0.30F;
-    cfg.landing_reflex.min_airborne_before_touchdown_s = 0.03F;
-    cfg.landing_impedance.impact_kp_scale = 0.20F;
-    cfg.landing_impedance.impact_kd_scale = 3.0F;
-    cfg.landing_impedance.touchdown_velocity_threshold_m_s = 0.05F;
-    cfg.landing_impedance.hard_impact_accel_mps2 = 18.0F;
-    cfg.landing_impedance.rebound_blend_s = 0.22F;
-    cfg.landing_impedance.max_impact_duration_s = 0.35F;
-    cfg.landing_impedance.min_airborne_before_touchdown_s = 0.03F;
-    // The landing fixture needs the short CMF latency required by its
-    // measured drop. Normal balance uses a longer, conservative loss debounce:
-    // a wheel catch can unload the IMU briefly, and cutting MPC before that
-    // evidence is confirmed is worse than carrying the wheel command for a
-    // few extra milliseconds.
-    cfg.flight_observer.free_fall_debounce_s =
-        options_.landing_30cm ? 0.012F : 0.025F;
-    cfg.flight_observer.support_loss_debounce_s =
-        options_.landing_30cm ? 0.012F : 0.040F;
-    // Use the observer's free-fall threshold instead of classifying ordinary
-    // height-transition unloading as support loss. The time debounce still
-    // protects genuine flight and keeps this sensor-only.
-    cfg.flight_observer.free_fall_accel_threshold_m_s2 = 3.5F;
-    cfg.flight_observer.collision_accel_threshold_m_s2 = 18.0F;
-    cfg.flight_observer.collision_hold_s = 0.006F;
-    cfg.flight_observer.touchdown_debounce_s = 0.006F;
-    cfg.flight_observer.encoder_compression_rate_threshold_m_s = 0.08F;
-    cfg.flight_observer.encoder_compression_reversal_threshold_m_s = 0.03F;
-    cfg.flight_observer.encoder_touchdown_hold_s = 0.006F;
-    cfg.flight_observer.torque_corroboration_enabled = true;
-    cfg.flight_observer.torque_agreement_confidence_threshold = 0.75F;
-    cfg.flight_observer.torque_corroboration_speedup_multiplier = 1.5F;
-    cfg.torque_residual_estimator.enabled = options_.gds68_feedback;
-    cfg.torque_residual_estimator.use_force_projection = true;
-    cfg.torque_residual_estimator.use_inertial_term = true;
-    cfg.torque_residual_estimator.joint_accel_filter_time_constant_s = 0.008F;
-    cfg.torque_residual_estimator.unloading_force_threshold_n = 12.0F;
-    cfg.torque_residual_estimator.impact_force_threshold_n = 28.0F;
-    cfg.torque_residual_estimator.impact_accel_gate_m_s2 = 18.0F;
-    cfg.torque_residual_estimator.max_force_projection_joint_speed_rad_s = 0.45F;
-    cfg.torque_residual_estimator.residual_deadband_nm = 0.35F;
-    cfg.torque_residual_estimator.residual_debounce_s = 0.025F;
-    cfg.torque_residual_estimator.residual_decay_rate = 2.0F;
-    controller_ = EmbeddedController(cfg);
-    command_.target_joint_position_rad = {
-        robot_control::geometry::neutral_hip_rad,
-        robot_control::geometry::neutral_knee_rad, 0.0F,
-        robot_control::geometry::neutral_hip_rad,
-        robot_control::geometry::neutral_knee_rad, 0.0F};
-    command_.target_body_height_m = robot_control::geometry::neutral_spawn_z_m;
-    height_request_started_ = false;
-    if (options_.landing_30cm) {
-      command_.target_forward_velocity_m_s = 1.5F;
-      enable_request_ = true;
+  void configureV3Controller() {
+    v3_config_ = tap_fw::v3::defaultV3Config();
+    v3_config_.algo = V3Controller::Algo::Pid;
+    v3_config_.engage.immediate = true;
+    v3_config_.height.balance_ff_scale = 0.0F;
+    v3_hang_hip_rad_ = v3HangHip(0.0F);
+    v3_controller_ = V3Controller(v3_config_);
+    v3HomeReset();
+  }
+
+  void v3HomeReset() {
+    v3_start_sent_ = false;
+    v3_height_started_ = false;
+    v3_start_rejected_reported_ = false;
+    v3_lock_start_us_ = 0U;
+  }
+
+  MotorCommand updateV3Controller(bool sensors_ok) {
+    MotorCommand motors{};
+    V3Controller::Input input{};
+    input.now_us = static_cast<std::uint64_t>(std::max(sim_time_s_, 0.0) * 1.0e6);
+    input.dt_s = std::clamp(state_.dt_s, 1.0e-4F, 0.05F);
+    input.pitch_rad = state_.imu.pitch_rad;
+    input.pitch_rate_rad_s = state_.imu.pitch_rate_bias_corrected_valid
+        ? state_.imu.pitch_rate_bias_corrected_rad_s
+        : state_.imu.pitch_rate_rad_s;
+    input.yaw_rate_rad_s = state_.imu.yaw_rate_rad_s;
+    input.accel_x_m_s2 = raw_accel_[0];
+    input.accel_z_m_s2 = raw_accel_[2];
+    input.wheel_rad_s = {state_.joints.velocity_rad_s[2],
+                         state_.joints.velocity_rad_s[5]};
+    input.wheel_pos_rad = {state_.joints.position_rad[2],
+                           state_.joints.position_rad[5]};
+    const auto& q = state_.joints.position_rad;
+    const float left_chain = q[0] + q[1] - v3_hang_hip_rad_;
+    const float right_chain = q[3] + q[4] - v3_hang_hip_rad_;
+    input.leg_chain_rad = 0.5F * (left_chain + right_chain);
+    input.sensors_ok = sensors_ok && imu_seeded_;
+    input.legs_ready = v3_lock_start_us_ != 0U &&
+        input.now_us - v3_lock_start_us_ >= v3_config_.lock_settle_us &&
+        std::abs(q[0] - v3_hang_hip_rad_) < 0.05F &&
+        std::abs(q[1]) < 0.05F &&
+        std::abs(q[3] - v3_hang_hip_rad_) < 0.05F &&
+        std::abs(q[4]) < 0.05F;
+
+    V3Controller::Command command{};
+    command.disable = disable_request_ || estop_ || power_off_free_;
+    command.forward_m_s = command_.target_forward_velocity_m_s;
+    command.yaw_rad_s = command_.target_yaw_rate_rad_s;
+    if (command_.request_height_change) {
+      command.height_m = command_.target_body_height_m -
+          robot_control::geometry::wheel_radius_m;
     }
+
+    if (command.disable) {
+      v3_controller_ = V3Controller(v3_config_);
+      v3HomeReset();
+      command.disable = true;
+    } else if (enable_request_ && !v3_start_sent_ && input.sensors_ok) {
+      const bool at_hang = std::abs(q[0] - v3_hang_hip_rad_) < 0.08F &&
+          std::abs(q[1]) < 0.08F &&
+          std::abs(q[3] - v3_hang_hip_rad_) < 0.08F &&
+          std::abs(q[4]) < 0.08F;
+      if (at_hang) {
+        v3_start_sent_ = true;
+        v3_lock_start_us_ = input.now_us;
+        command.start = true;
+      } else {
+        enable_request_ = false;
+        if (!v3_start_rejected_reported_) {
+          std::cout << "ERROR|v3_start_rejected=legs_not_at_hang_zero" << std::endl;
+          v3_start_rejected_reported_ = true;
+        }
+      }
+    }
+
+    v3_output_ = v3_controller_.update(input, command);
+    motors.enable_motors = v3_output_.legs_locked || v3_output_.wheels_enabled;
+    motors.torque_nm = {3.0F, 3.0F, 0.0F, 3.0F, 3.0F, 0.0F};
+    motors.kp_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
+    motors.kd_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
+    motors.position_rad[0] = v3_hang_hip_rad_ + v3_output_.leg_hip_offset_rad;
+    motors.position_rad[1] = v3_output_.leg_knee_offset_rad;
+    motors.position_rad[3] = v3_hang_hip_rad_ + v3_output_.leg_hip_offset_rad;
+    motors.position_rad[4] = v3_output_.leg_knee_offset_rad;
+    motors.velocity_rad_s[2] = v3_output_.wheel_cmd_rad_s[0];
+    motors.velocity_rad_s[5] = v3_output_.wheel_cmd_rad_s[1];
+    v3_motor_command_ = motors;
+    if (command_.request_height_change && v3_output_.state == V3Controller::State::Balancing) {
+      if (v3_output_.legs_moving) v3_height_started_ = true;
+      else if (v3_height_started_) {
+        command_.request_height_change = false;
+        v3_height_started_ = false;
+      }
+      if (std::abs(command.height_m - v3_controller_.heightTarget()) < 1.0e-4F) {
+        command_.request_height_change = false;
+        v3_height_started_ = false;
+      }
+    }
+    return motors;
   }
 
   void configureSensors() {
@@ -941,7 +613,7 @@ class NativeRunner {
       // no pose, quaternion, contact or ground-truth quantity enters the
       // controller.  Once seeded, packets always come from the live model.
       const bool startup_sensor_fixture =
-          !options_.landing_30cm && !imu_seeded_;
+          !imu_seeded_;
       for (int i = 0; i < 3; ++i) {
         imu_bias_accel_[i] += normal(0.012F * static_cast<float>(std::sqrt(dt)));
         imu_bias_gyro_[i] += normal(0.0006F * static_cast<float>(std::sqrt(dt)));
@@ -1042,23 +714,8 @@ class NativeRunner {
   // Rolling-contact kinematics hold only under the sensor-derived support
   // hypothesis; in flight the accelerometer falls back to gyro integration.
   ImuStateEstimator::KinematicVelocity imuKinematicVelocity(float gyro_rate) const {
-    ImuStateEstimator::KinematicVelocity out;
-    if (!imu_seeded_ || last_encoder_stamp_s_ <= 0.0 ||
-        !controller_.flightEstimate().support_contact) {
-      return out;
-    }
-    const float pitch_rate = gyro_rate - state_.imu.gyro_bias_rad_s;
-    const auto& q = state_.joints.position_rad;
-    const auto& qd = state_.joints.velocity_rad_s;
-    for (const std::size_t hip : {std::size_t{0}, std::size_t{3}}) {
-      const auto leg = robot_control::WholeBodyModel::imuVelocityThroughLeg(
-          state_.imu.pitch_rad, pitch_rate, q[hip], q[hip + 1], qd[hip],
-          qd[hip + 1], qd[hip + 2]);
-      out.horizontal_m_s += 0.5F * leg.horizontal_m_s;
-      out.vertical_m_s += 0.5F * leg.vertical_m_s;
-    }
-    out.valid = true;
-    return out;
+    (void)gyro_rate;
+    return {};
   }
 
   void consumeSensors() {
@@ -1072,16 +729,11 @@ class NativeRunner {
           sample.accel[0] * sample.accel[0] +
           sample.accel[1] * sample.accel[1] +
           sample.accel[2] * sample.accel[2]);
-      const auto mode = controller_.mode();
-      // The station latch is built from encoder odometry, corrected IMU
-      // pitch/rate and support hypothesis in the core. Reuse that sensor-only
-      // quiet evidence for gyro calibration; requiring a small instantaneous
-      // MPC acceleration made bias adaptation starve during normal station
-      // corrections.
-      const bool station_quiet_latched =
-          controller_.stationCaptureReady() &&
-          controller_.stationDwellS() >= 0.25F;
-      const bool stance_quiet = mode == robot_control::ControlMode::Balance &&
+      const bool balancing = v3_controller_.state() == V3Controller::State::Balancing;
+      imu_estimator_.setConfig(balancing
+          ? tap_fw::v3::balancingEstimatorConfig(ImuStateEstimator::Config{})
+          : ImuStateEstimator::Config{});
+      const bool stance_quiet = balancing &&
           std::abs(command_.target_forward_velocity_m_s) < 1.0e-3F &&
           std::abs(command_.target_yaw_rate_rad_s) < 1.0e-3F &&
           std::abs(state_.wheel.velocity_m_s) < 0.05F &&
@@ -1089,14 +741,10 @@ class NativeRunner {
         // sensor's slowly wandering bias. The estimator applies its own
         // corrected-rate and specific-force gates.
         std::abs(sample.gyro[1] - state_.imu.gyro_bias_rad_s) < 0.12F &&
-        std::abs(state_.imu.pitch_rate_rad_s) < 0.12F &&
-          std::abs(accel_mag - 9.81F) < 0.35F &&
-          station_quiet_latched &&
-          !controller_.heightMotionActive();
-      const bool pose_changing =
-          (mode == robot_control::ControlMode::PoseChange ||
-           controller_.heightMotionActive()) &&
-          !controller_.heightMotionSettling();
+          std::abs(state_.imu.pitch_rate_rad_s) < 0.12F &&
+          std::abs(accel_mag - 9.81F) < 0.35F && !v3_output_.legs_moving;
+      const bool pose_changing = v3_controller_.state() == V3Controller::State::Locking ||
+          v3_output_.legs_moving;
       const auto estimate = imu_estimator_.update(sample.accel, sample.gyro, dt,
           static_cast<float>(sample.stamp_s), 0.0F, pose_changing,
           stance_quiet, imuKinematicVelocity(sample.gyro[1]));
@@ -1155,8 +803,8 @@ class NativeRunner {
     if (safe) target_leg = leg_command_;
     else if (boot_hold) {
       target_leg = {};
-      const float target_hip = robot_control::geometry::neutral_hip_rad;
-      const float target_knee = robot_control::geometry::neutral_knee_rad;
+      const float target_hip = v3_hang_hip_rad_;
+      const float target_knee = 0.0F;
       for (std::size_t side = 0; side < 2; ++side) {
         const int q = side == 0 ? 7 : 10;
         const int qd = side == 0 ? 6 : 9;
@@ -1375,163 +1023,22 @@ class NativeRunner {
     last_command_s_ = sim_time_s_;
   }
 
-  static double smoothStep(double value) {
-    value = std::clamp(value, 0.0, 1.0);
-    return value * value * (3.0 - 2.0 * value);
-  }
-
-  double dancePhaseS() const {
-    if (!dance_active_) return 0.0;
-    const double cycle = 2.0 * kDanceHalfPeriodS;
-    return std::fmod(std::max(0.0, sim_time_s_ - dance_started_s_), cycle);
-  }
-
-  float danceHeightTargetM() const {
-    if (!dance_active_) return command_.target_body_height_m;
-    return dance_height_target_m_;
-  }
-
-  void startDance(float direction) {
-    dance_active_ = true;
-    dance_started_s_ = sim_time_s_;
-    dance_direction_ = direction < 0.0F ? -1.0F : 1.0F;
-    // Start with the low pose so the skill has a full high-pose presentation
-    // window after the first transition. Starting high consumed almost the
-    // entire 28 s demo in the initial leg path and left only a short yaw turn.
-    dance_height_target_m_ = kDanceLowHeightM;
-    dance_height_request_active_ = false;
-    height_request_rejected_ = false;
-    dance_last_height_done_s_ = sim_time_s_ - kDanceHeightDwellS;
+  void clearMotionCommand() {
     command_.target_forward_velocity_m_s = 0.0F;
     command_.target_yaw_rate_rad_s = 0.0F;
-    dance_yaw_command_rad_s_ = 0.0F;
-    command_.request_pose_change = false;
   }
-
-  void stopDance() {
-    dance_active_ = false;
-    command_.target_forward_velocity_m_s = 0.0F;
-    command_.target_yaw_rate_rad_s = 0.0F;
-    dance_height_request_active_ = false;
-    height_request_rejected_ = false;
-  }
-
-  void updateDanceCommand() {
-    if (!dance_active_) return;
-    command_.target_forward_velocity_m_s = 0.0F;
-    // The core retires the HEIGHT transaction at the C2 endpoint. The runner
-    // still waits for the explicit settled acknowledgement before starting the
-    // next dance phase, so the handoff cannot replay stale wheel intent.
-    bool height_busy =
-        (command_.request_height_change &&
-         (!controller_.heightMotionSettled() || !height_request_started_)) ||
-        controller_.heightMotionActive();
-
-    // Do not stream HEIGHT commands: each one would restart the adaptive
-    // capture gate. A completed path toggles the target only after the core
-    // has acknowledged the endpoint transaction.
-    if (dance_height_request_active_ && height_request_rejected_) {
-      // Rejection is not completion: keep the same height target and wait for
-      // a fresh adaptive capture instead of toggling the skill phase.
-      dance_height_request_active_ = false;
-      height_request_rejected_ = false;
-      dance_last_height_done_s_ = sim_time_s_;
-    } else if (dance_height_request_active_ && !height_busy) {
-      dance_height_request_active_ = false;
-      dance_last_height_done_s_ = sim_time_s_;
-      const bool completed_low = dance_height_target_m_ <=
-          kDanceLowHeightM + 1.0e-4F;
-      if (completed_low) ++dance_low_height_cycles_;
-      const bool completed_height_sequence =
-          !completed_low && dance_low_height_cycles_ >= kDanceLowHeightCycles;
-      dance_height_target_m_ = completed_height_sequence
-          ? kDanceHighHeightM
-          : (completed_low ? kDanceHighHeightM : kDanceLowHeightM);
-    }
-    const float target = danceHeightTargetM();
-    const double dance_dwell_s = target <= kDanceLowHeightM + 1.0e-4F
-        ? kDanceLowHeightDwellS : kDanceHeightDwellS;
-    const bool dance_dwell_elapsed =
-        sim_time_s_ - dance_last_height_done_s_ >= dance_dwell_s;
-    const auto mode = controller_.mode();
-    const bool ready = (mode == robot_control::ControlMode::Balance ||
-                        mode == robot_control::ControlMode::Drive) &&
-        !height_busy &&
-        dance_dwell_elapsed &&
-        controller_.stationEligible() && controller_.stationCaptureReady();
-    if (ready && std::abs(target - command_.target_body_height_m) > 1.0e-4F &&
-        setHeightTarget(target)) {
-      dance_height_request_active_ = true;
-      height_request_rejected_ = false;
-      // The request edge and the first leg-path sample share this control tick.
-      // Do not let the yaw task overlap that edge; the wheel torque budget is
-      // the balance actuator while the leg trajectory establishes its new COM.
-      height_busy = true;
-    }
-
-    // Yaw may overlap a height path only after the core has acknowledged that
-    // transaction and while the same sensor-derived station capture is quiet.
-    // Losing capture removes yaw immediately; the height path remains the
-    // sole posture owner until the wheel state is safe again.
-    // Keep yaw ownership continuous across the HEIGHT request edge. The
-    // request flag is cleared for one IPC tick while the core accepts the new
-    // path; using it alone steps the yaw target to zero exactly at that edge
-    // and injects a differential-wheel impulse into pitch.
-    const bool yaw_ready = !height_busy && controller_.heightMotionSettled() &&
-        controller_.stationCaptureReady() &&
-        controller_.stationDwellS() >= kDancePostHeightQuietS;
-    // Yaw is a continuous dance task, not a new command at every height
-    // endpoint. Reusing the endpoint dwell clock ramps the differential wheel
-    // target back to zero on each pose edge and creates a repeatable pitch
-    // impulse; only DANCE START owns the ramp origin.
-    const double yaw_elapsed = std::max(0.0, sim_time_s_ - dance_started_s_);
-    const float capture_distance = controller_.stationCaptureDistanceM();
-    // A turn is presentation-only. Release it before the longitudinal
-    // capture envelope is spent; letting yaw consume the full posture margin
-    // makes a small wheel-friction asymmetry grow into a body-pitch fall.
-    constexpr float kDanceYawReleaseDistanceM = 0.10F;
-    const float yaw_capture_scale = std::clamp(
-        (kDanceYawReleaseDistanceM - capture_distance) /
-            std::max(kDanceYawReleaseDistanceM -
-                         controller_.stationCaptureMarginM(), 1.0e-3F),
-        0.0F, 1.0F);
-    const float posture_yaw_scale =
-        target > kDanceLowHeightM + 1.0e-4F
-            ? 1.0F : kDanceLowPostureYawScale;
-    dance_yaw_budget_rad_ = std::min(
-        kDanceYawBudgetRad,
-        dance_yaw_budget_rad_ + std::abs(dance_yaw_command_rad_s_) *
-            std::max(static_cast<float>(state_.dt_s), 0.0F));
-    const bool yaw_budget_available = dance_yaw_budget_rad_ <
-        kDanceYawBudgetRad - 1.0e-4F;
-    // Yaw is a presentation task, never a reason to spend the remaining
-    // capture margin. Let longitudinal balance recover first, then ramp the
-    // turn back in automatically on the next quiet station sample.
-    const float desired_yaw_rate = dance_direction_ * kDanceYawRateRadS *
-        posture_yaw_scale *
-        (yaw_ready && yaw_budget_available ? static_cast<float>(smoothStep(
-                         yaw_elapsed / kDanceYawRampS)) * yaw_capture_scale
-                   : 0.0F);
-    const float yaw_step = kDanceYawSlewRateRadS2 *
-        std::max(static_cast<float>(state_.dt_s), 1.0e-4F);
-    dance_yaw_command_rad_s_ += std::clamp(
-        desired_yaw_rate - dance_yaw_command_rad_s_, -yaw_step, yaw_step);
-    command_.target_yaw_rate_rad_s = dance_yaw_command_rad_s_;
-  }
-
   void step() {
     state_.dt_s = static_cast<float>(model_->opt.timestep);
     readCommands();
-    updateDanceCommand();
-    startLandingScenario();
     updateActuators();
-    // Before ENABLE the desktop model is paused, while the sensor queue above
-    // continues with the bounded startup fixture.  After qualification an
-    // ENABLE releases dynamics and the core only then owns balance.
+    // Hold the V3.1 standing fixture still through lock/qualification; dynamics
+    // begin once its balance loop takes ownership.
+    const bool waiting_for_v3_start = enable_request_ &&
+        v3_controller_.state() != V3Controller::State::Balancing &&
+        v3_controller_.state() != V3Controller::State::Fault;
     const bool lifecycle_paused = !power_off_free_ &&
-        (!enable_request_ || estop_ ||
-         (disable_request_ && sim_time_s_ >= disable_hold_until_s_)) &&
-        !options_.landing_30cm;
+        (!enable_request_ || estop_ || waiting_for_v3_start ||
+         (disable_request_ && sim_time_s_ >= disable_hold_until_s_));
     if (!lifecycle_paused) mj_step(model_, data_);
     sim_time_s_ += model_->opt.timestep;
     enqueueSensors();
@@ -1540,108 +1047,10 @@ class NativeRunner {
         sim_time_s_ - last_imu_stamp_s_ > 0.15 || sim_time_s_ - last_encoder_stamp_s_ > 0.15;
     const bool have_any_sensor = last_imu_stamp_s_ > 0.0 && last_encoder_stamp_s_ > 0.0;
     state_.emergency_stop = estop_ || (have_any_sensor && stale);
-    if (!have_any_sensor) {
-      // Do not latch the core EmergencyStop merely because the first delayed
-      // sensor packet has not arrived.  This is startup qualification, not a
-      // watchdog fault; the actuator boot hold remains bounded separately.
-      applyMotorCommand(MotorCommand{});
-    } else if (!stale) {
-      ControlCommand command = command_;
-      // Do not let an external ENABLE request arm balance before the
-      // MPU6500 attitude estimator has acquired its stationary seed.  During
-      // this qualification interval the bounded simulator startup hold may
-      // keep the CAD-natural ENABLE reference from rolling, but the control core stays
-      // Disabled.  This mirrors the real embedded boot contract and prevents
-      // an unobservable zero-pitch estimate from becoming a torque decision.
-      command.request_enable = enable_request_ && imu_seeded_;
-      command.request_disable = estop_ || disable_request_;
-      if (stationary_stop_request_) {
-        controller_.requestStationaryStop(
-            state_.wheel.position_m, state_.floor_contact);
-        stationary_stop_request_ = false;
-      }
-      const MotorCommand motors = controller_.update(state_, command);
-      // Wheel actuation authority travels ONLY through MotorCommand from
-      // here on - see docs/MOTOR_HAL_PLAN.md section 3, leak 1. A real
-      // BL4820M12 has no register for "ground acceleration"; the only thing
-      // that reaches it is a Moving Speed target, so that is the only thing
-      // applyMotorCommand may read for wheel intent.
-      applyMotorCommand(power_off_free_ ? MotorCommand{} : motors);
-      if (power_off_free_) {
-        std::fill(data_->ctrl, data_->ctrl + model_->nu, 0.0);
-      }
-      const auto controllerBasePose = [&]() {
-        JointArray pose = controller_.lastOutput().position_rad;
-        const auto& correction = controller_.wholeBodyStanceCorrection();
-        for (const auto joint : {JointId::LeftHip, JointId::LeftKnee,
-                                 JointId::RightHip, JointId::RightKnee}) {
-          pose[static_cast<std::size_t>(joint)] -=
-              correction[static_cast<std::size_t>(joint)];
-        }
-        return pose;
-      };
-      // A fresh POSE overrides an in-flight HEIGHT transaction. Without
-      // clearing the level here, the old height request would restart as soon
-      // as the pose interpolation finished.
-      if (command_.request_pose_change && controller_.poseMotionActive()) {
-        command_.request_height_change = false;
-        height_request_started_ = false;
-      }
-      // STAND_UP is an edge-triggered recovery request.  If it was sent while
-      // the robot was already balancing, do not leave a stale level latched:
-      // a later fall must require a fresh operator command.
-      if (command_.request_stand_up &&
-          controller_.mode() != robot_control::ControlMode::StandingUp &&
-          !controller_.standingUp()) {
-        command_.request_stand_up = false;
-      }
-      if (command_.request_height_change &&
-          controller_.heightMotionRejected()) {
-        std::cout << "ERROR|height_path_rejected="
-                  << command_.target_body_height_m << std::endl;
-        // The IPC request is level-triggered, but its stored target is the
-        // requested endpoint.  Preserve the controller's last safe actuator
-        // pose when the adaptive transaction rejects that endpoint; otherwise
-        // clearing HEIGHT on the next tick replays an unfinished pose jump.
-        command_.target_joint_position_rad = controllerBasePose();
-        // Make the rejected transaction retryable from the measured safe pose.
-        // Keeping the requested endpoint here makes updateDanceCommand() see
-        // no target change and strands the skill at a mid-height pose.
-        command_.target_body_height_m = measuredBodyHeight();
-        height_request_rejected_ = dance_active_;
-        command_.request_height_change = false;
-        height_request_started_ = false;
-      }
-      // POSE is a transaction at this IPC boundary. Retire it after the
-      // planner reaches the endpoint so the GUI need not send POSE_DONE.
-      if (command_.request_pose_change && !controller_.poseMotionActive()) {
-        command_.request_pose_change = false;
-      }
-      if (command_.request_height_change && controller_.heightMotionActive()) {
-        height_request_started_ = true;
-      } else if (command_.request_height_change &&
-                 controller_.heightMotionSettled() &&
-                 !controller_.heightMotionActive() &&
-                 (height_request_started_ ||
-                  (controller_.heightMotionSettled() &&
-                   std::abs(command_.target_body_height_m -
-                            controller_.heightMotionTargetM()) <= 1.0e-4F))) {
-        // Latch the pose the core actually reached, so the posture hold that
-        // follows the transaction is the robot's real pose rather than a
-        // pre-solved endpoint it may never have arrived at.
-        command_.target_joint_position_rad = controllerBasePose();
-        command_.request_height_change = false;
-        height_request_started_ = false;
-      }
-      seen_ballistic_ = seen_ballistic_ || controller_.flightEstimate().ballistic;
-      seen_touchdown_ = seen_touchdown_ || controller_.flightEstimate().touchdown_candidate;
-    } else {
-      ControlCommand command = command_;
-      command.request_enable = false;
-      command.request_disable = true;
-      const MotorCommand motors = controller_.update(state_, command);
-      applyMotorCommand(motors);
-    }
+    const bool sensors_ok = have_any_sensor && !stale && !estop_;
+    const MotorCommand motors = updateV3Controller(sensors_ok);
+    applyMotorCommand(power_off_free_ ? MotorCommand{} : motors);
+    if (power_off_free_) std::fill(data_->ctrl, data_->ctrl + model_->nu, 0.0);
     if (sim_time_s_ + 1.0e-12 >= next_telemetry_s_) {
       next_telemetry_s_ += 0.02;
       emitTelemetry();
@@ -1679,7 +1088,7 @@ class NativeRunner {
       disable_hold_until_s_ = sim_time_s_;
     }
     else if (op == "DISABLE") {
-      stopDance();
+      clearMotionCommand();
       power_off_free_ = false;
       disable_request_ = true;
       enable_request_ = false;
@@ -1687,7 +1096,6 @@ class NativeRunner {
       disable_hold_until_s_ = boot_hold_until_s_;
       command_.request_pose_change = false;
       command_.request_height_change = false;
-      height_request_started_ = false;
       command_.request_stand_up = false;
       command_.target_forward_velocity_m_s = 0.0F;
       command_.target_yaw_rate_rad_s = 0.0F;
@@ -1695,7 +1103,7 @@ class NativeRunner {
     else if (op == "POWER_OFF") {
       // Simulation-only fixture: emulate cutting motor power while leaving
       // MuJoCo gravity/contact dynamics running so a held squat can collapse.
-      stopDance();
+      clearMotionCommand();
       power_off_free_ = true;
       disable_request_ = true;
       enable_request_ = false;
@@ -1707,7 +1115,7 @@ class NativeRunner {
       std::cout << "POWER_OFF_ACCEPTED|free_dynamics=1" << std::endl;
     }
     else if (op == "ESTOP") {
-      stopDance();
+      clearMotionCommand();
       estop_ = true;
       enable_request_ = false;
       boot_hold_until_s_ = sim_time_s_;
@@ -1717,7 +1125,7 @@ class NativeRunner {
     else if (op == "RESET") {
       resetSimulation();
     } else if (op == "DRIVE") {
-      stopDance();
+      clearMotionCommand();
       float forward = 0.0F;
       float yaw = 0.0F;
       stream >> forward >> yaw;
@@ -1733,10 +1141,7 @@ class NativeRunner {
           command_.request_height_change;
       const bool drive_ready =
           continuing_motion ||
-          controller_.mode() == robot_control::ControlMode::Drive ||
-          controller_.mode() == robot_control::ControlMode::PoseChange ||
-          (controller_.mode() == robot_control::ControlMode::Balance &&
-           controller_.stationCaptureReady());
+          v3_controller_.state() == V3Controller::State::Balancing;
       if (motion_requested && !drive_ready) {
         command_.target_forward_velocity_m_s = 0.0F;
         command_.target_yaw_rate_rad_s = 0.0F;
@@ -1747,18 +1152,14 @@ class NativeRunner {
       }
     }
     else if (op == "STOP") {
-      stopDance();
+      clearMotionCommand();
       command_.target_forward_velocity_m_s = 0.0F;
       command_.target_yaw_rate_rad_s = 0.0F;
-      stationary_stop_request_ = true;
     }
     else if (op == "POSE") {
-      stopDance();
-      stream >> command_.target_joint_position_rad[0] >> command_.target_joint_position_rad[1]
-             >> command_.target_joint_position_rad[3] >> command_.target_joint_position_rad[4];
-      command_.request_pose_change = true;
+      std::cout << "ERROR|pose_unsupported_by_v3=1" << std::endl;
     } else if (op == "HEIGHT") {
-      stopDance();
+      clearMotionCommand();
       float height_m = 0.0F;
       stream >> height_m;
       if (!setHeightTarget(height_m)) {
@@ -1766,47 +1167,22 @@ class NativeRunner {
       } else {
         std::cout << "HEIGHT_ACCEPTED|target=" << height_m << std::endl;
       }
-    } else if (op == "POSE_DONE") command_.request_pose_change = false;
-    else if (op == "STAND_UP") {
-      stopDance();
-      command_.request_stand_up = true;
+    } else if (op == "STAND_UP") {
+      std::cout << "ERROR|stand_up_not_implemented=1" << std::endl;
     } else if (op == "DANCE") {
-      std::string action;
-      stream >> action;
-      if (action == "START") {
-        float direction = 1.0F;
-        stream >> direction;
-        startDance(direction);
-        std::cout << "DANCE_ACCEPTED|active=1|direction="
-                  << dance_direction_ << std::endl;
-      } else if (action == "STOP") {
-        stopDance();
-        std::cout << "DANCE_ACCEPTED|active=0" << std::endl;
-      }
+      std::cout << "ERROR|dance_unsupported_by_v3=1" << std::endl;
     }
     else if (op == "QUIT") quit_ = true;
   }
 
   bool setHeightTarget(float body_height_m) {
     if (!std::isfinite(body_height_m)) return false;
-    // Command parsing can happen before the first delayed encoder packet. Use
-    // the documented natural ENABLE branch for validation; the core re-solves
-    // from the measured seed when the height transaction starts.
-    const float hip_seed = robot_control::geometry::neutral_hip_rad;
-    const float knee_seed = robot_control::geometry::neutral_knee_rad;
-    const auto pose = WholeBodyModel::solveSymmetricComHeight(
-        body_height_m, 0.0F, hip_seed, knee_seed,
-        robot_control::geometry::native_hip_min_rad,
-        robot_control::geometry::native_hip_max_rad,
-        robot_control::geometry::native_knee_min_rad,
-        robot_control::geometry::native_knee_max_rad);
-    if (!pose.feasible) return false;
-    // The solve above is only a feasibility gate. Do not preload its endpoint;
-    // the core owns the leg target for the whole transaction and latches the
-    // pose actually reached on completion.
+    const float target_axle_height = body_height_m -
+        robot_control::geometry::wheel_radius_m;
+    if (target_axle_height < V3LegHeight::minHeight() ||
+        target_axle_height > V3LegHeight::maxHeight()) return false;
     command_.target_body_height_m = body_height_m;
     command_.request_height_change = true;
-    height_request_started_ = false;
     return true;
   }
 
@@ -1821,13 +1197,19 @@ class NativeRunner {
   }
 
   void emitTelemetry() {
-    const auto& flight = controller_.flightEstimate();
-    const auto& torque = controller_.torqueResidualEstimate();
-    const auto& lqr = controller_.lqrDebugState();
-    const auto& output = controller_.lastOutput();
-    const auto& whole_body = controller_.wholeBodyState();
-    const auto& stance = controller_.wholeBodyStanceState();
-    std::cout << "STATE|t=" << sim_time_s_ << "|mode=" << robot_control::toString(controller_.mode())
+    const char* mode = "Disabled";
+    switch (v3_controller_.state()) {
+      case V3Controller::State::Idle: mode = "Disabled"; break;
+      case V3Controller::State::Locking: mode = "Locking"; break;
+      case V3Controller::State::Ready: mode = "Ready"; break;
+      case V3Controller::State::Balancing: mode = "Balance"; break;
+      case V3Controller::State::Fault: mode = "EmergencyStop"; break;
+    }
+    const bool fresh = last_imu_stamp_s_ > 0.0 && last_encoder_stamp_s_ > 0.0 &&
+        sim_time_s_ - last_imu_stamp_s_ <= 0.15 &&
+        sim_time_s_ - last_encoder_stamp_s_ <= 0.15;
+    std::cout << "STATE|t=" << sim_time_s_ << "|mode=" << mode
+              << "|controller=v3.1|v3_state=" << tap_fw::v3::toString(v3_controller_.state())
               << "|power_off_free=" << power_off_free_
               << "|pitch=" << state_.imu.pitch_rad << "|pitch_rate=" << state_.imu.pitch_rate_rad_s
               << "|pitch_rate_corrected=" << state_.imu.pitch_rate_bias_corrected_rad_s
@@ -1837,21 +1219,6 @@ class NativeRunner {
               << "|imu_tilt_valid=" << imu_tilt_valid_
               << "|raw_accel_x=" << raw_accel_[0]
               << "|raw_accel_z=" << raw_accel_[2]
-              << "|body_accel_x=" << body_accel_x_m_s2_
-              << "|accel_tilt_x=" << accel_tilt_x_m_s2_
-              << "|body_accel_comp_valid=" << body_accel_compensation_valid_
-              << "|accel_trust=" << accel_trust_
-              << "|raw_gyro_y=" << raw_gyro_[1]
-              << "|support_contact=" << flight.support_contact
-              << "|support_unloading=" << flight.support_unloading
-              << "|support_loss_s=" << flight.support_loss_elapsed_s
-              << "|flight_time_s=" << flight.flight_time_s
-              << "|free_fall_confidence=" << flight.free_fall_confidence
-              << "|collision_confidence=" << flight.collision_confidence
-              << "|torque_corroboration_used=" << flight.torque_corroboration_used
-              << "|landing_phase=" << landingPhaseName(controller_.landingPhase())
-              << "|landing_suspend_wheel=" << controller_.landingSuspendsWheelBalance()
-              << "|landing_drive_scale=" << controller_.landingDriveVelocityScale()
               << "|wheel_position=" << state_.wheel.position_m
               << "|wheel_velocity=" << state_.wheel.velocity_m_s
               << "|joint_lh=" << state_.joints.position_rad[0]
@@ -1868,37 +1235,19 @@ class NativeRunner {
               << "|joint_v_lk=" << state_.joints.velocity_rad_s[1]
               << "|joint_v_rh=" << state_.joints.velocity_rad_s[3]
               << "|joint_v_rk=" << state_.joints.velocity_rad_s[4]
-              << "|lqr_velocity=" << lqr.commanded_ground_velocity_m_s
-              << "|lqr_velocity_reference=" << lqr.lqr_velocity_reference_m_s
-              << "|station_velocity_target=" << lqr.station_velocity_target_m_s
-              << "|lqr_anchor=" << lqr.target_ground_position_m
-              << "|station_hold=" << controller_.stationHoldActive()
-              << "|station_capture_distance=" << controller_.stationCaptureDistanceM()
-              << "|station_capture_ready=" << controller_.stationCaptureReady()
-              << "|station_dwell=" << controller_.stationDwellS()
-              << "|station_eligible=" << controller_.stationEligible()
-              << "|lqr_accel=" << lqr.optimal_command_m_s
-              << "|lqr_adaptive_gain=" << lqr.adaptive_gain_scale
-              << "|lqr_station_gain_blend=" << lqr.station_gain_blend
-              << "|lqr_capture_distance=" << lqr.capture_distance_m
-              << "|lqr_pitch_ref=" << lqr.lqr_pitch_ref_rad
-              << "|lqr_pitch_state=" << lqr.lqr_pitch_state_rad
-              << "|lqr_effective_length=" << lqr.effective_pendulum_length_m
-              << "|wb_com_x=" << whole_body.com_offset_x_m
-              << "|wb_com_line_angle=" << whole_body.com_line_angle_rad
-              << "|wb_com_error=" << stance.com_error_m
-              << "|wb_com_target_pitch=" << stance.com_target_pitch_rad
-              << "|wb_vmc_pitch_torque=" << stance.vmc_pitch_torque_nm
-              << "|wb_vmc_hip_torque=" << stance.vmc_torque_nm[0]
-              << "|wb_vmc_knee_torque=" << stance.vmc_torque_nm[1]
-              << "|leg_ff_lh=" << output.feedforward_nm[0]
-              << "|leg_ff_lk=" << output.feedforward_nm[1]
-              << "|leg_ff_rh=" << output.feedforward_nm[3]
-              << "|leg_ff_rk=" << output.feedforward_nm[4]
-              << "|target_lh=" << output.position_rad[0]
-              << "|target_lk=" << output.position_rad[1]
-              << "|target_rh=" << output.position_rad[3]
-              << "|target_rk=" << output.position_rad[4]
+              << "|v3_balance_ref=" << v3_controller_.balanceRef()
+              << "|lqr_velocity=" << v3_controller_.groundVelocity()
+              << "|lqr_anchor=" << v3_controller_.groundPosition()
+              << "|station_velocity_target=0|station_hold="
+              << (v3_controller_.state() == V3Controller::State::Balancing)
+              << "|station_capture_ready="
+              << (v3_controller_.state() == V3Controller::State::Balancing)
+              << "|station_eligible="
+              << (v3_controller_.state() == V3Controller::State::Balancing)
+              << "|target_lh=" << v3_motor_command_.position_rad[0]
+              << "|target_lk=" << v3_motor_command_.position_rad[1]
+              << "|target_rh=" << v3_motor_command_.position_rad[3]
+              << "|target_rk=" << v3_motor_command_.position_rad[4]
               << "|leg_cmd_lh=" << leg_command_[0]
               << "|leg_cmd_lk=" << leg_command_[1]
               << "|leg_cmd_rh=" << leg_command_[2]
@@ -1907,49 +1256,27 @@ class NativeRunner {
               << "|leg_applied_lk=" << applied_leg_torque_[1]
               << "|leg_applied_rh=" << applied_leg_torque_[2]
               << "|leg_applied_rk=" << applied_leg_torque_[3]
-              << "|wb_axle_dz=" << whole_body.axle_height_difference_m
-              << "|wb_stance_active=" << stance.active
-              << "|wb_trim=" << stance.symmetric_trim_norm_rad
-              << "|wb_diff_trim=" << stance.differential_trim_norm_rad
-              << "|wb_speed_com=" << stance.speed_loop_com_m
-              << "|wb_speed_hip=" << stance.speed_loop_hip_rad
-              << "|wb_speed_lead=" << stance.speed_loop_lead_s
-              << "|wb_speed_release=" << stance.speed_loop_release_scale
-
-              << "|lqr_vel_err=" << lqr.leg_velocity_error_m_s
-              << "|leg_cmd_rate_limited=" << controller_.legCommandRateLimitedTicks()
-              << "|imu_fresh=" << (last_imu_stamp_s_ > 0.0 && sim_time_s_ - last_imu_stamp_s_ <= 0.15)
-              << "|enc_fresh=" << (last_encoder_stamp_s_ > 0.0 && sim_time_s_ - last_encoder_stamp_s_ <= 0.15)
-              << "|flight=" << robot_control::toString(flight.phase)
-              << "|airborne=" << flight.airborne << "|settling=" << flight.support_settling
-              << "|touchdown=" << flight.touchdown_candidate
-              << "|seen_ballistic=" << seen_ballistic_ << "|seen_touchdown=" << seen_touchdown_
+              << "|imu_fresh=" << fresh << "|enc_fresh=" << fresh
               << "|height_request=" << command_.request_height_change
               << "|height_target=" << command_.target_body_height_m
               << "|body_height=" << measuredBodyHeight()
-              << "|height_motion_start=" << controller_.heightMotionStartM()
-              << "|height_motion_target=" << controller_.heightMotionTargetM()
-              << "|height_motion=" << controller_.heightMotionActive()
-              << "|height_settling=" << controller_.heightMotionSettling()
-              << "|height_settled=" << controller_.heightMotionSettled()
-              << "|height_pending=" << controller_.heightMotionPending()
-              << "|height_pending_elapsed=" << controller_.heightPendingElapsedS()
-              << "|height_elapsed=" << controller_.heightMotionElapsedS()
-              << "|height_duration=" << controller_.heightMotionDurationS()
-              << "|height_rejected=" << controller_.heightMotionRejected()
-              << "|skill=" << (dance_active_ ? "dance" : "none")
-              << "|dance_phase=" << dancePhaseS()
-              << "|dance_height_target=" << danceHeightTargetM()
-              << "|dance_yaw_rate=" << command_.target_yaw_rate_rad_s
-              << "|cmd_lh=" << output.position_rad[0]
-              << "|cmd_lk=" << output.position_rad[1]
-              << "|cmd_lw=" << output.velocity_rad_s[2]
-              << "|cmd_rh=" << output.position_rad[3]
-              << "|cmd_rk=" << output.position_rad[4]
-              << "|cmd_rw=" << output.velocity_rad_s[5]
-              << "|torque_valid=" << torque.valid << "|fz_l=" << torque.left_normal_force_n
-              << "|fz_r=" << torque.right_normal_force_n << "|ground_truth_to_controller=0"
-              << "|fall_pitch_limit=" << controller_.fallPitchThresholdRad()
+              << "|height_motion_start=" << measuredBodyHeight()
+              << "|height_motion_target=" << v3_controller_.heightTarget() +
+                  robot_control::geometry::wheel_radius_m
+              << "|height_motion=" << v3_output_.legs_moving
+              << "|height_settling=0|height_settled=" << !v3_output_.legs_moving
+              << "|height_pending=0|height_pending_elapsed=0|height_elapsed=0"
+              << "|height_duration=0|height_rejected=0|skill=none"
+              << "|yaw_rate_command=" << command_.target_yaw_rate_rad_s
+              << "|cmd_lh=" << v3_motor_command_.position_rad[0]
+              << "|cmd_lk=" << v3_motor_command_.position_rad[1]
+              << "|cmd_lw=" << v3_motor_command_.velocity_rad_s[2]
+              << "|cmd_rh=" << v3_motor_command_.position_rad[3]
+              << "|cmd_rk=" << v3_motor_command_.position_rad[4]
+              << "|cmd_rw=" << v3_motor_command_.velocity_rad_s[5]
+              << "|v3_fault=" << (v3_controller_.lastFault() ? v3_controller_.lastFault() : "")
+              << "|ground_truth_to_controller=0"
+              << "|fall_pitch_limit=" << v3_config_.fall_pitch_rad
               << "|loop_hz=" << options_.rate_hz << std::endl;
     // VIEW is explicitly debug-only.  The GUI may render it, but this line is
     // never parsed into RobotState or any controller decision.
@@ -1970,7 +1297,15 @@ class NativeRunner {
   Options options_;
   mjModel* model_ = nullptr;
   mjData* data_ = nullptr;
-  EmbeddedController controller_;
+  V3Controller::Config v3_config_{};
+  V3Controller v3_controller_{};
+  V3Controller::Output v3_output_{};
+  MotorCommand v3_motor_command_{};
+  float v3_hang_hip_rad_ = 0.0F;
+  bool v3_start_sent_ = false;
+  bool v3_height_started_ = false;
+  bool v3_start_rejected_reported_ = false;
+  std::uint64_t v3_lock_start_us_ = 0U;
   ImuStateEstimator imu_estimator_;
   RobotState state_{};
   ControlCommand command_{};
@@ -2031,31 +1366,12 @@ class NativeRunner {
   bool estop_ = false;
   bool quit_ = false;
   bool stdin_closed_ = false;
-  bool height_request_started_ = false;
-  bool stationary_stop_request_ = false;
-  bool dance_active_ = false;
-  double dance_started_s_ = 0.0;
-  float dance_direction_ = 1.0F;
-  float dance_height_target_m_ = kDanceHighHeightM;
-  unsigned dance_low_height_cycles_ = 0U;
-  float dance_yaw_budget_rad_ = 0.0F;
-  float dance_yaw_command_rad_s_ = 0.0F;
-  bool dance_height_request_active_ = false;
-  bool height_request_rejected_ = false;
-  double dance_last_height_done_s_ = 0.0;
   static constexpr double boot_hold_duration_s_ = 1.0;
   static constexpr double disable_hold_duration_s_ = 1.0;
   double boot_hold_until_s_ = boot_hold_duration_s_;
   double disable_hold_until_s_ = 0.0;
-  bool seen_ballistic_ = false;
-  bool seen_touchdown_ = false;
   bool imu_seeded_ = false;
   bool imu_tilt_valid_ = false;
-  bool landing_scenario_started_ = false;
-  static constexpr double landing_drop_delay_s_ = 0.20;
-  static constexpr double landing_height_m_ = 0.30;
-  static constexpr double landing_command_speed_m_s_ = 1.5;
-  double landing_drop_time_s_ = landing_drop_delay_s_;
   std::string input_buffer_;
 };
 

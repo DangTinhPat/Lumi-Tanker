@@ -5,6 +5,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 add_library(tap_control_core STATIC
+  src/v3/LegHeight.cpp
+  src/v3/V3Controller.cpp
   src/EmbeddedController.cpp
   src/ImuStateEstimator.cpp
   src/FlightObserver.cpp
@@ -54,5 +56,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR
     add_executable(lqr_tests ../tests/lqr_tests.cpp)
     target_link_libraries(lqr_tests PRIVATE tap_control_core)
     add_test(NAME lqr_tests COMMAND lqr_tests)
+    add_executable(v3_controller_tests ../tests/v3_controller_tests.cpp)
+    target_link_libraries(v3_controller_tests PRIVATE tap_control_core)
+    target_compile_options(v3_controller_tests PRIVATE -UNDEBUG)
+    add_test(NAME v3_controller_tests COMMAND v3_controller_tests)
   endif()
 endif()
