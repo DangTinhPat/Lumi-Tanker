@@ -27,6 +27,20 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
 }
 
 V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
+  // v3.2: pre-solve the LQR gain table over the height range, one point per
+  // tick (idempotent once ready: near-zero cost after). Each point costs
+  // ~50 ms on the ESP32-S3's single-precision FPU (LqrBalancer.hpp), which
+  // blocks the whole single-threaded firmware loop() for that long - fine at
+  // Idle/boot (nothing time-critical yet), but doing this during Locking
+  // starves the wheel UART feedback past its 20 ms freshness window and
+  // faults "sensor feedback lost while locking" almost immediately (found on
+  // real hardware 2026-09-29: PID never called this, so it never happened
+  // there). Run it unconditionally from the very first tick instead, so the
+  // ~12-point/~0.6 s table is done well before the operator finishes
+  // arranging the legs and pressing START.
+  if (config_.algo == Algo::Lqr) {
+    (void)lqr_.buildGainTableStep(config_.lqr_gain_table_points);
+  }
   // Axle motion of a rolling wheel on a rigid (locked) leg: R*(wheel + pitch).
   const float mean_rate = 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
   const float mean_pos = 0.5F * (in.wheel_pos_rad[0] + in.wheel_pos_rad[1]);
@@ -149,41 +163,29 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
       runaway_since_us_ = 0U;
     } else if (runaway_since_us_ == 0U) {
       runaway_since_us_ = in.now_us;
+      runaway_start_pitch_ = in.pitch_rad;
     } else if (in.now_us - runaway_since_us_ > config_.runaway_us) {
-      // PID: wheels racing without the robot falling means it is held or
-      // carried (wheels in the air): re-zero instead of stopping. A real
-      // fall is caught by the pitch limit.
-      if (config_.algo != Algo::Pid) return fault("wheel runaway", out);
-      heldRezero(in);
-      out.wheel_cmd_rad_s = {0.0F, 0.0F};
-      out.state = state_;
-      return out;
+      // Wheels racing without the robot falling means it is held or carried
+      // (wheels in the air): re-zero instead of stopping, for both
+      // algorithms. Gated on net pitch travel since the wheels started
+      // racing (not just this instant): an active, unrecovered fall also
+      // races the wheels, and zeroing the command mid-fall only guarantees
+      // it completes - that case is left to run its course and hit the
+      // pitch-limit fault above cleanly instead. 0.15 rad ~ a quarter of
+      // fall_pitch_rad: room for a normal catch transient's wobble, not for
+      // a body that kept moving away from where the wheels started racing.
+      if (std::abs(in.pitch_rad - runaway_start_pitch_) < 0.15F) {
+        heldRezero(in);
+        out.wheel_cmd_rad_s = {0.0F, 0.0F};
+        out.state = state_;
+        return out;
+      }
     }
-    if (config_.algo == Algo::Pid) {
-      updateHeight(in, cmd);
-      out.wheel_cmd_rad_s = pidUpdate(in, cmd);
-      out.leg_hip_offset_rad = pose_.hip_offset_rad;
-      out.leg_knee_offset_rad = pose_.knee_offset_rad;
-      out.legs_moving = knee_cmd_rad_ != knee_target_rad_;
-      out.state = state_;
-      return out;
-    }
-    robot_control::RobotState st{};
-    st.dt_s = in.dt_s;
-    st.imu.sample_dt_s = in.dt_s;
-    st.imu.pitch_rad = in.pitch_rad;
-    st.imu.pitch_rate_rad_s = in.pitch_rate_rad_s;
-    st.imu.yaw_rate_rad_s = in.yaw_rate_rad_s;
-    st.wheel.velocity_m_s = ground_v_;
-    st.wheel.position_m = ground_x_;
-    st.floor_contact = true;
-    robot_control::ControlCommand control{};
-    control.target_forward_velocity_m_s = cmd.forward_m_s;
-    control.target_yaw_rate_rad_s = cmd.yaw_rad_s;
-    const auto balance = lqr_.update(st, control, true, 0.0F, false);
-    if (balance.fallen) return fault("fallen (balancer)", out);
-    out.wheel_cmd_rad_s = {balance.left_wheel_velocity_rad_s,
-                           balance.right_wheel_velocity_rad_s};
+    updateHeight(in, cmd);
+    out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
+    out.leg_hip_offset_rad = pose_.hip_offset_rad;
+    out.leg_knee_offset_rad = pose_.knee_offset_rad;
+    out.legs_moving = knee_cmd_rad_ != knee_target_rad_;
   }
   out.state = state_;
   return out;
@@ -193,8 +195,10 @@ void V3Controller::engageBalance(const Input& in, float seed) {
   state_ = State::Balancing;
   state_since_us_ = in.now_us;
   runaway_since_us_ = 0U;
-  lqr_.reset(ground_x_, true);
+  lqr_.reset(ground_x_, true);  // anchors LQR position to ground_x_ too
   lqr_.setBalanceTrim(seed);
+  lqr_x_target_m_ = ground_x_;
+  lqr_lead_filt_ = 0.0F;
   // theta_b is the balance angle at the power-up height; the height
   // feed-forward adds the model change on top (v3.1).
   pid_seed_ = pid_theta_b_ = seed - ffPitch();
@@ -218,6 +222,13 @@ void V3Controller::heldRezero(const Input& in) {
   pid_x_ = pid_x_target_ = 0.0F;
   pid_seed_ = pid_theta_b_ = in.pitch_rad - ffPitch();
   pid_ref_ = in.pitch_rad;
+  pid_driving_ = false;
+  // LQR: same job - zero the commanded speed, re-anchor position here, and
+  // re-seed the trim so the balance angle tracks the body while held.
+  lqr_.reset(ground_x_, true);
+  lqr_.setBalanceTrim(in.pitch_rad - ffPitch());
+  lqr_x_target_m_ = ground_x_;
+  lqr_lead_filt_ = 0.0F;
   held_quiet_ = true;
   held_outer_off_ = true;
   held_quiet_since_us_ = in.now_us;
@@ -350,6 +361,171 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
 }
 
+std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd) {
+  const Pid& p = config_.pid;  // shared held/lifted thresholds and deadband comp
+  const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
+  const float vmax = config_.lqr.max_ground_velocity_m_s;
+  // v3.2: the pendulum length tracks the current leg height every tick; once
+  // the gain table is built (Locking) this is a cheap interpolation.
+  lqr_.setComHeight(pose_.com_above_axle_m);
+  if (held_quiet_) {
+    const float wheels = radius * 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
+    const bool tilted = std::abs(in.pitch_rad - (lqr_.balanceTrim() + ffPitch())) > 0.03F;
+    const bool stopped = std::abs(wheels) < 0.05F &&
+        in.now_us - held_quiet_since_us_ >= 200'000U;
+    if (!tilted && !stopped) {
+      lqr_.reset(ground_x_, true);
+      lqr_x_target_m_ = ground_x_;
+      held_window_start_us_ = 0U;
+      return {0.0F, 0.0F};
+    }
+    held_quiet_ = false;
+  }
+  const float target_v = std::clamp(cmd.forward_m_s, -vmax, vmax);
+  // Driving moves the position anchor; on release, freeze it where it
+  // stopped - same job as pid_x_target_, but LqrBalancer takes an absolute
+  // anchor (reanchorPosition), not a relative one.
+  if (std::abs(target_v) > 1.0e-3F) {
+    lqr_x_target_m_ += target_v * in.dt_s;
+    pid_driving_ = true;
+  } else if (pid_driving_) {
+    lqr_x_target_m_ = ground_x_;
+    pid_driving_ = false;
+  }
+  // Horizontal specific force (see pidUpdate): tells a free robot from a held
+  // one, shared by both algorithms' held/lifted exit condition.
+  const float a_h = in.accel_x_m_s2 * std::cos(in.pitch_rad) +
+      in.accel_z_m_s2 * std::sin(in.pitch_rad);
+  body_accel_f_ += std::clamp(2.0F * 3.14159265F * 5.0F * in.dt_s, 0.0F, 1.0F) *
+      (a_h - body_accel_f_);
+  held_free_ticks_ = std::abs(body_accel_f_) > 0.15F ? held_free_ticks_ + 1 : 0;
+  if (held_outer_off_ && (std::abs(in.pitch_rate_rad_s) > 0.15F || held_free_ticks_ >= 25)) {
+    held_outer_off_ = false;
+  }
+  if (held_outer_off_) {
+    // Held (stand, hands): the balance angle tracks the body and the anchor
+    // stays here, so nothing is spent balancing a body that isn't falling.
+    lqr_.setBalanceTrim(in.pitch_rad - ffPitch());
+    lqr_x_target_m_ = ground_x_;
+  } else if (!pid_driving_ &&
+             std::abs(in.pitch_rad - (lqr_.balanceTrim() + ffPitch())) < p.corr_max_rad) {
+    // Slow integral of the ground-position error into the balance trim -
+    // same job as pidUpdate's kix on theta_b, and for the same reason: a
+    // station-hold LQR's own velocity-error trim can settle at zero with a
+    // nonzero position offset (a small steady pitch lean against a cheap
+    // position cost holds it there forever). Position error is the signal
+    // that actually needs to reach zero, so integrate from that instead.
+    // Frozen outside corr_max_rad of the current trim (mirrors pidUpdate's
+    // "!(|u| < corr_max_rad)" freeze): a large seed error means the LQR's
+    // own regulator is still catching the initial transient, and winding
+    // the trim up during that fight overshot and fell (physics-sim T15).
+    const float ex = ground_x_ - lqr_x_target_m_;
+    lqr_.setBalanceTrim(lqr_.balanceTrim() - 0.5F * p.kix * ex * in.dt_s);
+  }
+  lqr_.reanchorPosition(lqr_x_target_m_);
+
+  // LqrBalancer::Config::wheel_velocity_reference_from_measured is true, so
+  // the raw (noisy) encoder-derived ground_v_ feeds the state vector's
+  // velocity term directly; with velocity_cost_scale=3000 (very stiff) that
+  // noise gets amplified into ground_accel every tick, and the unfiltered
+  // wheel-lag lead above then injects it straight into the sent wheel
+  // command - a visible "vồ vập" (jerky) chatter even while pitch/position
+  // stay flat (found on real hardware 2026-09-29). pidUpdate already solves
+  // this for the PID path with a 5 Hz low-pass (pid_v_filt_); reuse the same
+  // filter/state here instead of adding a second one.
+  const float v_alpha = std::clamp(2.0F * 3.14159265F * p.speed_lpf_hz * in.dt_s, 0.0F, 1.0F);
+  pid_v_filt_ += v_alpha * (ground_v_ - pid_v_filt_);
+
+  robot_control::RobotState state{};
+  state.dt_s = in.dt_s;
+  state.floor_contact = true;
+  state.imu.pitch_rad = in.pitch_rad;
+  state.imu.pitch_rate_rad_s = in.pitch_rate_rad_s;
+  state.wheel.position_m = ground_x_;
+  state.wheel.velocity_m_s = pid_v_filt_;
+
+  robot_control::ControlCommand command{};
+  command.target_forward_velocity_m_s = held_outer_off_ ? 0.0F : target_v;
+  command.target_yaw_rate_rad_s = cmd.yaw_rad_s;
+
+  // integrate=false while held: LqrBalancer decays the commanded speed to
+  // zero on its own (~0.1 s) and freezes the balance-trim adaptation -
+  // matching the PID path's leak-to-zero and frozen theta_b while held.
+  const bool integrate = !held_outer_off_;
+  const auto lqr_out = lqr_.update(state, command, integrate, ffPitch(), true);
+  // v3.1: shares updateHeight's settled check with the PID path.
+  pid_ref_ = lqr_.debugState().lqr_pitch_ref_rad;
+
+  // Held/lifted: over a window the command changed but the body never
+  // rotated (a free pendulum would have) - same test as pidUpdate, tracking
+  // the LQR's integrated ground-speed command instead of pid_cmd_m_s_.
+  if (legs_moved_us_ != 0U && in.now_us - legs_moved_us_ < config_.height.held_suppress_us) {
+    held_window_start_us_ = 0U;
+  }
+  const float lqr_cmd = lqr_.debugState().commanded_ground_velocity_m_s;
+  held_max_rate_ = std::max(held_max_rate_, std::abs(in.pitch_rate_rad_s));
+  held_accel_sum_ += std::abs(body_accel_f_);
+  ++held_accel_n_;
+  if (held_window_start_us_ == 0U) {
+    held_window_start_us_ = in.now_us;
+    held_v0_ = lqr_cmd;
+    held_max_rate_ = 0.0F;
+    held_accel_sum_ = 0.0F;
+    held_accel_n_ = 0;
+  } else if (in.now_us - held_window_start_us_ >= p.held_window_us) {
+    const float mean_accel = held_accel_sum_ / static_cast<float>(std::max(held_accel_n_, 1));
+    const bool held = std::abs(lqr_cmd - held_v0_) > p.held_dv_m_s &&
+        held_max_rate_ < p.held_rate_rad_s && mean_accel < p.held_accel_m_s2 &&
+        !pid_driving_;
+    held_window_start_us_ = 0U;
+    if (held) {
+      heldRezero(in);
+      return {0.0F, 0.0F};
+    }
+  }
+
+  // Wheel-lag lead (see pidUpdate's own p.lead_s comment): the BL4820 wheels
+  // are a first-order speed servo lagging ~0.1-0.15 s behind the command, and
+  // the raw LQR model assumes instant ground-acceleration authority - without
+  // this the loop rings and falls at tau_s >= 0.12 (physics-sim T11 finding,
+  // same failure PID had before lead_s was added). Same trick: lead the sent
+  // speed by the LQR's own solved acceleration times lead_s - but, unlike the
+  // first cut of this, clamp the LED-AUGMENTED ground speed back to vmax
+  // before converting to wheel rad/s. LqrBalancer::update() already clamps
+  // its own commanded_ground_velocity_m_s_ to vmax, but the lead term is
+  // added on top of that afterwards and was NOT bounded again: raising
+  // max_ground_accel_m_s2 (1.4 -> 8.0, the push-recovery fix) let lead_v hit
+  // 8.0*0.12 = 0.96 m/s on its own, so total commands reached ~44 rad/s (vs
+  // the ~12 rad/s the wheels can physically track) - runaway wheel commands
+  // while pitch stayed flat, caught only by the held-window reset every
+  // ~150 ms (found on real hardware 2026-09-29, robot never actually fell,
+  // but re-zeroed every 1-2 s: exactly the "chạy trốn" pattern from the old
+  // v1/v2 LQR). PID avoids this because it clamps pid_cmd_m_s_+accel*lead_s
+  // to vmax itself (pidUpdate's `sent`); LQR now does the same.
+  //
+  // The raw per-tick ground_accel (LqrBalancer's -K*x solve) is itself noisy
+  // - it reacts to gyro pitch_rate and (even filtered) wheel-speed jitter
+  // through a state feedback with a very stiff velocity_cost_scale - and
+  // rides straight into the sent command unfiltered, which read as jerky
+  // ("vồ vập") on real hardware even after filtering the velocity state term
+  // alone (2026-09-29). A 20 Hz low-pass here rejects that per-tick chatter
+  // while staying well above genuine body dynamics (few Hz) and the lag this
+  // lead exists to compensate (tau_s ~0.08-0.15 s).
+  const float lead_alpha = std::clamp(2.0F * 3.14159265F * 20.0F * in.dt_s, 0.0F, 1.0F);
+  lqr_lead_filt_ += lead_alpha * (lqr_.debugState().optimal_command_m_s - lqr_lead_filt_);
+  const float base_ground_v = lqr_out.ground_velocity_m_s;
+  const float lead_v = lqr_lead_filt_ * p.lead_s;
+  const float sent_ground_v = std::clamp(base_ground_v + lead_v, -vmax, vmax);
+  const float lead_wheel = config_.lqr.left_wheel_sign *
+      (sent_ground_v - base_ground_v) / radius;
+  auto comp = [&](float w) {
+    if (p.deadband_comp_rad_s <= 0.0F || held_outer_off_) return w;
+    return w + p.deadband_comp_rad_s * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
+  };
+  return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel),
+          comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel)};
+}
+
 void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   const Height& h = config_.height;
   if (cmd.height_m > 0.0F) {
@@ -390,13 +566,47 @@ const char* toString(V3Controller::State state) noexcept {
 
 V3Controller::Config defaultV3Config() {
   V3Controller::Config cfg{};
+  cfg.algo = V3Controller::Algo::Lqr;  // v3.2: LQR is the balancer, not an option
   cfg.lqr = robot_control::tunedControllerConfig().lqr;
   cfg.lqr.wheel_pitch_feedback_scale = 1.0F;
-  cfg.lqr.balance_trim_gain_rad_per_m = 0.30F;
+  // v3.2: LqrBalancer's own balance_trim integrates ground-SPEED error, which
+  // can settle at zero at any station-hold position offset (a small residual
+  // pitch error, cheap against the low position_cost_scale, holds a steady
+  // nonzero position forever - measured: LQR T11, x_end crept to and stuck
+  // near +0.10 m with eq +0.10 rad even after 200 s). V3Controller runs its
+  // own POSITION-error trim integral instead (lqrUpdate, same job as the PID
+  // path's kix on theta_b), so the built-in one stays off here.
+  cfg.lqr.balance_trim_gain_rad_per_m = 0.0F;
   cfg.lqr.balance_trim_max_rad = 0.20F;
   cfg.lqr.balance_trim_pitch_gate_rad = 0.25F;
   cfg.lqr.command_velocity_tracking_margin_m_s = 0.25F;
   cfg.lqr.max_ground_velocity_m_s = 0.8F;
+  // tunedControllerConfig() derives this from a 0.13 N.m torque spec that
+  // predates v3.1's real BL4820 wheels (leftover from the old EmbeddedController
+  // config) - PID's accel_max_m_s2 = 8.0 is the value actually validated on
+  // this hardware (robustness sweep, see Pid::accel_max_m_s2's own comment),
+  // so LQR gets the same real authority instead of a ~6x weaker stale cap.
+  // Found 2026-09-29: a push the PID path recovered from made LQR fall,
+  // because 1.4 m/s^2 could not command enough wheel accel in time.
+  cfg.lqr.max_ground_accel_m_s2 = cfg.pid.accel_max_m_s2;
+  // v3.2: hold ground position from the start, like the PID path
+  // (LqrBalancer::update: position error is force-zeroed unless BOTH
+  // hold_station and position_anchor_hold are set - v3.2 always passes
+  // hold_station=true and manages the anchor itself via reanchorPosition).
+  cfg.lqr.position_anchor_hold = true;
+  // Real v3.1 CoM-above-axle range, deepest crouch to hang pose (measured
+  // 2026-09-29 via LegHeight/WholeBodyModel: 0.0664-0.1593 m), with margin so
+  // the gain table's endpoints are never clamped in normal use.
+  cfg.lqr.min_pendulum_length_m = 0.05F;
+  cfg.lqr.max_pendulum_length_m = 0.20F;
+  // Station-gain blend must stay numerically inert (v3.2 does not use the
+  // posture-capture feature): mirror every station_* cost scale onto its
+  // base scale so gain_ and station_gain_ solve to the same values.
+  cfg.lqr.station_position_cost_scale = cfg.lqr.position_cost_scale;
+  cfg.lqr.station_pitch_cost_scale = cfg.lqr.pitch_cost_scale;
+  cfg.lqr.station_velocity_cost_scale = cfg.lqr.velocity_cost_scale;
+  cfg.lqr.station_pitch_rate_cost_scale = cfg.lqr.pitch_rate_cost_scale;
+  cfg.lqr.station_input_cost_scale = cfg.lqr.input_cost_scale;
   cfg.wheel_radius_m = robot_control::geometry::wheel_radius_m;
   cfg.fall_pitch_rad = 0.60F;
   // COM height of the legs locked extended (hanging-straight pose).

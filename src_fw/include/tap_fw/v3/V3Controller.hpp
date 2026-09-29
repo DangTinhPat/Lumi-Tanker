@@ -87,7 +87,7 @@ class V3Controller {
     float tip_pitch_rad = 0.02F;
   };
 
-  // v3.1 height change while balancing (PID only).
+  // v3.1 height change while balancing (both algorithms).
   struct Height {
     float rate_m_s = 0.015F;          // hip-axle height change speed
     // Move only while the balance is settled; otherwise the target waits.
@@ -108,6 +108,11 @@ class V3Controller {
     Pid pid{};
     robot_control::LqrBalancer::Config lqr{};
     float com_height_m = 0.2145F;         // locked extended legs (CAD FK)
+    // v3.2: how many pendulum-length points to pre-solve, one per tick, once
+    // Locking starts (LqrBalancer::buildGainTableStep) so a live height
+    // change only interpolates (cheap) instead of re-solving the Riccati
+    // equation (~50 ms on the ESP32-S3's single-precision FPU).
+    unsigned lqr_gain_table_points = 12U;
     std::uint64_t lock_settle_us = 1'200'000U;  // leg ramp + settle before wheels
     float fall_pitch_rad = 0.60F;
     // Below the 0.8 m/s ground-speed cap (20 rad/s): a lifted or held robot
@@ -199,6 +204,7 @@ class V3Controller {
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
   [[nodiscard]] bool legsHeld() const noexcept { return legs_held_; }
   [[nodiscard]] const LegPose& legPose() const noexcept { return pose_; }
+  [[nodiscard]] bool lqrGainTableReady() const noexcept { return lqr_.gainTableReady(); }
   // Ground velocity/position used by the balancer (axle, rolling contact).
   [[nodiscard]] float groundVelocity() const noexcept { return ground_v_; }
   [[nodiscard]] float groundPosition() const noexcept { return ground_x_; }
@@ -211,6 +217,17 @@ class V3Controller {
   State state_ = State::Idle;
   std::uint64_t state_since_us_ = 0U;
   std::uint64_t runaway_since_us_ = 0U;
+  // Pitch when wheel speed first sustained above runaway_wheel_rad_s: a
+  // genuinely held/lifted robot's body stays near this (low net pitch
+  // travel) while the wheels race; a real, unrecovered fall has the body
+  // moving steadily further from it throughout. A peak-rate gate here was
+  // too strict (disqualified normal-catch transients, e.g. physics-sim T8)
+  // and too permissive at once (a slow monotonic drift can stay under any
+  // single-tick rate threshold); net displacement catches both correctly.
+  // Without this the guard could not tell "held" from "falling" at all and
+  // zeroed the command mid-fall on real hardware (2026-09-29), guaranteeing
+  // the fall it should have let fall_pitch_rad catch cleanly instead.
+  float runaway_start_pitch_ = 0.0F;
   const char* last_fault_ = "";
   // The legs are structure in v3: once locked they stay locked through a
   // fault; only DISABLE (command.disable) releases them.
@@ -243,6 +260,17 @@ class V3Controller {
   float pid_x_ = 0.0F;
   float pid_x_target_ = 0.0F;
   bool pid_driving_ = false;
+  // v3.2 LQR: absolute ground-position anchor (position_anchor_hold), moved
+  // by cmd.forward_m_s while driving, frozen at the current position on
+  // release - same job as pid_x_target_ but LqrBalancer takes it directly as
+  // an absolute anchor (reanchorPosition), not a relative target.
+  float lqr_x_target_m_ = 0.0F;
+  // v3.2 LQR: low-pass filtered ground_accel for the wheel-lag lead term
+  // (unfiltered, the raw instantaneous LQR solve - itself sensitive to gyro
+  // and encoder noise via the pitch_rate/velocity state terms - rode straight
+  // into the sent wheel command every tick and read as jerky/"vồ vập" on
+  // real hardware even after filtering the velocity state term alone).
+  float lqr_lead_filt_ = 0.0F;
   std::uint64_t held_window_start_us_ = 0U;
   float held_v0_ = 0.0F;
   float held_max_rate_ = 0.0F;
@@ -270,6 +298,7 @@ class V3Controller {
   void engageBalance(const Input& in, float seed);
   void heldRezero(const Input& in);
   std::array<float, 2> pidUpdate(const Input& in, const Command& cmd);
+  std::array<float, 2> lqrUpdate(const Input& in, const Command& cmd);
 };
 
 [[nodiscard]] const char* toString(V3Controller::State state) noexcept;

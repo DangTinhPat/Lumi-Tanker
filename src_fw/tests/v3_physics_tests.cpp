@@ -39,6 +39,7 @@ struct Case {
   double push_n = 0.0;       // horizontal push at 0.25 m, 10..40 s
   double bias_error = 0.0;   // gyro bias change after the estimator seeded
   bool balancing_estimator = true;
+  V3Controller::Algo algo = V3Controller::Algo::Pid;  // v3.2
   // Operator flow: balance loop engaged on the stand (body held at
   // stand_pitch, wheels in the air) for held_s, then held on the floor at the
   // release pitch for 1 s, then let go.
@@ -53,6 +54,7 @@ struct Result {
   int held_resets = 0;  // a free robot must never look held
   double max_tilt = 0.0;        // max |pitch - true balance angle| while balancing
   double max_x_height = 0.0;    // max |x| from the start of the height change
+  double max_wheel_cmd_rad_s = 0.0;  // guards runaway command windup (2026-09-29 LQR lead bug)
 };
 
 Result simulate(const Case& c) {
@@ -91,7 +93,9 @@ Result simulate(const Case& c) {
   for (int i = 0; i < 1500; ++i) feed(-g * std::sin(th), g * std::cos(th), 0.0);
   seeded = true;
 
-  V3Controller ctrl(tap_fw::v3::defaultV3Config());
+  auto cfg = tap_fw::v3::defaultV3Config();
+  cfg.algo = c.algo;
+  V3Controller ctrl(cfg);
   V3Controller::Input in{};
   V3Controller::Command cmd{};
   in.legs_ready = true;
@@ -178,6 +182,9 @@ Result simulate(const Case& c) {
     const auto out = ctrl.update(in, cmd);
     cmd.go = false;
     if (out.state == V3Controller::State::Fault) { r.fell = true; break; }
+    r.max_wheel_cmd_rad_s = std::max({r.max_wheel_cmd_rad_s,
+        std::abs(static_cast<double>(out.wheel_cmd_rad_s[0])),
+        std::abs(static_cast<double>(out.wheel_cmd_rad_s[1]))});
     queue.push_back(0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]));
     if (queue.size() > c.delay_ticks) { applied = queue.front(); queue.pop_front(); }
 
@@ -314,6 +321,7 @@ int main() {
       }
       assert(!r.fell && r.th_rms < 0.01);
       assert(r.held_resets == 0);
+      assert(r.max_wheel_cmd_rad_s < 25.0);
       ++n;
     }
     std::printf("T7 robustness: %d/%d plants stand\n", n, n);
@@ -365,6 +373,138 @@ int main() {
                 r.max_tilt, r.max_x_height, r.x_end, r.th_rms, r.held_resets);
     assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
     assert(r.held_resets == 0);
+  }
+  // v3.2 (LQR path). T11: same balance-angle/seed-error/wheel-lag grid as T2,
+  // now on algo=Lqr with position_anchor_hold - must hold position and find
+  // the balance angle exactly like the proven PID path.
+  for (double tau : {0.08, 0.12}) {
+    for (double eq : {0.10, 0.0, -0.10}) {
+      for (double err : {0.035, -0.035}) {
+        Case c;
+        c.algo = V3Controller::Algo::Lqr;
+        c.eq = eq;
+        c.seed_error = err;
+        c.tau_s = tau;
+        const auto r = simulate(c);
+        report("T11 LQR balance", c, r);
+        assert(!r.fell);
+        assert(std::abs(r.x_end) < 0.02);
+        assert(r.th_rms < 0.002);
+        assert(std::abs(r.theta_b - eq) < 0.0087);
+        assert(r.held_resets == 0);
+        assert(r.max_wheel_cmd_rad_s < 25.0);  // never a runaway command (2026-09-29 lead-clamp bug)
+      }
+    }
+  }
+  // T12 (LQR): the operator flow - engaged on the stand, wheels in the air,
+  // carried and held on the floor, let go. Must not run away while held.
+  for (double eq : {0.10, 0.0}) {
+    for (double err : {0.02, -0.02}) {
+      Case c;
+      c.algo = V3Controller::Algo::Lqr;
+      c.eq = eq;
+      c.seed_error = err;
+      c.held_s = 3.0;
+      c.tau_s = 0.12;
+      const auto r = simulate(c);
+      report("T12 LQR stand -> floor", c, r);
+      assert(!r.fell && std::abs(r.x_end) < 0.2 && r.th_rms < 0.003);
+      assert(r.max_wheel_cmd_rad_s < 25.0);
+    }
+  }
+  // T13 (LQR): height change while balancing, mirrors T10.
+  for (double model_error : {-0.5, 0.0, 0.5}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.eq = 0.03;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    c.height_low_m = 0.150;
+    c.eq_delta_scale = model_error;
+    c.duration_s = 45.0;
+    const auto r = simulate(c);
+    std::printf("T13 LQR height 188->150->188 mm model x%.1f: fell=%d max_tilt=%.4f "
+                "max|x|=%.3f x_end=%+.3f th_rms_end=%.4f held=%d\n", model_error, r.fell,
+                r.max_tilt, r.max_x_height, r.x_end, r.th_rms, r.held_resets);
+    assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
+    assert(r.held_resets == 0);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T14 (LQR): robustness sweep, mirrors T7 (a reduced grid: mass and COM
+  // height are what the pendulum-length gain table is sensitive to).
+  {
+    int n = 0;
+    for (double ms : {0.7, 1.3}) for (double ls : {0.8, 1.2})
+    for (double tau : {0.10, 0.15}) {
+      Case c;
+      c.algo = V3Controller::Algo::Lqr;
+      c.mass_scale = ms; c.l_scale = ls;
+      c.tau_s = tau; c.seed_error = 0.05; c.duration_s = 20.0;
+      const auto r = simulate(c);
+      if (r.fell || r.th_rms >= 0.01 || r.held_resets) {
+        std::printf("m%.1f l%.1f tau%.2f ", ms, ls, tau);
+        report("T14 LQR FAIL", c, r);
+      }
+      assert(!r.fell && r.th_rms < 0.01);
+      assert(r.held_resets == 0);
+      ++n;
+    }
+    std::printf("T14 LQR robustness: %d/%d plants stand\n", n, n);
+  }
+  // T15 (LQR): held 4.6 deg off the balance angle, mirrors T3.
+  for (double err : {0.08, -0.08}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.seed_error = err;
+    const auto r = simulate(c);
+    report("T15 LQR large seed error", c, r);
+    assert(!r.fell && r.max_x < 1.5);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T16 (LQR): gyro bias drifts 0.01 rad/s after release, mirrors T4.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.bias_error = 0.01;
+    const auto r = simulate(c);
+    report("T16 LQR gyro bias drift", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T17 (LQR): 1 N push for 30 s, 20 s to recover, mirrors T5.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.push_n = 1.0;
+    c.duration_s = 60.0;
+    const auto r = simulate(c);
+    report("T17 LQR push 1 N", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.05);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T18 (LQR): 0.03 rad floor slope, mirrors T6.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.slope = 0.03;
+    const auto r = simulate(c);
+    report("T18 LQR slope", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T19 (LQR): wheel deadband 1 rad/s, mirrors T9.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.eq = -0.021;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    const auto r = simulate(c);
+    report("T19 LQR wheel deadband", c, r);
+    assert(!r.fell && r.th_rms < 0.0015);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
   }
   std::puts("v3_physics_tests: all checks passed");
   return 0;
