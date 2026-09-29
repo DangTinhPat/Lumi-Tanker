@@ -4,6 +4,7 @@
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_control/WholeBodyModel.hpp"
+#include "tap_fw/v3/RockerLower.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 #include "SimActuatorBus.hpp"
 
@@ -35,6 +36,7 @@ using robot_control::JointId;
 using robot_control::MotorCommand;
 using robot_control::RobotState;
 using robot_control::WholeBodyModel;
+using tap_fw::v3::RockerLower;
 using tap_fw::v3::V3Controller;
 using V3LegHeight = tap_fw::v3::LegHeight;
 namespace motor_frame = robot_control::motor_frame;
@@ -79,13 +81,14 @@ constexpr float kLegTaskStiffnessForeAftNPerM = 4618.0F;
 constexpr float kLegTaskStiffnessVerticalNPerM = 3000.0F;
 struct Options {
   std::string model;
-  std::string initial_keyframe = "v3_hang";
+  std::string initial_keyframe = "power_off_collapse_current";
   double rate_hz = 3000.0;
   double sensor_rate_hz = 500.0;
   double run_for_s = 0.0;
   bool realtime = false;
   bool gds68_feedback = true;
   unsigned seed = 6814U;
+  tap_fw::v3::RockerLower::Config rocker{};
 };
 
 double asDouble(const char* text, const char* option) {
@@ -113,6 +116,13 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--seed") options.seed = static_cast<unsigned>(std::stoul(value("--seed")));
     else if (arg == "--no-gds68") options.gds68_feedback = false;
     else if (arg == "--realtime") options.realtime = true;
+    // Lab tuning knobs for rocking stage 1.
+    else if (arg == "--rocker-fling-rate")
+      options.rocker.fling_rate_rad_s = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-fling-rate"));
+    else if (arg == "--rocker-lower-floor")
+      options.rocker.hip_floor_rad = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-lower-floor"));
+    else if (arg == "--rocker-fling-lock")
+      options.rocker.fling_lock_rad = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-fling-lock"));
     else if (arg == "--help") {
       std::cout << "tap_mujoco_native --model FILE [--keyframe NAME] [--rate 3000|4000] "
                     "[--sensor-rate 500] [--realtime] [--run-for SEC]\n";
@@ -147,6 +157,8 @@ struct EncoderSample {
 };
 
 class NativeRunner {
+  enum class RockingStage { Idle, Lower };
+
  public:
   NativeRunner(const Options& options) : options_(options), rng_(options.seed) {
     char error[1024] = {};
@@ -166,7 +178,7 @@ class NativeRunner {
               << "|ground_truth_to_controller=0"
               << "|gds68_feedback=" << (options_.gds68_feedback ? 1 : 0)
               << "|imu_startup_qualification=1"
-              << "|scenario=v3_hang"
+              << "|scenario=rocking_prone_body"
               << std::endl;
   }
 
@@ -330,7 +342,8 @@ class NativeRunner {
     const int home_keyframe = mj_name2id(
         model_, mjOBJ_KEY, options_.initial_keyframe.c_str());
     if (home_keyframe >= 0) {
-    // Spawn at the selected keyframe; V3.1's default is its straight-hang zero.
+      // The default pose places the body prone on the floor; v3_hang remains
+      // an explicit fixture for direct V3.1 balance runs.
       mj_resetDataKeyframe(model_, data_, home_keyframe);
     } else {
       throw std::runtime_error("missing initial keyframe: " +
@@ -379,8 +392,7 @@ class NativeRunner {
     raw_accel_.fill(0.0F);
     feedback_.fill(0.0F);
     // A disabled GDS68 still reports its absolute encoder position. Seed the
-    // fake feedback in the driver's calibrated frame; zero-initialising it
-    // makes native hip zero look like the collapsed low-body keyframe.
+    // fake feedback in the driver frame at the prone SIM zero pose.
     for (std::size_t i = 0; i < 4; ++i) {
       const std::size_t joint = i < 2 ? i : i + 1;
       leg_feedback_position_[i] = nativeToDriver(
@@ -407,6 +419,7 @@ class NativeRunner {
     enable_request_ = false;
     disable_request_ = false;
     power_off_free_ = false;
+    rocking_stage_ = RockingStage::Idle;
     estop_ = false;
     enabled_ = false;
     leg_command_.fill(0.0F);
@@ -452,6 +465,7 @@ class NativeRunner {
     v3_config_.engage.immediate = true;
     v3_config_.height.balance_ff_scale = 0.0F;
     v3_hang_hip_rad_ = v3HangHip(0.0F);
+    v3_knee_hold_rad_ = 0.0F;
     v3_controller_ = V3Controller(v3_config_);
     v3HomeReset();
   }
@@ -461,6 +475,26 @@ class NativeRunner {
     v3_height_started_ = false;
     v3_start_rejected_reported_ = false;
     v3_lock_start_us_ = 0U;
+  }
+
+  struct FloorSupportCounts { int body = 0, thigh = 0, shin = 0, wheel = 0; };
+
+  FloorSupportCounts simFloorSupportCounts() const {
+    FloorSupportCounts counts;
+    const int ground = mj_name2id(model_, mjOBJ_GEOM, "ground");
+    for (int i = 0; i < data_->ncon; ++i) {
+      const auto& contact = data_->contact[i];
+      const int other = contact.geom1 == ground ? contact.geom2 :
+          contact.geom2 == ground ? contact.geom1 : -1;
+      if (other < 0) continue;
+      const char* name = mj_id2name(model_, mjOBJ_GEOM, other);
+      if (!name) continue;
+      if (std::strstr(name, "body_collision")) ++counts.body;
+      else if (std::strstr(name, "thigh_collision")) ++counts.thigh;
+      else if (std::strstr(name, "shin_collision")) ++counts.shin;
+      else if (std::strstr(name, "wheel_collision")) ++counts.wheel;
+    }
+    return counts;
   }
 
   MotorCommand updateV3Controller(bool sensors_ok) {
@@ -487,9 +521,46 @@ class NativeRunner {
     input.legs_ready = v3_lock_start_us_ != 0U &&
         input.now_us - v3_lock_start_us_ >= v3_config_.lock_settle_us &&
         std::abs(q[0] - v3_hang_hip_rad_) < 0.05F &&
-        std::abs(q[1]) < 0.05F &&
+        std::abs(q[1] - v3_knee_hold_rad_) < 0.05F &&
         std::abs(q[3] - v3_hang_hip_rad_) < 0.05F &&
-        std::abs(q[4]) < 0.05F;
+        std::abs(q[4] - v3_knee_hold_rad_) < 0.05F;
+
+    if (rocking_stage_ != RockingStage::Idle) {
+      RockerLower::Input lower_in;
+      lower_in.dt_s = input.dt_s;
+      lower_in.pitch_rad = input.pitch_rad;
+      lower_in.hip_rad = 0.5F * (q[0] + q[3]);
+      lower_in.knee_rad = 0.5F * (q[1] + q[4]);
+      lower_in.sensors_ok = input.sensors_ok;
+      const auto lower = rocker_lower_.update(lower_in);
+      rocker_n_to_p_m_ = lower.n_to_p_m;
+      if (lower.phase == RockerLower::Phase::Aborted) {
+        rocking_stage_ = RockingStage::Idle;
+        enable_request_ = false;
+        power_off_free_ = true;
+        std::cout << "STAND_UP_ABORTED|reason=sensors_or_leg_clearance|n_to_p_mm="
+                  << lower.n_to_p_m * 1.0e3F << std::endl;
+        return motors;
+      }
+      if (lower.phase != rocker_reported_phase_) {
+        rocker_reported_phase_ = lower.phase;
+        std::cout << "STAND_UP_STAGE|name=" << tap_fw::v3::toString(lower.phase)
+                  << "|n_to_p_mm=" << lower.n_to_p_m * 1.0e3F
+                  << "|hip=" << lower.hip_target_rad
+                  << "|pitch=" << input.pitch_rad << std::endl;
+      }
+      motors.enable_motors = true;
+      // SIM ceiling only: model actuator range is 12 Nm; this is not a
+      // measured or approved hardware torque limit.
+      motors.torque_nm = {12.0F, 12.0F, 0.0F, 12.0F, 12.0F, 0.0F};
+      motors.kp_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
+      motors.kd_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
+      motors.position_rad[0] = motors.position_rad[3] = lower.hip_target_rad;
+      motors.position_rad[1] = motors.position_rad[4] = lower.knee_target_rad;
+      // Fling/Pivot: powered zero-speed wheel hold, the pivot for the next stage.
+      motors.velocity_rad_s[2] = motors.velocity_rad_s[5] = lower.wheel_rad_s;
+      return motors;
+    }
 
     V3Controller::Command command{};
     command.disable = disable_request_ || estop_ || power_off_free_;
@@ -506,9 +577,9 @@ class NativeRunner {
       command.disable = true;
     } else if (enable_request_ && !v3_start_sent_ && input.sensors_ok) {
       const bool at_hang = std::abs(q[0] - v3_hang_hip_rad_) < 0.08F &&
-          std::abs(q[1]) < 0.08F &&
+          std::abs(q[1] - v3_knee_hold_rad_) < 0.08F &&
           std::abs(q[3] - v3_hang_hip_rad_) < 0.08F &&
-          std::abs(q[4]) < 0.08F;
+          std::abs(q[4] - v3_knee_hold_rad_) < 0.08F;
       if (at_hang) {
         v3_start_sent_ = true;
         v3_lock_start_us_ = input.now_us;
@@ -524,13 +595,13 @@ class NativeRunner {
 
     v3_output_ = v3_controller_.update(input, command);
     motors.enable_motors = v3_output_.legs_locked || v3_output_.wheels_enabled;
-    motors.torque_nm = {3.0F, 3.0F, 0.0F, 3.0F, 3.0F, 0.0F};
+    motors.torque_nm = {12.0F, 12.0F, 0.0F, 12.0F, 12.0F, 0.0F};
     motors.kp_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
     motors.kd_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
     motors.position_rad[0] = v3_hang_hip_rad_ + v3_output_.leg_hip_offset_rad;
-    motors.position_rad[1] = v3_output_.leg_knee_offset_rad;
+    motors.position_rad[1] = v3_knee_hold_rad_ + v3_output_.leg_knee_offset_rad;
     motors.position_rad[3] = v3_hang_hip_rad_ + v3_output_.leg_hip_offset_rad;
-    motors.position_rad[4] = v3_output_.leg_knee_offset_rad;
+    motors.position_rad[4] = v3_knee_hold_rad_ + v3_output_.leg_knee_offset_rad;
     motors.velocity_rad_s[2] = v3_output_.wheel_cmd_rad_s[0];
     motors.velocity_rad_s[5] = v3_output_.wheel_cmd_rad_s[1];
     v3_motor_command_ = motors;
@@ -606,29 +677,16 @@ class NativeRunner {
       sample.stamp_s = sim_time_s_;
       sample.ready_s = sim_time_s_ + 0.002;
       const double dt = imu_period;
-      // A paused desktop session represents a robot physically supported at
-      // boot.  MuJoCo's accelerometer reports zero for a completely paused
-      // free body, although a real stationary MPU6500 reports +1 g.  Supply
-      // only that sensor-level startup fixture until the estimator is seeded;
-      // no pose, quaternion, contact or ground-truth quantity enters the
-      // controller.  Once seeded, packets always come from the live model.
-      const bool startup_sensor_fixture =
-          !imu_seeded_;
+      // A held-still MPU6500 reads +1 g along world up, expressed in its own
+      // frame (third row of the site rotation), and no rotation rate.
+      const mjtNum* site_rot = data_->site_xmat + 9 * model_->sensor_objid[accel_id_];
       for (int i = 0; i < 3; ++i) {
         imu_bias_accel_[i] += normal(0.012F * static_cast<float>(std::sqrt(dt)));
         imu_bias_gyro_[i] += normal(0.0006F * static_cast<float>(std::sqrt(dt)));
-        const float fixture_accel = i == 2 ? 9.81F : 0.0F;
-        const float accel = startup_sensor_fixture
-            ? fixture_accel
-            : sensorValue(accel_id_, i);
-        const float gyro = startup_sensor_fixture
-            ? 0.0F
-            : sensorValue(gyro_id_, i);
-        const float startup_accel_bias = startup_sensor_fixture
-            ? 0.0F
-            : imu_bias_accel_[i];
-        sample.accel[i] = quantize(
-            accel + startup_accel_bias + normal(0.045F), 0.0012F);
+        const float accel = physics_paused_
+            ? static_cast<float>(9.81 * site_rot[6 + i]) : sensorValue(accel_id_, i);
+        const float gyro = physics_paused_ ? 0.0F : sensorValue(gyro_id_, i);
+        sample.accel[i] = quantize(accel + imu_bias_accel_[i] + normal(0.045F), 0.0012F);
         sample.gyro[i] = quantize(gyro + imu_bias_gyro_[i] + normal(0.0025F), 0.00027F);
       }
       if (uniform_(rng_) >= 0.002) imu_queue_.push_back(sample);
@@ -664,7 +722,7 @@ class NativeRunner {
           v = leg_feedback_velocity_[leg];
         } else {
           const std::size_t side = i == 2 ? 0 : 1;
-          // BL4820M12 feedback is also zeroed at the home fixture.  The
+          // BL4820M12 feedback is also zeroed at the prone fixture. The
           // native plant remains in the CAD frame internally.
           motor_transport_.setWheelMeasurement(
               side, nativeToDriver(i, p), v);
@@ -1034,12 +1092,17 @@ class NativeRunner {
     // Hold the V3.1 standing fixture still through lock/qualification; dynamics
     // begin once its balance loop takes ownership.
     const bool waiting_for_v3_start = enable_request_ &&
+        rocking_stage_ == RockingStage::Idle &&
         v3_controller_.state() != V3Controller::State::Balancing &&
         v3_controller_.state() != V3Controller::State::Fault;
     const bool lifecycle_paused = !power_off_free_ &&
         (!enable_request_ || estop_ || waiting_for_v3_start ||
          (disable_request_ && sim_time_s_ >= disable_hold_until_s_));
+    // Paused = the robot is held still: no dynamics, but keep the pose current
+    // so the paused IMU packets below read gravity in the sensor's own frame.
+    physics_paused_ = lifecycle_paused;
     if (!lifecycle_paused) mj_step(model_, data_);
+    else mj_kinematics(model_, data_);
     sim_time_s_ += model_->opt.timestep;
     enqueueSensors();
     consumeSensors();
@@ -1088,6 +1151,7 @@ class NativeRunner {
       disable_hold_until_s_ = sim_time_s_;
     }
     else if (op == "DISABLE") {
+      rocking_stage_ = RockingStage::Idle;
       clearMotionCommand();
       power_off_free_ = false;
       disable_request_ = true;
@@ -1101,6 +1165,7 @@ class NativeRunner {
       command_.target_yaw_rate_rad_s = 0.0F;
     }
     else if (op == "POWER_OFF") {
+      rocking_stage_ = RockingStage::Idle;
       // Simulation-only fixture: emulate cutting motor power while leaving
       // MuJoCo gravity/contact dynamics running so a held squat can collapse.
       clearMotionCommand();
@@ -1115,6 +1180,7 @@ class NativeRunner {
       std::cout << "POWER_OFF_ACCEPTED|free_dynamics=1" << std::endl;
     }
     else if (op == "ESTOP") {
+      rocking_stage_ = RockingStage::Idle;
       clearMotionCommand();
       estop_ = true;
       enable_request_ = false;
@@ -1168,7 +1234,30 @@ class NativeRunner {
         std::cout << "HEIGHT_ACCEPTED|target=" << height_m << std::endl;
       }
     } else if (op == "STAND_UP") {
-      std::cout << "ERROR|stand_up_not_implemented=1" << std::endl;
+      const auto& q = state_.joints.position_rad;
+      // Homing = driver/encoder zero on all four leg joints.
+      const bool prone = std::abs(nativeToDriver(0, q[0])) < 0.12F &&
+          std::abs(nativeToDriver(1, q[1])) < 0.08F &&
+          std::abs(nativeToDriver(3, q[3])) < 0.12F &&
+          std::abs(nativeToDriver(4, q[4])) < 0.08F;
+      const bool fresh = last_imu_stamp_s_ > 0.0 && last_encoder_stamp_s_ > 0.0 &&
+          sim_time_s_ - last_imu_stamp_s_ <= 0.15 &&
+          sim_time_s_ - last_encoder_stamp_s_ <= 0.15 && imu_seeded_;
+      if (rocking_stage_ != RockingStage::Idle || !prone || !fresh || estop_) {
+        std::cout << "STAND_UP_REJECTED|reason=requires_prone_pose_and_fresh_sensors"
+                  << std::endl;
+      } else {
+        power_off_free_ = false;
+        disable_request_ = false;
+        enable_request_ = true;
+        boot_hold_until_s_ = sim_time_s_;
+        rocking_stage_ = RockingStage::Lower;
+        rocker_lower_ = RockerLower(options_.rocker);
+        rocker_lower_.reset(0.5F * (q[0] + q[3]), 0.5F * (q[1] + q[4]));
+        rocker_reported_phase_ = RockerLower::Phase::Lowering;
+        std::cout << "STAND_UP_ACCEPTED|controller=v3.1|stage=lower"
+                  << std::endl;
+      }
     } else if (op == "DANCE") {
       std::cout << "ERROR|dance_unsupported_by_v3=1" << std::endl;
     }
@@ -1197,6 +1286,7 @@ class NativeRunner {
   }
 
   void emitTelemetry() {
+    const auto support = simFloorSupportCounts();
     const char* mode = "Disabled";
     switch (v3_controller_.state()) {
       case V3Controller::State::Idle: mode = "Disabled"; break;
@@ -1211,6 +1301,12 @@ class NativeRunner {
     std::cout << "STATE|t=" << sim_time_s_ << "|mode=" << mode
               << "|controller=v3.1|v3_state=" << tap_fw::v3::toString(v3_controller_.state())
               << "|power_off_free=" << power_off_free_
+              << "|rocking_stage=" << static_cast<int>(rocking_stage_)
+              << "|rocker_n_to_p_mm=" << rocker_n_to_p_m_ * 1.0e3F
+              << "|sim_contact_body=" << support.body
+              << "|sim_contact_thigh=" << support.thigh
+              << "|sim_contact_shin=" << support.shin
+              << "|sim_contact_wheel=" << support.wheel
               << "|pitch=" << state_.imu.pitch_rad << "|pitch_rate=" << state_.imu.pitch_rate_rad_s
               << "|pitch_rate_corrected=" << state_.imu.pitch_rate_bias_corrected_rad_s
               << "|gyro_bias=" << state_.imu.gyro_bias_rad_s
@@ -1233,8 +1329,10 @@ class NativeRunner {
               << "|enc_rw=" << nativeToDriver(5, state_.joints.position_rad[5])
               << "|joint_v_lh=" << state_.joints.velocity_rad_s[0]
               << "|joint_v_lk=" << state_.joints.velocity_rad_s[1]
+              << "|joint_v_lw=" << state_.joints.velocity_rad_s[2]
               << "|joint_v_rh=" << state_.joints.velocity_rad_s[3]
               << "|joint_v_rk=" << state_.joints.velocity_rad_s[4]
+              << "|joint_v_rw=" << state_.joints.velocity_rad_s[5]
               << "|v3_balance_ref=" << v3_controller_.balanceRef()
               << "|lqr_velocity=" << v3_controller_.groundVelocity()
               << "|lqr_anchor=" << v3_controller_.groundPosition()
@@ -1302,10 +1400,15 @@ class NativeRunner {
   V3Controller::Output v3_output_{};
   MotorCommand v3_motor_command_{};
   float v3_hang_hip_rad_ = 0.0F;
+  float v3_knee_hold_rad_ = 0.0F;
   bool v3_start_sent_ = false;
   bool v3_height_started_ = false;
   bool v3_start_rejected_reported_ = false;
   std::uint64_t v3_lock_start_us_ = 0U;
+  RockingStage rocking_stage_ = RockingStage::Idle;
+  RockerLower rocker_lower_;
+  RockerLower::Phase rocker_reported_phase_ = RockerLower::Phase::Lowering;
+  float rocker_n_to_p_m_ = 0.0F;
   ImuStateEstimator imu_estimator_;
   RobotState state_{};
   ControlCommand command_{};
@@ -1356,6 +1459,7 @@ class NativeRunner {
   float accel_tilt_x_m_s2_ = 0.0F;
   bool body_accel_compensation_valid_ = false;
   int accel_id_ = -1;
+  bool physics_paused_ = true;
   int gyro_id_ = -1;
   std::array<int, 6> pos_sensor_id_{};
   std::array<int, 6> vel_sensor_id_{};

@@ -537,6 +537,32 @@ When permission is granted, the agent must keep the change focused, preserve
 unrelated user edits, report the exact files/sections changed, and distinguish
 rule changes from implementation changes in the final report.
 
+---
+
+## Rule 6: Known-failing test suites for features not in use
+
+**Five ctest suites fail and cover features the user is not currently using
+(user, 2026-09-28). Their failures are known, are not regressions, and do not
+block other work.**
+
+| Suite | Feature | Known failure (2026-09-28) |
+| --- | --- | --- |
+| `core_allocation_tests` | legacy `EmbeddedController` allocation path | aborts: `Invalid optimized plan or conflicting trajectory owners` |
+| `jump_tests` | jump | 132/139 synthetic checks pass |
+| `jump_quality_tests` | jump quality | 132 check failures |
+| `landing_impedance_tests` | landing impedance | 5 FAIL lines |
+| `lqr_tests` | LQR station return | `station return reference governor failed` |
+
+### How to apply this rule
+
+1. Do not spend effort fixing these suites, and do not report them as new
+   failures, unless the user brings the feature back into use.
+2. Report them as the known-failing set when summarising a ctest run. Any
+   other ctest failure is a real regression.
+3. A change that makes one of these suites worse (more failing checks, a new
+   abort) is still a regression and must be reported.
+4. When the user reactivates one of these features, remove its row here.
+
 <!--
 Add future mandatory rules below as their own "## Rule N: <short name>"
 section, following Rule 1's structure (the rule itself, why it exists, what

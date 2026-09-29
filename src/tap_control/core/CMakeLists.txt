@@ -6,6 +6,7 @@ endif()
 
 add_library(tap_control_core STATIC
   src/v3/LegHeight.cpp
+  src/v3/RockerLower.cpp
   src/v3/V3Controller.cpp
   src/EmbeddedController.cpp
   src/ImuStateEstimator.cpp

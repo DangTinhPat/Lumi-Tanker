@@ -162,6 +162,8 @@ class NativeDashboard:
                  length=150).pack(fill="x")
         ttk.Button(drive, text="Reset mô phỏng", command=self.reset).pack(
             fill="x", pady=(4, 0))
+        ttk.Button(drive, text="Bập bênh – giai đoạn 1", command=self.stand_up).pack(
+            fill="x", pady=(4, 0))
 
         posture = ttk.LabelFrame(toolbar, text="Chiều cao thân", style="Card.TLabelframe", padding=10)
         posture.grid(row=0, column=1, sticky="nsew")

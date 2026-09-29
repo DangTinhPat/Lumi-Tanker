@@ -23,7 +23,8 @@ def main() -> int:
     parser.add_argument("--model", type=Path, required=True)
     args = parser.parse_args()
     result = subprocess.run(
-        [str(args.runner), "--model", str(args.model), "--rate", "3000",
+        [str(args.runner), "--model", str(args.model), "--keyframe", "v3_hang",
+         "--rate", "3000",
          "--sensor-rate", "500", "--seed", "6814", "--run-for", "20"],
         input="ENABLE\n", check=True, capture_output=True, text=True)
     states = [fields(line) for line in result.stdout.splitlines()

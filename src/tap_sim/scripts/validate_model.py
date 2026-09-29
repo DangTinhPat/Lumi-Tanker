@@ -125,6 +125,45 @@ def main():
                     f"does not match spring preload "
                     f"{model.tendon_lengthspring[tid, 0]:.6f}")
 
+    # Gearbox breakaway friction should exceed gravity's joint torque at the
+    # prone spawn; the 1.5x margin is a simulation estimate, not calibration.
+    prone_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_KEY, "power_off_collapse_current")
+    if prone_id < 0:
+        failures.append("missing power_off_collapse_current keyframe")
+    else:
+        mujoco.mj_resetDataKeyframe(model, data, prone_id)
+        mujoco.mj_forward(model, data)
+        prone_joints = []
+        for name in ("cad_left_hip", "cad_left_knee",
+                     "cad_right_hip", "cad_right_knee"):
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            dof = model.jnt_dofadr[jid]
+            qpos = model.jnt_qposadr[jid]
+            prone_joints.append((name, dof, qpos, float(data.qpos[qpos])))
+            gravity_torque = abs(float(data.qfrc_bias[dof]))
+            friction = float(model.dof_frictionloss[dof])
+            if friction < 1.5 * gravity_torque:
+                failures.append(
+                    f"{name} dry friction {friction:.3f} Nm is below "
+                    f"1.5x spawn gravity torque {gravity_torque:.3f} Nm")
+        gravity_only_duration_s = 120.0
+        maximum_drift = {name: 0.0 for name, _, _, _ in prone_joints}
+        for _ in range(round(gravity_only_duration_s / model.opt.timestep)):
+            mujoco.mj_step(model, data)
+            for name, _, qpos, initial in prone_joints:
+                maximum_drift[name] = max(
+                    maximum_drift[name],
+                    abs(float(data.qpos[qpos]) - initial))
+        for name, _, _, _ in prone_joints:
+            drift = maximum_drift[name]
+            limit = 0.005
+            if drift > limit:
+                failures.append(
+                    f"{name} drifts {drift:.4f} rad in "
+                    f"{gravity_only_duration_s:.0f} s gravity-only "
+                    f"settling (limit {limit:.3f} rad)")
+
     if failures:
         for failure in failures:
             print(f"FAIL {failure}")

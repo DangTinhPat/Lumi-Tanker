@@ -42,7 +42,7 @@ def apply_view(model, data, values):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--keyframe", default="neutral")
+    parser.add_argument("--keyframe", default="power_off_collapse_current")
     parser.add_argument("--unpowered", action="store_true")
     args = parser.parse_args(argv)
 

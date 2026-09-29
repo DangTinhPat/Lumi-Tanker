@@ -31,6 +31,14 @@ no middleware or external simulator dependency.
   assets because MuJoCo limits one mesh asset to 200,000 triangles; all
   638,359 body triangles are retained. Collision uses primitive envelopes to
   keep contact solver behaviour stable.
+- The importer writes the body STL pre-rotated `+pi/2` about `Y` and the MJCF
+  mounts it without compensation on purpose: the root/IMU frame then matches
+  the real MPU6500, which reads pitch 0 with the body horizontal while V3.1
+  balances the RB. Because the turn is about the hip axis it only relabels
+  angles (the native hip zero is `pi/2` off the STEP hip zero); the encoder
+  zero is the calibrated homing anyway. Do not "restore" the STEP body
+  orientation: a 2026-09-28 attempt did, broke the IMU convention, and was
+  reverted on 2026-09-29.
 
 ## Mass and inertial evidence
 
@@ -56,34 +64,38 @@ mounted `0.020 m` above the body reference origin, at the upper body surface.
 MuJoCo pose, contacts, and constraint forces remain simulation telemetry and
 are not exported as controller inputs.
 
-## Hardware-facing encoder zero
+## SIM encoder zero
 
-The validated low-body rocker fixture is the calibrated simulation home
-for the six driver channels `[LH, LK, LW, RH, RK, RW]`. The native MJCF
-`qpos` remains in the CAD frame so collision geometry and FK do not change;
-the native runner subtracts these offsets at the fake GDS68/BL4820M12 frame
-boundary:
+`power_off_collapse_current` is the SIM zero pose for driver channels
+`[LH, LK, LW, RH, RK, RW]`. The native runner subtracts these offsets at the
+fake GDS68/BL4820M12 feedback boundary:
 
 `[2.273920000, -1.200000000, -3.578270000, 2.273920000, -1.200000000, -3.178980000] rad`.
 
-Therefore the driver-facing encoder position at the home fixture is exactly
-zero for all six channels. The provisional re-based leg travel is hip
-`[-5.415512654, 0.867672654]` on both sides and knee
-`[0, 1.658407346]` on both sides. These are
-translated simulation envelopes, not measured mechanical stops; physical
-encoder calibration must replace them before hardware bring-up.
+The native MJCF and V3.1 controller remain in CAD coordinates; the runner
+restores these offsets before simulated feedback reaches the controller.
+These SIM offsets do not change firmware or physical encoder calibration.
 
 ## Power-off rocker fixture
 
-The V3.1 native runner now starts at the `v3_hang` keyframe: hip `0.3882 rad`,
-knee `0 rad`, root `z=0.22856 m`. This is the controller's internal zero pose;
-the existing driver encoder calibration below is unchanged. `home_offset`
-remains available as the HOME/folded start fixture for the future stand-up
-sequence. The saved `power_off_collapse_current` keyframe is
-the angle-zero rocker reference: both hips are `2.27392 rad`, both knees are
-`-1.2 rad`, root `z=0.0698965 m`, and the wheel collision envelopes are
-tangent to the ground while the body remains low. `power_off_deep_front`
-remains only as a static reference endpoint for rendering.
+The native runner starts directly at `power_off_collapse_current`, the
+gravity-settled belly-down pose: hips `2.27392 rad`, knees at the MJCF lower
+limit `-1.2 rad`, root `z=0.06990 m`, and near-zero body pitch. Body and wheel
+collision envelopes support this pose on the floor, so it spawns at the
+post-fall state instead of starting elevated and dropping into it. While the
+lifecycle is paused the robot counts as held still: the runner only updates
+kinematics and the simulated MPU6500 reads +1 g along world up in its own
+frame with zero rate, whatever the pose. Hip and knee joints use an
+estimated dry-friction limit of `1.2 Nm` each and friction impedance
+`0.999 0.9999 0.0001` at the `0.333 ms` physics step. A 120 s gravity-only
+regression limits each joint's maximum drift to `0.005 rad`; the measured
+model drift is below `0.0016 rad`. These remain simulation estimates,
+not measured gearbox breakaway torques;
+mechanical limits are likewise provisional, not verified hardware stops.
+V3.1's internal zero remains the separate `v3_hang` keyframe
+(hip `0.3882 rad`, knee `0 rad`, root `z=0.22856 m`); direct ENABLE is rejected
+from the prone pose until a rocking/home-to-hang sequence is implemented.
+`power_off_deep_front` remains the earlier elevated/fall-start reference.
 Contacts and constraint forces are still
 simulation telemetry; the controller must infer support from the MPU6500 and
 encoders.

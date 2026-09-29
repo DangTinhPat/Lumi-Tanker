@@ -88,7 +88,8 @@
         <!-- User-provided one-revolution hip envelope; exact stop phasing is
              not encoded in the supplied STEP assembly. -->
         <joint name="cad_left_hip" axis="0 1 0" range="-3.1415926536 3.1415926536"
-               limited="true" damping="0.15"/>
+               limited="true" damping="0.15" frictionloss="1.2"
+               solreffriction="0.001 1" solimpfriction="0.999 0.9999 0.0001"/>
         <inertial pos="-0.008337474 0.003345208 -0.036038582"
                   mass="0.296"
                   fullinertia="0.000748306627 0.000792430278 0.000245860537 0.00000178743198 -0.0000770665558 -0.000000349275268"/>
@@ -107,7 +108,8 @@
                carry mating/stop metadata, so the phase around encoder q=0
                is an explicitly provisional simulation envelope. -->
           <joint name="cad_left_knee" axis="0 1 0" range="-1.2 0.4584073464"
-                 limited="true" damping="0.15"/>
+                 limited="true" damping="0.15" frictionloss="1.2"
+                 solreffriction="0.001 1" solimpfriction="0.999 0.9999 0.0001"/>
           <inertial pos="0.022977794 0.000411188 -0.047988798"
                     mass="0.109"
                     fullinertia="0.000190025861 0.000227856474 0.0000553716106 -0.000000279240308 0.0000813680963 0.000000575946269"/>
@@ -132,9 +134,11 @@
                       fullinertia="0.0000809478695 0.000146352414 0.0000809507445 -0.000000000155326464 -0.00000000308980409 -0.00000000065535445"/>
             <geom name="cad_left_wheel_visual" type="mesh" mesh="left_wheel_mesh"
                   material="wheel_material" contype="0" conaffinity="0"/>
+            <!-- Tyre-floor sliding friction 1.0 (user, 2026-09-29); MuJoCo takes
+                 the larger of the pair, so body-floor contacts stay at 0.8. -->
             <geom name="cad_left_wheel_collision" type="cylinder" pos="0 0 0"
                   euler="1.5707963267948966 0 0" size="0.040 0.01285"
-                  friction="0.8 0.8 0.015"
+                  friction="1.0 1.0 0.015"
                   solref="0.015 0.95" solimp="0.90 0.98 0.002"
                   rgba="0 0 0 0"/>
           </body>
@@ -143,7 +147,8 @@
 
       <body name="cad_right_thigh" pos="0 -0.125 0">
         <joint name="cad_right_hip" axis="0 1 0" range="-3.1415926536 3.1415926536"
-               limited="true" damping="0.15"/>
+               limited="true" damping="0.15" frictionloss="1.2"
+               solreffriction="0.001 1" solimpfriction="0.999 0.9999 0.0001"/>
         <inertial pos="-0.008337297 -0.003345326 -0.036038375"
                   mass="0.296"
                   fullinertia="0.000748302542 0.000792425709 0.000245862909 -0.00000178617202 -0.0000770659485 0.000000350686465"/>
@@ -158,7 +163,8 @@
         <body name="cad_right_shin" pos="-0.01410935 -0.002 -0.10476742"
               euler="0 -0.45 0">
           <joint name="cad_right_knee" axis="0 1 0" range="-1.2 0.4584073464"
-                 limited="true" damping="0.15"/>
+                 limited="true" damping="0.15" frictionloss="1.2"
+                 solreffriction="0.001 1" solimpfriction="0.999 0.9999 0.0001"/>
           <inertial pos="0.022977792 -0.000411190 -0.047988801"
                     mass="0.109"
                     fullinertia="0.000190025879 0.000227856498 0.0000553716129 0.000000279243339 0.0000813681129 -0.000000575941519"/>
@@ -180,7 +186,7 @@
                   material="wheel_material" contype="0" conaffinity="0"/>
             <geom name="cad_right_wheel_collision" type="cylinder" pos="0 0 0"
                   euler="1.5707963267948966 0 0" size="0.040 0.01285"
-                  friction="0.8 0.8 0.015"
+                  friction="1.0 1.0 0.015"
                   solref="0.015 0.95" solimp="0.90 0.98 0.002"
                   rgba="0 0 0 0"/>
           </body>
@@ -262,14 +268,13 @@
     <key name="neutral" qpos="0 0 0.1484350375 1 0 0 0 1.0104670525 -1.0682730675 0 1.0104670525 -1.0682730675 0"/>
     <!-- V3.1 controller zero: gravity-hang legs, axle directly below the hip. -->
     <key name="v3_hang" qpos="0 0 0.2285603142 1 0 0 0 0.3882076041 0 0 0.3882076041 0 0"/>
-    <!-- Controller-compatible powered spawn fixture. The angle-zero
-         calibration is stored in encoder_zero_rad and in the saved rocker
-         keyframe below; this spawn remains usable by the current ENABLE path. -->
+    <!-- Upright folded HOME fixture. V3.1 balance ENABLE is intentionally
+         rejected here; use v3_hang for direct balance tests. -->
     <key name="home_offset" qpos="-0.008970917 0.000097734 0.134000000 0.999950000 0 0.009999833 0 1.123132841 -1.214584702 1.640237084 1.121352471 -1.213451540 1.584088236"/>
-    <!-- Reference endpoint from the former render-only front fixture. -->
-    <key name="power_off_deep_front" qpos="-0.008970917 0.000097734 0.113000000 0.960706412 0.000862848 0.277553224 0.002579350 1.123132841 -1.214584702 1.640237084 1.121352471 -1.213451540 1.584088236"/>
-    <!-- Saved low-body pose: both knees at the lower provisional stop and
-         both hips raised until the wheel rims are tangent to the ground. -->
+    <!-- Earlier elevated pose from which gravity settles the robot. -->
+    <key name="power_off_deep_front" qpos="-0.008970917 0.000097734 0.113000000 0.960706412 0.000862848 0.277553224 0.002579350 1.123132841 -1.2 1.640237084 1.121352471 -1.2 1.584088236"/>
+    <!-- Default spawn and six-channel SIM zero: gravity-settled belly-down
+         pose, supported low on the body and wheels. -->
     <key name="power_off_collapse_current" qpos="-0.0300281 0.000578288 0.0698965 0.999997 -0.0000190395 0.0000332149 -0.00237860 2.27392 -1.2 -3.57827 2.27392 -1.2 -3.17898"/>
   </keyframe>
 </mujoco>
