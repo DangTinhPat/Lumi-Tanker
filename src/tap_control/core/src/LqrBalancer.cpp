@@ -426,7 +426,8 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
                               -config_.max_ground_velocity_m_s,
                               config_.max_ground_velocity_m_s);
   const float requested_forward = forward;
-  const bool stop_command_active = std::abs(requested_forward) < 1.0e-3F &&
+  const bool stop_command_active = !external_shaping_ &&
+      std::abs(requested_forward) < 1.0e-3F &&
       std::abs(target_forward_velocity_m_s_) >= 1.0e-3F;
   if (stop_command_active) {
     const float normal_slew = std::max(
@@ -458,7 +459,7 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
         command_accel_m_s2_ = stop_accel;
       }
     }
-  } else if (config_.target_velocity_slew_rate_m_s2 > 0.0F) {
+  } else if (!external_shaping_ && config_.target_velocity_slew_rate_m_s2 > 0.0F) {
     const float slew = config_.target_velocity_slew_rate_m_s2;
     if (config_.target_velocity_jerk_m_s3 > 0.0F) {
       // S-curve: bound the acceleration itself, then bound its rate of change.
@@ -555,7 +556,8 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       ? forward + station_gain_blend * (station_target - forward) : forward;
   if (stop_command_active) {
     station_velocity_reference_m_s_ = station_reference;
-  } else if (hold_station && config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
+  } else if (hold_station && !external_shaping_ &&
+             config_.station_hold_command_slew_rate_m_s2 > 0.0F) {
     float slew_rate = config_.station_hold_command_slew_rate_m_s2;
     const float max_step = slew_rate * dt;
     station_velocity_reference_m_s_ = std::clamp(
@@ -590,7 +592,7 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       std::max(config_.max_ground_accel_m_s2,
                0.1F),
       std::max(friction_accel_limit, 0.1F));
-  ground_accel = clampFinite(ground_accel, -accel_limit, accel_limit);
+  ground_accel = clampFinite(ground_accel + accel_ff_m_s2_, -accel_limit, accel_limit);
 
   if (!integrate || !state.floor_contact) {
     commanded_ground_velocity_m_s_ +=

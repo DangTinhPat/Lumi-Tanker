@@ -159,6 +159,7 @@ class TapSerialControlApp:
         self.height_dir = 0
         self.last_hmove_sent = 0.0
         self.height_var = tk.StringVar(value="Chiều cao: —")
+        self.tier_var = tk.StringVar(value="Tầng 2: —")
 
         self._build_ui()
         self.root.bind("<KeyPress>", self._key_press)
@@ -226,6 +227,12 @@ class TapSerialControlApp:
             row=2, column=4, padx=4, pady=3, sticky="w")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
+
+        # v3.3 two-tier control + maneuver preview: always on in the firmware
+        # (no toggles); SET vpitch/trunk/tprev 0 in the console for A/B tests.
+        tiers = ttk.LabelFrame(self.root, text="v3.3 điều khiển phân tầng (luôn bật)", padding=10)
+        tiers.pack(fill="x", padx=10, pady=(0, 8))
+        ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
 
         console = ttk.LabelFrame(self.root, text="Lệnh console (vd: SET leg_kp 15 · SET leg_kd 0.5 · GET)",
                                  padding=10)
@@ -535,6 +542,13 @@ class TapSerialControlApp:
                 if target and abs(float(target.group(1)) - float(height.group(1))) > 0.5:
                     text += f" → {float(target.group(1)):.0f}"
                 self.height_var.set(text)
+            tv = re.search(r"\btv=([-+0-9.]+)", line)
+            dhip = re.search(r"\bdhip=([-+0-9.]+)", line)
+            ta = re.search(r"\bta=([0-9.]+)", line)
+            if tv and dhip and ta:
+                self.tier_var.set(f"Con lắc ảo θv: {float(tv.group(1)):+.3f} rad   "
+                                  f"Hông tầng 2: {float(dhip.group(1)):+.3f} rad   "
+                                  f"quyền: {float(ta.group(1)):.2f}")
         if match := MODE_RE.search(line):
             self.mode_var.set(match.group(1))
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")

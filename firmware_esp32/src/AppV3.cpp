@@ -256,7 +256,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "trim_max")) lqr.setBalanceTrimMax(std::clamp(v, 0.0F, 0.35F));
     else if (!std::strcmp(key, "trim")) lqr.setBalanceTrim(v);
     else if (!std::strcmp(key, "margin")) lqr.setCommandTrackingMargin(std::clamp(v, 0.0F, 1.0F));
-    else if (!std::strcmp(key, "accel")) lqr.setMaxGroundAccel(std::clamp(v, 0.2F, 2.0F));
+    // 0.2-10: the default is 8 m/s^2 (defaultV3Config); the old 2.0 cap
+    // silently cut the LQR's push-recovery authority 4x.
+    else if (!std::strcmp(key, "accel")) lqr.setMaxGroundAccel(std::clamp(v, 0.2F, 10.0F));
     else if (!std::strcmp(key, "pitch_scale")) lqr.setWheelPitchFeedbackScale(std::clamp(v, 0.3F, 1.0F));
     else if (!std::strcmp(key, "balance")) ctrl_.setBalanceAngle(true, std::clamp(v, -0.5F, 0.5F));
     else if (!std::strcmp(key, "kp")) ctrl_.config().pid.kp = std::clamp(v, 0.0F, 200.0F);
@@ -288,6 +290,38 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       }
       ctrl_.config().algo = v >= 0.5F ? V3Controller::Algo::Pid : V3Controller::Algo::Lqr;
     }
+    // v3.3 tiers (V3Controller::Tier). vpitch changes the balancer's state,
+    // so it only switches outside Balancing; trunk ramps in and out anytime.
+    else if (!std::strcmp(key, "vpitch")) {
+      if (ctrl_.state() == V3Controller::State::Balancing) {
+        Serial.println("V3 SET vpitch: not while balancing (DISABLE or wait for a fault)");
+        return;
+      }
+      ctrl_.config().tier.virtual_pitch = v >= 0.5F;
+      if (v < 0.5F) ctrl_.config().tier.trunk = false;
+    }
+    else if (!std::strcmp(key, "trunk")) {
+      if (v >= 0.5F && !ctrl_.config().tier.virtual_pitch) {
+        Serial.println("V3 SET trunk: needs SET vpitch 1 first");
+        return;
+      }
+      ctrl_.config().tier.trunk = v >= 0.5F;
+    }
+    else if (!std::strcmp(key, "tshare")) ctrl_.config().tier.lean_share = std::clamp(v, 0.0F, 1.0F);
+    else if (!std::strcmp(key, "tlead")) ctrl_.config().tier.lead_s = std::clamp(v, 0.0F, 0.15F);
+    else if (!std::strcmp(key, "tmax")) ctrl_.config().tier.max_rad = std::clamp(v, 0.0F, 0.30F);
+    else if (!std::strcmp(key, "trate")) ctrl_.config().tier.rate_rad_s = std::clamp(v, 0.1F, 6.0F);
+    else if (!std::strcmp(key, "thpf")) ctrl_.config().tier.hpf_s = std::clamp(v, 0.0F, 30.0F);
+    else if (!std::strcmp(key, "texp")) ctrl_.config().tier.height_exp = std::clamp(v, 0.0F, 4.0F);
+    else if (!std::strcmp(key, "cdx")) ctrl_.config().tier.body_com_dx_m = std::clamp(v * 0.001F, -0.06F, 0.06F);
+    else if (!std::strcmp(key, "timu")) ctrl_.config().tier.imu_kinematic = v >= 0.5F;
+    else if (!std::strcmp(key, "tvg")) ctrl_.config().tier.joint_rate_gain = std::clamp(v, 0.0F, 1.0F);
+    // Maneuver preview (needs vpitch): planned, previewed speed changes.
+    else if (!std::strcmp(key, "tprev")) ctrl_.config().tier.preview = v >= 0.5F;
+    else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 1.0F);
+    else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
+    else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 0.8F);
+    else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
     else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else {
@@ -352,6 +386,15 @@ void AppV3::printTunables() noexcept {
                 ctrl_.balanceAngle(), tap_fw::v3::LegHeight::minHeight() * 1000.0F,
                 tap_fw::v3::LegHeight::maxHeight() * 1000.0F,
                 ctrl_.config().height.rate_m_s * 1000.0F);
+  const auto& tier = ctrl_.config().tier;
+  Serial.printf("V3 TUNE tiers: vpitch=%d trunk=%d (LQR only) tshare=%.2f tlead=%.3f tmax=%.3f "
+                "trate=%.1f thpf=%.1f texp=%.2f cdx=%.1f mm timu=%d tvg=%.2f\n",
+                tier.virtual_pitch ? 1 : 0, tier.trunk ? 1 : 0, tier.lean_share, tier.lead_s,
+                tier.max_rad, tier.rate_rad_s, tier.hpf_s, tier.height_exp,
+                tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain);
+  Serial.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
+                "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
+                tier.plan_vmax_m_s, tier.preview_s);
   Serial.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
                 tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
@@ -389,9 +432,15 @@ void AppV3::updateImu(std::uint64_t now_us) noexcept {
   const bool quiet = std::abs(std::sqrt(accel_sq) - kGravity) < 0.35F &&
       std::sqrt(gyro_sq) < 0.12F;
   // Pure IMU: no wheel-kinematic acceleration compensation (see BoardConfig).
+  // v3.3: while balancing free with the virtual pitch, the controller hands
+  // the kinematic velocity of the IMU point (last tick) so a sustained
+  // acceleration does not tilt the estimate (Tier::imu_kinematic); invalid
+  // (pure IMU, as before) otherwise.
+  const auto kv = ctrl_.imuVelocity();
   const auto out = estimator_.update(body_.accel_m_s2, body_.gyro_rad_s, dt_s,
                                      static_cast<float>(now_us) * 1.0e-6F, 0.0F,
-                                     false, quiet, {});
+                                     false, quiet,
+                                     {kv.horizontal_m_s, kv.vertical_m_s, kv.valid});
   if (!out.valid) return;
   imu_ = out;
   last_imu_us_ = now_us;
@@ -416,6 +465,11 @@ bool AppV3::legsFresh(std::uint64_t now_us) const noexcept {
 float AppV3::legJointRad(std::size_t leg) const noexcept {
   const std::size_t joint = tap_fw::board::MotorIds{}.leg_can[leg].joint_index;
   return feedback_.legEstimate(joint).pos_turns * kTwoPi / 8.0F;
+}
+
+float AppV3::legJointRate(std::size_t leg) const noexcept {
+  const std::size_t joint = tap_fw::board::MotorIds{}.leg_can[leg].joint_index;
+  return feedback_.legEstimate(joint).vel_turns_s * kTwoPi / 8.0F;
 }
 
 void AppV3::setHeightMove(int dir, std::uint64_t now_us) noexcept {
@@ -631,6 +685,24 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
   in.leg_chain_rad = legChainRad();
+  // v3.3: measured joints per side, core frame (LegLock order LH LK RH RK).
+  {
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t side = 0; side < 2U; ++side) {
+      const std::size_t hip = 2U * side, knee = hip + 1U;
+      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign;
+      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign;
+      in.hip_rate_rad_s[side] = legJointRate(hip) * legs[hip].driver_sign;
+      in.knee_rate_rad_s[side] = legJointRate(knee) * legs[knee].driver_sign;
+    }
+    in.legs_measured = legsFresh(now_us);
+    // Noise of the hip velocity estimates (they feed theta_v_rate): rms per
+    // SENS report, meaningful with the legs holding still.
+    for (std::size_t side = 0; side < 2U; ++side) {
+      hip_vel_sq_ += in.hip_rate_rad_s[side] * in.hip_rate_rad_s[side];
+    }
+    hip_vel_n_ += 2U;
+  }
   const bool closed_loop_due = legs_.engaged() && now_us - engage_us_ > kClosedLoopGraceUs;
   in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFresh(now_us) && legsFresh(now_us) &&
       legAxisProblem(now_us, closed_loop_due) == nullptr;
@@ -683,8 +755,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   if (out.legs_locked) {
     const float hip_test = hip_test_ ? hipTestOffset(now_us) : 0.0F;
-    legs_.setOffsets(ctrl_.legPose().hip_offset_rad + hip_test,
-                     ctrl_.legPose().knee_offset_rad);
+    // v3.3: the height pose plus the tier-2 hip offset (0 unless trunk is
+    // on and balancing); HIPTEST drives the bare pose.
+    const float hip_base = hip_test_ ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
+    legs_.setOffsets(hip_base + hip_test, ctrl_.legPose().knee_offset_rad);
     (void)legs_.update(now_us, transport_);
     if (hip_test_) recordHipTest(now_us, ctrl_.legPose().hip_offset_rad + hip_test);
   } else if (legs_.engaged()) {
@@ -735,7 +809,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     Serial.printf("TR t=%lu mode=%s pitch=%+.3f rate=%+.2f wcmd=[%+.2f %+.2f] "
                   "wmeas=[%+.2f %+.2f] axle_v=%+.3f axle_x=%+.3f trim=%+.4f "
                   "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d "
-                  "h=%.1f htgt=%.1f knee=%+.3f\n",
+                  "h=%.1f htgt=%.1f knee=%+.3f tv=%+.4f dhip=%+.4f ta=%.2f me=%+.3f\n",
                   static_cast<unsigned long>((now_us - state_since_us_) / 1000U),
                   tap_fw::v3::toString(out.state), imu_.pitch_rad, imu_.pitch_rate_rad_s,
                   last_wheel_cmd_[0], last_wheel_cmd_[1], in.wheel_rad_s[0], in.wheel_rad_s[1],
@@ -743,7 +817,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   legJointRad(0), legJointRad(1), legJointRad(2), legJointRad(3),
                   ctrl_.pitchRef(), ctrl_.positionError(), ctrl_.readyPhase(),
                   ctrl_.heldResets(), ctrl_.legPose().axle_below_hip_m * 1000.0F,
-                  ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad);
+                  ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad,
+                  ctrl_.virtualPitch(), ctrl_.trunkHip(), ctrl_.trunkAuthority(),
+                  ctrl_.legModelError());
   }
 }
 
@@ -843,7 +919,7 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       "yaw_rate=%+.3f acc=[%+.2f %+.2f %+.2f] chip_acc=[%+.2f %+.2f %+.2f] "
       "gyro_bias=%+.4f vbus_min=%.2f state=%s axis=[%u %u %u %u] axis_err=[%lx %lx %lx %lx] "
       "pitch_avg=%+.4f spread=%.4f balance=%+.4f%s tick_max_us=%lu imu_us=%lu ctrl_us=%lu "
-      "late=%lu serial_us=%lu ble_us=%lu bus_us=%lu\n",
+      "late=%lu serial_us=%lu ble_us=%lu bus_us=%lu hipv_rms=%.3f\n",
       imu_age, imu_.seeded, legsFresh(now_us), feedback_.allWheelsFresh(now_us),
       legs_.engaged() ? 1 : 0, legJointRad(0), legJointRad(1), state_.joints.position_rad[2],
       legJointRad(2), legJointRad(3), state_.joints.position_rad[5], imu_.pitch_rad,
@@ -863,7 +939,10 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       static_cast<unsigned long>(tick_exec_max_us_), static_cast<unsigned long>(tick_imu_max_us_),
       static_cast<unsigned long>(tick_ctrl_max_us_), static_cast<unsigned long>(tick_late_),
       static_cast<unsigned long>(pre_serial_max_us_), static_cast<unsigned long>(pre_ble_max_us_),
-      static_cast<unsigned long>(pre_bus_max_us_));
+      static_cast<unsigned long>(pre_bus_max_us_),
+      hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F);
+  hip_vel_sq_ = 0.0F;
+  hip_vel_n_ = 0U;
   pre_serial_max_us_ = 0U;
   pre_ble_max_us_ = 0U;
   pre_bus_max_us_ = 0U;

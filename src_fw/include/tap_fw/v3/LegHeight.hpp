@@ -41,6 +41,9 @@ class LegHeight {
   [[nodiscard]] static LegPose forHeight(float axle_below_hip_m) noexcept;
   [[nodiscard]] static float maxHeight() noexcept;  // hang pose
   [[nodiscard]] static float minHeight() noexcept;  // at kKneeMinRad
+  // CAD hip angle of the hang pose (hip offset 0): core offsets convert to
+  // CAD joint angles as hip_cad = hangHipCad() + hip, knee_cad = knee (v3.3).
+  [[nodiscard]] static float hangHipCad() noexcept;
 };
 
 }  // namespace tap_fw::v3

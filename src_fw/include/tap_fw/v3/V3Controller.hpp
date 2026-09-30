@@ -114,8 +114,147 @@ class V3Controller {
     float balance_ff_scale = -0.38F;
   };
 
+  // v3.3 two-tier control, Ascento style. Both flags off = v3.2 exactly.
+  //  - Tier 1 (wheels, LQR or PID unchanged) balances the virtual pendulum,
+  //    the axle -> whole-robot CoM line: theta_v = body pitch + com_line(
+  //    measured hip/knee) - com_line(hang pose). At the hang pose theta_v is
+  //    the body pitch, so every v3.2 threshold, trim and seed keeps its units.
+  //  - Tier 2 (hips) takes the tier-1 lean: the hips turn by lean / J, J =
+  //    d com_line / d hip, so the legs lean under the CoM and the body stays at
+  //    its balance pitch. theta_v includes the measured hip, so this is the
+  //    body-pitch feedback theta_b -> target written through the geometry
+  //    (q_cmd = q_meas + (theta_b - target) / J): zero steady error, and no
+  //    loop through the hip servo lag beyond the encoder age.
+  struct Tier {
+    // Default ON (operator, 2026-10-01: all algorithms always on, no GUI
+    // toggles). SET vpitch 0 (outside balancing) returns to v3.2 exactly;
+    // the tiers also stay inert without measured legs (legs_measured) or
+    // with the PID algorithm.
+    bool virtual_pitch = true;   // SET vpitch 0/1 (not while balancing)
+    bool trunk = true;           // SET trunk 0/1; needs virtual_pitch (LQR only)
+    // Body CoM fore/aft correction of the CAD mass model [m, body frame].
+    // Fitted to the measured balance-angle shifts with height (188 -> 110 mm
+    // -0.025 rad, 188 -> 78 mm -0.03 rad): +21 mm predicts -0.014 / -0.036,
+    // the CAD alone +0.054 / +0.097 (wrong sign).
+    float body_com_dx_m = 0.021F;
+    float lean_share = 1.0F;   // share of the lean the hips take (1 = body level)
+    // The share falls with the pendulum length as (l / l_hang)^height_exp:
+    // a crouched robot is a faster pendulum (1.25 Hz hang, 1.9 Hz at 78 mm)
+    // while the hips stay a ~3-4 Hz servo. Two-body sim: the full share
+    // rang at <= 110 mm (1 Hz body/leg wobble); 1.5 keeps 78-150 mm calm.
+    float height_exp = 1.5F;
+    float lead_s = 0.06F;      // lean-rate lead against the hip servo lag
+    // The hips take the lean's changes; a lean held longer than about this
+    // [s] (a balance-trim error while it still learns, a slope) goes back to
+    // the body, as in v3.2. Without it the body copied every trim error
+    // (seed 0.08 rad off: body 0.08 off for > 10 s) and spent hip range on it.
+    float hpf_s = 3.0F;
+    float max_rad = 0.15F;     // |hip offset| from the static height pose
+    float rate_rad_s = 3.0F;   // hip command slew
+    float ramp_s = 1.0F;       // tier-2 authority ramp 0 <-> 1
+    // Tier 2 waits this long after the balance loop engages: the release
+    // catch (a seed error of up to 0.08 rad) is left to tier 1 as in v3.2,
+    // and the high-pass starts from the settled lean.
+    float settle_s = 2.0F;
+    // Plausibility of the virtual pitch: the com_line of the MEASURED legs
+    // must stay within this of the commanded pose's (plus J * tier-2 hip)
+    // for the whole check window, or it faults (a hip/knee sign or zero
+    // wrong, a joint that let go). Sim worst case (hip servo lag under a
+    // push) is ~0.07 rad; a wrong hip sign at 110 mm reads ~1 rad.
+    float model_check_rad = 0.12F;
+    float model_check_s = 0.3F;
+    // Weight of the joint-velocity term in theta_v_rate (the balancer's D
+    // channel): 1 = full CoM-line rate, 0 = gyro only (as v3.2).
+    float joint_rate_gain = 1.0F;
+    // Early hand-back to the body when the WHOLE system, not just the hip,
+    // is out of headroom. A hard clamp at max_rad alone lets tier 2 hold
+    // full authority (body at zero lean) right up to the wall and then hand
+    // the WHOLE shortfall to the body in one step - exactly when a hard
+    // stop from near vmax also pins the wheel command at its cap, with no
+    // time left for the body to catch up (two-body sim, 0.12 s wheel lag:
+    // v3.2 alone falls at 0.72 m/s, tier 1 alone survives to 0.78, trunk
+    // with a hard clamp fell at 0.75).
+    //
+    // The fix gates on BOTH signals: the authority target falls off
+    // linearly once the full-authority desired hip offset passes sat_margin
+    // of max_rad, but only while the wheel command is also within
+    // wheel_sat_margin of its own cap (derived from max_ground_velocity_m_s
+    // and the wheel radius). A demanding but recoverable disturbance (a
+    // push under wheel lag/delay) can ask a lot of the hip for a while
+    // without the wheel ever saturating - tier 1 is still winning - and
+    // fading there only costs body-level smoothness for no safety benefit
+    // (found in the robustness sweep: gating on hip range alone regressed
+    // the "wheel delay 70ms + push" case from 0.06 to 0.15 rad of body
+    // pitch). The wheel actually pinned at its cap is the signal that
+    // matters: at that point tier 1 alone cannot help further and whatever
+    // lean the hip was withholding needs to reach the body now. Applied
+    // every tick with no hold timer (the desired offset oscillates through
+    // a catch transient; a timer that resets on every dip below the margin
+    // never accumulates in time). Down uses sat_fade_s (fast: give the lean
+    // back before it is needed elsewhere); up uses the normal ramp_s (slow:
+    // only take it back once the stress is well clear).
+    // Maneuver preview (SET tprev, LQR path; independent of vpitch/trunk).
+    // A balancing robot answering a speed step reacts late and backwards:
+    // to brake it first speeds up to get the wheels ahead of the CoM
+    // (two-body sim: +0.10 m/s at 0.55, +0.20 at 0.70 before braking),
+    // and the BL4820 adds ~125 ms on top. Commanded maneuvers are known in
+    // advance, so: the operator speed becomes a jerk-limited plan; the
+    // balancer tracks it preview_s late with the planned lean atan(a/g) as
+    // its pitch reference and the plan's acceleration fed forward; the
+    // wheels get the plan preview_s early plus the h*jerk/g contact shift
+    // that builds the lean (LIP / ZMP preview, as legged robots do).
+    //
+    // Needs virtual_pitch (and its kinematic IMU compensation): the planned
+    // lean is only as good as the pitch estimate during a sustained
+    // acceleration, and the gyro-dominant estimator alone drifts ~0.02 rad
+    // there - v3.2 + preview over-leaned and ran into vmax at 0.70 m/s.
+    // Plan 0.3 m/s^2 / 1 m/s^3 matches v3.2's own command slew: 0.6 / 3
+    // doubled the body acceleration peaks and ran out of wheel headroom.
+    bool preview = true;
+    float preview_s = 0.12F;
+    float plan_accel_m_s2 = 0.3F;
+    float plan_jerk_m_s3 = 1.0F;
+    // Planned speed cap. With preview the robot really reaches the command
+    // (v3.2's own station slew held a 4 s drive at ~0.4 m/s), and cruising
+    // within 0.05 m/s of the 0.8 m/s wheel cap left no headroom to stand the
+    // lean back up: 0.75 fell with a 0.12 s wheel lag, 0.70 held; with a
+    // 70 ms wheel dead time 0.60 still fell. 0.55 (= the BLE full stick)
+    // held every plant variant (75/75, v3_tier_tests V15).
+    float plan_vmax_m_s = 0.55F;
+    // Tier 2 takes the planned lean from the plan this much ahead of the
+    // tracked reference (the GDS68 hip servo lags ~60-90 ms).
+    float hip_advance_s = 0.08F;
+    // Low-pass on the lean rate feeding the tier-2 lead [Hz, 0 = off]: the
+    // lead's derivative gain was the main source of body translational jerk
+    // (two-body sim, drive 0.55 m/s: jerk rms 0.9 without tier 2, 3.8 with
+    // the unfiltered 0.06 s lead). Off by default: every cut-off tried
+    // (10/15/20/30 Hz) cost robustness somewhere - crouched push wobble
+    // (<= 20 Hz) or the hard-stop margin with a 0.12 s wheel lag (even
+    // 30 Hz fell at 0.75 m/s). The planned-lean split above removes most of
+    // the lead's work during commanded maneuvers instead.
+    float lead_lpf_hz = 0.0F;
+    float sat_margin = 0.6F;
+    float wheel_sat_margin = 0.9F;
+    float sat_fade_s = 0.2F;
+    // Not done, measured in the two-body sim (v3_tier_tests TIER_AB):
+    //  - GDS68 velocity feed-forward of the tier-2 hip rate: that rate holds
+    //    the measured hip (through theta_v), so vel_ff fed the delayed hip
+    //    speed back positively - standing wobble 0.02 -> 0.34 rad/s;
+    //  - extrapolating the ~96 Hz joint samples by velocity x age: no gain,
+    //    more velocity noise in theta_v.
+    // Feed the IMU estimator the kinematic velocity of the IMU point (axle
+    // odometry + legs + rotation) while balancing free on the floor, so a
+    // sustained acceleration no longer tilts the pitch estimate. v3.0 turned
+    // this off because a held body with spinning wheels read as a fake
+    // acceleration: here it is gated off while held/lifted. Sim: pitch
+    // estimate error while driving 0.018 -> 0.004 rad, stop creep 5-15 cm ->
+    // ~1-5 cm. Needs virtual_pitch (measured legs). SET timu.
+    bool imu_kinematic = true;
+  };
+
   struct Config {
     Algo algo = Algo::Pid;
+    Tier tier{};
     Height height{};
     Engage engage{};
     Pid pid{};
@@ -163,6 +302,14 @@ class V3Controller {
     // core frame [rad]: the wheel encoder turns with the shin, so axle
     // odometry needs it once the legs move (v3.1).
     float leg_chain_rad = 0.0F;
+    // v3.3: measured leg joints per side (left, right), core frame, offsets
+    // from each joint's zero [rad] and driver velocity estimates [rad/s].
+    // legs_measured = filled and fresh (the tiers stay off otherwise).
+    std::array<float, 2> hip_rad{};
+    std::array<float, 2> knee_rad{};
+    std::array<float, 2> hip_rate_rad_s{};
+    std::array<float, 2> knee_rate_rad_s{};
+    bool legs_measured = false;
     bool sensors_ok = true;                 // IMU, wheels, legs fresh; no axis fault
     bool legs_ready = false;                // leg lock has reached its target
   };
@@ -234,6 +381,29 @@ class V3Controller {
   // Ground velocity/position used by the balancer (axle, rolling contact).
   [[nodiscard]] float groundVelocity() const noexcept { return ground_v_; }
   [[nodiscard]] float groundPosition() const noexcept { return ground_x_; }
+  // v3.3: virtual pitch (equals the body pitch while virtual_pitch is off),
+  // tier-2 hip offset on top of the height pose, and its authority 0..1.
+  [[nodiscard]] float virtualPitch() const noexcept { return theta_v_; }
+  [[nodiscard]] float virtualPitchRate() const noexcept { return theta_v_rate_; }
+  [[nodiscard]] float trunkHip() const noexcept { return dhip_; }
+  [[nodiscard]] float trunkAuthority() const noexcept { return trunk_alpha_; }
+  // Hip offset to send to the legs (height pose + tier 2), every state.
+  [[nodiscard]] float hipCommand() const noexcept { return pose_.hip_offset_rad + dhip_; }
+  // World-frame velocity of the IMU point for the pitch estimator's
+  // specific-force compensation; valid only while balancing free (Tier::
+  // imu_kinematic).
+  struct ImuVelocity {
+    float horizontal_m_s = 0.0F;
+    float vertical_m_s = 0.0F;
+    bool valid = false;
+  };
+  [[nodiscard]] ImuVelocity imuVelocity() const noexcept { return imu_velocity_; }
+  // d com_line / d hip at the current height pose (CAD + body_com_dx).
+  [[nodiscard]] float comLineHipGain() const noexcept { return j_hip_; }
+  // Measured minus expected com_line [rad] (the model check's signal).
+  [[nodiscard]] float legModelError() const noexcept {
+    return c_meas_ - c_pose_ - j_hip_ * dhip_;
+  }
 
  private:
   Output fault(const char* reason, const Output& base);
@@ -273,9 +443,55 @@ class V3Controller {
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
+  // The virtual pitch already carries the balance shift with height (from
+  // the measured legs), so the CAD feed-forward is off with it.
   [[nodiscard]] float ffPitch() const noexcept {
-    return config_.height.balance_ff_scale * pose_.balance_pitch_delta_rad;
+    return tierVirtual() ? 0.0F
+                         : config_.height.balance_ff_scale * pose_.balance_pitch_delta_rad;
   }
+  // v3.3 tiers.
+  // LQR only: the PID path with the virtual pitch overshot a 0.55 m/s drive
+  // past the speed cap and fell in the two-body sim (v3_tier_tests); the
+  // PID stays the v3.2 fallback.
+  [[nodiscard]] bool tierVirtual() const noexcept {
+    return config_.tier.virtual_pitch && legs_measured_ && config_.algo == Algo::Lqr;
+  }
+  // com_line angle [rad] and its partials by hip/knee at core leg offsets.
+  struct ComLine { float angle, d_hip, d_knee; };
+  [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;
+  void updateVirtualPitch(const Input& in);
+  void updateTrunk(const Input& in, bool active, std::array<float, 2> wheel_cmd_rad_s);
+  void updateImuVelocity(const Input& raw, bool free);
+  // v3.3 maneuver preview: jerk-limited speed plan and its history.
+  struct PlanSample { float v, a; };
+  void updatePlan(float target_v, float dt, bool reset);
+  [[nodiscard]] PlanSample planDelayed() const noexcept;
+  [[nodiscard]] PlanSample planAt(float delay_s) const noexcept;  // plan delay_s ago
+  float lean_rate_f_ = 0.0F;  // filtered lean rate for the tier-2 lead
+  float plan_v_ = 0.0F, plan_a_ = 0.0F, plan_j_ = 0.0F, plan_dt_ = 0.002F;
+  bool plan_init_ = false;
+  std::array<PlanSample, 128> plan_buf_{};
+  std::size_t plan_head_ = 0U, plan_n_ = 0U;
+  bool legs_measured_ = false;
+  float theta_v_ = 0.0F;
+  float theta_v_rate_ = 0.0F;
+  float com_line_hang_ = 0.0F;
+  float com_line_dx_ = 0.0F;  // body_com_dx the hang reference was computed for
+  float j_hip_ = 1.0F;
+  float j_hip_knee_ = 1.0e9F;  // knee pose j_hip_ was computed for
+  float c_pose_ = 0.0F;         // com_line of the commanded height pose
+  float c_meas_ = 0.0F;         // com_line of the measured legs
+  std::uint64_t model_bad_since_us_ = 0U;
+  float dhip_ = 0.0F;
+  float trunk_alpha_ = 0.0F;
+  float lean_lp_ = 0.0F;  // slow part of the lean (tier-2 high-pass)
+  float com_hang_m_ = 0.0F;  // CoM above the axle at the hang pose
+  float chain_rate_meas_ = 0.0F;
+  float body_pitch_ = 0.0F;  // IMU body pitch (the input pitch may be theta_v)
+  float body_rate_ = 0.0F;   // IMU body pitch rate
+  std::uint64_t trunk_block_us_ = 0U;  // last tick tier 2 was not allowed (held)
+  ImuVelocity imu_velocity_{};
+  float hip_meas_ = 0.0F, knee_meas_ = 0.0F, hip_rate_meas_ = 0.0F, knee_rate_meas_ = 0.0F;
   bool balance_set_ = false;
   float balance_rad_ = 0.0F;
   // PID state.

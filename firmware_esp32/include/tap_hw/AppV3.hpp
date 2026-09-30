@@ -41,6 +41,8 @@ class AppV3 {
   [[nodiscard]] bool imuFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] bool legsFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] float legJointRad(std::size_t leg) const noexcept;
+  // Driver velocity estimate (0x009) of a LegLock joint [rad/s], driver frame.
+  [[nodiscard]] float legJointRate(std::size_t leg) const noexcept;
   // v3.1: joint angle (driver frame, rad) the lock is holding this leg at.
   [[nodiscard]] float legTargetRad(std::size_t leg) const noexcept;
   [[nodiscard]] float legChainRad() const noexcept;
@@ -73,6 +75,8 @@ class AppV3 {
   std::uint32_t pre_ble_max_us_ = 0U;
   std::uint32_t pre_bus_max_us_ = 0U;
   std::uint32_t tick_late_ = 0U;
+  float hip_vel_sq_ = 0.0F;  // hip velocity estimate noise, per SENS report
+  std::uint32_t hip_vel_n_ = 0U;
   std::uint64_t last_imu_us_ = 0U;
   std::uint64_t last_report_us_ = 0U;
   std::uint64_t next_trace_us_ = 0U;

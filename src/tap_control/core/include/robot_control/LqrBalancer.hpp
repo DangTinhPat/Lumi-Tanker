@@ -227,6 +227,15 @@ class LqrBalancer {
     config_.command_velocity_tracking_margin_m_s =
         std::isfinite(margin_m_s) ? std::max(margin_m_s, 0.0F) : 0.0F;
   }
+  // Caller-shaped command (TAP firmware v3.3 maneuver preview): the forward
+  // velocity passed to update() is already a smooth planned trajectory, so
+  // the internal target/stop/station slews are bypassed, and the plan's own
+  // acceleration is fed forward into the integrated wheel command. Both
+  // default off: behaviour unchanged unless a caller opts in.
+  void setExternalShaping(bool enabled) noexcept { external_shaping_ = enabled; }
+  void setAccelFeedForward(float accel_m_s2) noexcept {
+    accel_ff_m_s2_ = std::isfinite(accel_m_s2) ? accel_m_s2 : 0.0F;
+  }
   void setMaxGroundAccel(float accel_m_s2) noexcept {
     if (std::isfinite(accel_m_s2) && accel_m_s2 > 0.0F) {
       config_.max_ground_accel_m_s2 = accel_m_s2;
@@ -272,6 +281,8 @@ class LqrBalancer {
   Config config_{};
   float active_length_m_ = 0.24F;
   float balance_trim_rad_ = 0.0F;
+  bool external_shaping_ = false;
+  float accel_ff_m_s2_ = 0.0F;
   GainVec gain_{};
   GainVec station_gain_{};
   GainVec posture_station_gain_{};

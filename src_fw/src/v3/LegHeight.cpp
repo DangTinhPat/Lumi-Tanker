@@ -57,6 +57,11 @@ LegPose LegHeight::forKnee(float knee_offset_rad) noexcept {
   return out;
 }
 
+float LegHeight::hangHipCad() noexcept {
+  static const Reference ref = hangReference();
+  return ref.hip_cad;
+}
+
 float LegHeight::maxHeight() noexcept { return forKnee(0.0F).axle_below_hip_m; }
 float LegHeight::minHeight() noexcept { return forKnee(kKneeMinRad).axle_below_hip_m; }
 

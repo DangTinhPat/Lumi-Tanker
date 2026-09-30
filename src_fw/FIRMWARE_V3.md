@@ -53,6 +53,15 @@ Build/nạp: `pio run -e esp32-s3-v3 -t upload`. Điều khiển: `python3 tools
 `LEGMODE POS|MIT` (khi đang Idle), `SET trim_gain|trim_max|trim|margin|accel|pitch_scale v`,
 `SET leg_kp|leg_kd v` (chỉ cho MIT).
 
+v3.3 (điều khiển phân tầng, chỉ LQR, mặc định tắt; xem `docs/V3.3_HANDOFF.md` mục 5):
+`SET vpitch 0|1` (con lắc ảo, chỉ khi không Balancing), `SET trunk 0|1` (hông giữ thân),
+`SET tshare|tlead|tmax|trate|thpf|texp v`, `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`
+(bù động học IMU), `SET tvg <0..1>` (trọng số vận tốc khớp trong θv_rate), `SET tprev 0|1`
+(dự báo thao tác, cần vpitch), `SET tpacc|tpjerk|tpvmax|tpt v` (gia tốc/giật/trần tốc độ/
+tầm dự báo của quỹ đạo). TR thêm
+`tv` (θv), `dhip` (hông tầng 2), `ta` (quyền 0..1), `me` (sai lệch mô hình chân); SENS
+thêm `hipv_rms` (nhiễu vận tốc hông).
+
 ## Log
 
 - `CONTROL mode=Idle|Locking|Balancing|Fault` khi đổi trạng thái; `RELEASE pitch=… seeded_trim=…`.

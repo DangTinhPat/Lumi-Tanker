@@ -9,7 +9,9 @@
 
 namespace tap_fw::v3 {
 
-V3Controller::V3Controller(Config config) : config_(config), lqr_(config.lqr) {
+V3Controller::V3Controller(Config config)
+    : config_(config), lqr_(config.lqr),
+      com_hang_m_(LegHeight::forKnee(0.0F).com_above_axle_m) {
   // One fixed pendulum: the legs never move in v3.
   lqr_.setComHeight(config_.com_height_m);
 }
@@ -26,7 +28,7 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
   return out;
 }
 
-V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
+V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) {
   // v3.2: pre-solve the LQR gain table over the height range, one point per
   // tick (idempotent once ready: near-zero cost after). Each point costs
   // ~50 ms on the ESP32-S3's single-precision FPU (LqrBalancer.hpp), which
@@ -41,27 +43,51 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
   if (config_.algo == Algo::Lqr) {
     (void)lqr_.buildGainTableStep(config_.lqr_gain_table_points);
   }
+  legs_measured_ = raw.legs_measured;
+  body_pitch_ = raw.pitch_rad;
+  imu_velocity_ = ImuVelocity{};  // set again at the end of a free balancing tick
+  // Held/lifted: "did not rotate" needs BOTH the body (IMU) and theta_v
+  // still. With tier 2 on, a free robot catching a push keeps its body level
+  // (body rate ~0) while its CoM line swings: the body rate alone read that
+  // as held in the two-body sim and re-zeroed it mid-catch (fell). The
+  // release test ("moves on its own again") stays on the body rate: a held
+  // body does not turn whatever the hips do.
+  body_rate_ = raw.pitch_rate_rad_s;
   // Axle motion of a rolling wheel on a rigid (locked) leg: R*(wheel + pitch).
-  const float mean_rate = 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
-  const float mean_pos = 0.5F * (in.wheel_pos_rad[0] + in.wheel_pos_rad[1]);
+  const float mean_rate = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
+  const float mean_pos = 0.5F * (raw.wheel_pos_rad[0] + raw.wheel_pos_rad[1]);
   // The wheel encoder turns with the shin: add the leg chain (hip + knee)
   // to the axle odometry, as MotorFeedback::writeTo does (v3.1).
   if (!chain_init_) {
-    chain_prev_rad_ = in.leg_chain_rad;
+    chain_prev_rad_ = raw.leg_chain_rad;
     chain_rate_f_ = 0.0F;
     chain_init_ = true;
   }
-  const float chain_rate = in.dt_s > 0.0F
-      ? (in.leg_chain_rad - chain_prev_rad_) / in.dt_s : 0.0F;
-  chain_prev_rad_ = in.leg_chain_rad;
-  chain_rate_f_ += std::clamp(2.0F * 3.14159265F * 10.0F * in.dt_s, 0.0F, 1.0F) *
+  const float chain_rate = raw.dt_s > 0.0F
+      ? (raw.leg_chain_rad - chain_prev_rad_) / raw.dt_s : 0.0F;
+  chain_prev_rad_ = raw.leg_chain_rad;
+  chain_rate_f_ += std::clamp(2.0F * 3.14159265F * 10.0F * raw.dt_s, 0.0F, 1.0F) *
       (chain_rate - chain_rate_f_);
-  ground_v_ = config_.wheel_radius_m * (mean_rate + in.pitch_rate_rad_s + chain_rate_f_);
-  ground_x_ = config_.wheel_radius_m * (mean_pos + in.pitch_rad + in.leg_chain_rad);
+  chain_rate_meas_ = 0.5F * (raw.hip_rate_rad_s[0] + raw.knee_rate_rad_s[0] +
+                             raw.hip_rate_rad_s[1] + raw.knee_rate_rad_s[1]);
+  // v3.3: the hips swing at up to ~1 rad/s; the 10 Hz filtered difference
+  // lags that, so the tiers use the drivers' own velocity estimates.
+  ground_v_ = config_.wheel_radius_m *
+      (mean_rate + raw.pitch_rate_rad_s + (tierVirtual() ? chain_rate_meas_ : chain_rate_f_));
+  ground_x_ = config_.wheel_radius_m * (mean_pos + raw.pitch_rad + raw.leg_chain_rad);
+
+  // v3.3 tier 1: everything below (engage, balance loop, fall, runaway and
+  // held checks, height quality) works on the virtual pitch when enabled.
+  updateVirtualPitch(raw);
+  Input in = raw;
+  in.pitch_rad = theta_v_;
+  in.pitch_rate_rad_s = theta_v_rate_;
+  if (state_ != State::Balancing) updateTrunk(in, false, {0.0F, 0.0F});
 
   Output out{};
   if (cmd.disable) {
     legs_held_ = false;
+    dhip_ = trunk_alpha_ = 0.0F;  // legs released: no tier-2 offset left over
     state_ = State::Idle;
     out.state = state_;
     return out;
@@ -158,6 +184,23 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
     out.wheels_enabled = true;
     if (!in.sensors_ok) return fault("sensor feedback lost while balancing", out);
     if (std::abs(in.pitch_rad) > config_.fall_pitch_rad) return fault("fallen (pitch limit)", out);
+    // Tier 2 can keep the body level while the whole robot falls (caught
+    // above by theta_v); a body far off means the hips lost it.
+    if (std::abs(raw.pitch_rad) > config_.fall_pitch_rad) {
+      return fault("fallen (body pitch limit)", out);
+    }
+    if (tierVirtual()) {
+      if (std::abs(legModelError()) <= config_.tier.model_check_rad) {
+        model_bad_since_us_ = 0U;
+      } else if (model_bad_since_us_ == 0U) {
+        model_bad_since_us_ = in.now_us;
+      } else if (in.now_us - model_bad_since_us_ >=
+                 static_cast<std::uint64_t>(config_.tier.model_check_s * 1.0e6F)) {
+        model_bad_since_us_ = 0U;
+        return fault("virtual pitch: measured legs disagree with the pose (joint sign/zero?)",
+                     out);
+      }
+    }
     // Operator drive (and its stop ramp) legitimately runs the wheels past
     // runaway_wheel_rad_s (15 rad/s = 0.6 m/s): the guard is for a held or
     // lifted robot, which is not being driven.
@@ -193,10 +236,12 @@ V3Controller::Output V3Controller::update(const Input& in, const Command& cmd) {
     }
     updateHeight(in, cmd);
     out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
-    out.leg_hip_offset_rad = pose_.hip_offset_rad;
+    updateTrunk(in, true, out.wheel_cmd_rad_s);
+    out.leg_hip_offset_rad = hipCommand();
     out.leg_knee_offset_rad = pose_.knee_offset_rad;
     out.legs_moving = knee_cmd_rad_ != knee_target_rad_;
   }
+  updateImuVelocity(raw, state_ == State::Balancing && !held_outer_off_ && !held_quiet_);
   out.state = state_;
   return out;
 }
@@ -209,6 +254,7 @@ void V3Controller::engageBalance(const Input& in, float seed) {
   lqr_.setBalanceTrim(seed);
   lqr_x_target_m_ = ground_x_;
   lqr_lead_filt_ = 0.0F;
+  model_bad_since_us_ = 0U;
   // theta_b is the balance angle at the power-up height; the height
   // feed-forward adds the model change on top (v3.1).
   pid_seed_ = pid_theta_b_ = seed - ffPitch();
@@ -290,15 +336,15 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
     pid_driving_ = false;
   }
   // Horizontal specific force = body acceleration (gravity is vertical).
-  const float a_h = in.accel_x_m_s2 * std::cos(in.pitch_rad) +
-      in.accel_z_m_s2 * std::sin(in.pitch_rad);
+  const float a_h = in.accel_x_m_s2 * std::cos(body_pitch_) +
+      in.accel_z_m_s2 * std::sin(body_pitch_);
   body_accel_f_ += std::clamp(2.0F * 3.14159265F * 5.0F * dt, 0.0F, 1.0F) *
       (a_h - body_accel_f_);
   // The body moves on its own again (released on the floor): outer loop on.
   // Robot accelerometer noise: std 0.065 m/s^2 still, 0.18 with the wheels
   // spinning in the air (2026-09-27 log), hence 5 Hz and 50 ms sustained.
   held_free_ticks_ = std::abs(body_accel_f_) > 0.15F ? held_free_ticks_ + 1 : 0;
-  if (held_outer_off_ && (std::abs(in.pitch_rate_rad_s) > 0.15F || held_free_ticks_ >= 25)) {
+  if (held_outer_off_ && (std::abs(body_rate_) > 0.15F || held_free_ticks_ >= 25)) {
     held_outer_off_ = false;
   }
   if (held_outer_off_) {
@@ -350,7 +396,7 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   if (legs_moved_us_ != 0U && in.now_us - legs_moved_us_ < config_.height.held_suppress_us) {
     held_window_start_us_ = 0U;
   }
-  held_max_rate_ = std::max(held_max_rate_, std::abs(in.pitch_rate_rad_s));
+  held_max_rate_ = std::max({held_max_rate_, std::abs(body_rate_), std::abs(theta_v_rate_)});
   held_accel_sum_ += std::abs(body_accel_f_);
   ++held_accel_n_;
   if (held_window_start_us_ == 0U) {
@@ -424,12 +470,12 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   }
   // Horizontal specific force (see pidUpdate): tells a free robot from a held
   // one, shared by both algorithms' held/lifted exit condition.
-  const float a_h = in.accel_x_m_s2 * std::cos(in.pitch_rad) +
-      in.accel_z_m_s2 * std::sin(in.pitch_rad);
+  const float a_h = in.accel_x_m_s2 * std::cos(body_pitch_) +
+      in.accel_z_m_s2 * std::sin(body_pitch_);
   body_accel_f_ += std::clamp(2.0F * 3.14159265F * 5.0F * in.dt_s, 0.0F, 1.0F) *
       (a_h - body_accel_f_);
   held_free_ticks_ = std::abs(body_accel_f_) > 0.15F ? held_free_ticks_ + 1 : 0;
-  if (held_outer_off_ && (std::abs(in.pitch_rate_rad_s) > 0.15F || held_free_ticks_ >= 25)) {
+  if (held_outer_off_ && (std::abs(body_rate_) > 0.15F || held_free_ticks_ >= 25)) {
     held_outer_off_ = false;
   }
   if (held_outer_off_) {
@@ -478,11 +524,33 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   command.target_forward_velocity_m_s = held_outer_off_ ? 0.0F : target_v;
   command.target_yaw_rate_rad_s = cmd.yaw_rad_s;
 
+  // v3.3 maneuver preview (Tier::preview): the balancer tracks the plan
+  // preview_s late, leaning by atan(a/g) with the plan's acceleration fed
+  // forward; the wheels get the plan preview_s early (below).
+  const bool preview = config_.tier.preview && tierVirtual();
+  lqr_.setExternalShaping(preview);
+  float lean_ff = 0.0F, wheel_advance = 0.0F, accel_ff = 0.0F;
+  if (preview) {
+    const float plan_cap = std::clamp(config_.tier.plan_vmax_m_s, 0.05F, vmax);
+    updatePlan(held_outer_off_ ? 0.0F : std::clamp(target_v, -plan_cap, plan_cap), in.dt_s,
+               held_outer_off_);
+    const PlanSample now = planDelayed();
+    command.target_forward_velocity_m_s = now.v;
+    accel_ff = now.a;
+    lean_ff = std::atan(now.a / 9.80665F);
+    // Contact point ahead of/behind the CoM by h*a/g: while the lean
+    // builds, the wheels run slower (accelerating) or faster (braking) than
+    // the body by h*jerk/g - the only speed dip/bump a planned maneuver needs.
+    const float h = std::max(pose_.com_above_axle_m, 0.03F);
+    wheel_advance = (plan_v_ - now.v) - h / 9.80665F * plan_j_;
+  }
+  lqr_.setAccelFeedForward(accel_ff);
+
   // integrate=false while held: LqrBalancer decays the commanded speed to
   // zero on its own (~0.1 s) and freezes the balance-trim adaptation -
   // matching the PID path's leak-to-zero and frozen theta_b while held.
   const bool integrate = !held_outer_off_;
-  const auto lqr_out = lqr_.update(state, command, integrate, ffPitch(), true);
+  const auto lqr_out = lqr_.update(state, command, integrate, ffPitch() + lean_ff, true);
   // v3.1: shares updateHeight's settled check with the PID path.
   pid_ref_ = lqr_.debugState().lqr_pitch_ref_rad;
 
@@ -493,7 +561,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     held_window_start_us_ = 0U;
   }
   const float lqr_cmd = lqr_.debugState().commanded_ground_velocity_m_s;
-  held_max_rate_ = std::max(held_max_rate_, std::abs(in.pitch_rate_rad_s));
+  held_max_rate_ = std::max({held_max_rate_, std::abs(body_rate_), std::abs(theta_v_rate_)});
   held_accel_sum_ += std::abs(body_accel_f_);
   ++held_accel_n_;
   if (held_window_start_us_ == 0U) {
@@ -542,9 +610,12 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   // while staying well above genuine body dynamics (few Hz) and the lag this
   // lead exists to compensate (tau_s ~0.08-0.15 s).
   const float lead_alpha = std::clamp(2.0F * 3.14159265F * 20.0F * in.dt_s, 0.0F, 1.0F);
-  lqr_lead_filt_ += lead_alpha * (lqr_.debugState().optimal_command_m_s - lqr_lead_filt_);
+  // The plan's own acceleration is advanced exactly by wheel_advance; the
+  // lead only covers the feedback part.
+  lqr_lead_filt_ += lead_alpha *
+      (lqr_.debugState().optimal_command_m_s - accel_ff - lqr_lead_filt_);
   const float base_ground_v = lqr_out.ground_velocity_m_s;
-  const float lead_v = lqr_lead_filt_ * config_.lqr_lead_s;
+  const float lead_v = lqr_lead_filt_ * config_.lqr_lead_s + wheel_advance;
   const float sent_ground_v = std::clamp(base_ground_v + lead_v, -vmax, vmax);
   const float lead_wheel = config_.lqr.left_wheel_sign *
       (sent_ground_v - base_ground_v) / radius;
@@ -558,6 +629,173 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   };
   return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel),
           comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel)};
+}
+
+V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
+  namespace geo = robot_control::geometry;
+  const float hip = LegHeight::hangHipCad() + hip_offset;
+  const float knee = knee_offset;
+  const auto body = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
+  const auto jac = robot_control::WholeBodyModel::symmetricComOffsetJacobian(hip, knee);
+  const float cx = body.com_offset_x_m +
+      geo::parts[0].mass * config_.tier.body_com_dx_m / geo::total_mass_kg;
+  const float cz = std::max(body.com_above_axle_m, 0.01F);
+  const float den = cx * cx + cz * cz;
+  return {std::atan2(cx, cz),
+          (cz * jac.d_com_offset_x_d_hip - cx * jac.d_com_above_axle_d_hip) / den,
+          (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den};
+}
+
+void V3Controller::updateVirtualPitch(const Input& in) {
+  theta_v_ = in.pitch_rad;
+  theta_v_rate_ = in.pitch_rate_rad_s;
+  if (!config_.tier.virtual_pitch && !config_.tier.trunk) return;
+  // Hang reference and the tier-2 gain at the height pose: recomputed only
+  // when the model offset or the pose changes (the loop has ~0.4 ms spare).
+  if (!(com_line_dx_ == config_.tier.body_com_dx_m) || !(j_hip_knee_ == pose_.knee_offset_rad)) {
+    com_line_dx_ = config_.tier.body_com_dx_m;
+    com_line_hang_ = comLine(0.0F, 0.0F).angle;
+    j_hip_knee_ = pose_.knee_offset_rad;
+    const ComLine pose = comLine(pose_.hip_offset_rad, pose_.knee_offset_rad);
+    j_hip_ = pose.d_hip;
+    c_pose_ = pose.angle;
+  }
+  if (!tierVirtual()) return;
+  // Symmetric model on the mean of both legs (hand-arranged zeros differ a
+  // little; the planar model has no roll anyway).
+  hip_rate_meas_ = 0.5F * (in.hip_rate_rad_s[0] + in.hip_rate_rad_s[1]);
+  knee_rate_meas_ = 0.5F * (in.knee_rate_rad_s[0] + in.knee_rate_rad_s[1]);
+  hip_meas_ = 0.5F * (in.hip_rad[0] + in.hip_rad[1]);
+  knee_meas_ = 0.5F * (in.knee_rad[0] + in.knee_rad[1]);
+  const ComLine c = comLine(hip_meas_, knee_meas_);
+  c_meas_ = c.angle;
+  theta_v_ = in.pitch_rad + c.angle - com_line_hang_;
+  // Analytic rate from the driver velocities: differentiating the angle and
+  // filtering it would add lag to the balancer's D channel.
+  theta_v_rate_ = in.pitch_rate_rad_s + config_.tier.joint_rate_gain *
+      (c.d_hip * hip_rate_meas_ + c.d_knee * knee_rate_meas_);
+}
+
+void V3Controller::updateImuVelocity(const Input& raw, bool free) {
+  imu_velocity_ = ImuVelocity{};
+  if (!config_.tier.imu_kinematic || !free || !tierVirtual()) return;
+  const float hip = LegHeight::hangHipCad() + hip_meas_;
+  const float wheel = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
+  const auto v = robot_control::WholeBodyModel::imuVelocityThroughLeg(
+      raw.pitch_rad, raw.pitch_rate_rad_s, hip, knee_meas_, hip_rate_meas_, knee_rate_meas_,
+      wheel, config_.wheel_radius_m);
+  imu_velocity_ = {v.horizontal_m_s, v.vertical_m_s, std::isfinite(v.horizontal_m_s) &&
+                                                         std::isfinite(v.vertical_m_s)};
+}
+
+void V3Controller::updateTrunk(const Input& in, bool active,
+                               std::array<float, 2> wheel_cmd_rad_s) {
+  const Tier& t = config_.tier;
+  // Settle after engage and again after every held/lifted spell: the
+  // release catch is tier 1's alone.
+  if (!active || held_outer_off_ || held_quiet_) trunk_block_us_ = in.now_us;
+  const std::uint64_t since = std::max(state_since_us_, trunk_block_us_);
+  const bool settled = in.now_us - since >=
+      static_cast<std::uint64_t>(std::max(t.settle_s, 0.0F) * 1.0e6F);
+  // Lean of the CoM line from the balance point (in.pitch is theta_v),
+  // split into the planned part (maneuver preview: known ahead, smooth) and
+  // the residual (disturbances). The legs take the planned lean from the
+  // plan itself, hip_advance_s early against the hip servo lag; only the
+  // residual goes through the high-pass and the (filtered) lead, so sensor
+  // noise and the lead's gain stop shaking the body during planned motion.
+  const float lean = in.pitch_rad - (balanceRef() + ffPitch());
+  float lean_plan_now = 0.0F, lean_plan_ahead = 0.0F;
+  if (t.preview && tierVirtual() && plan_n_ > 0U) {
+    const float g = 9.80665F;
+    lean_plan_now = std::atan(planAt(t.preview_s).a / g);
+    lean_plan_ahead = std::atan(planAt(std::max(t.preview_s - t.hip_advance_s, 0.0F)).a / g);
+  }
+  const float residual = lean - lean_plan_now;
+  if (trunk_alpha_ <= 0.0F) {
+    lean_lp_ = residual;  // start from the current lean: no step when it ramps in
+    lean_rate_f_ = 0.0F;
+  } else if (t.hpf_s > 0.0F) {
+    lean_lp_ += std::min(in.dt_s / t.hpf_s, 1.0F) * (residual - lean_lp_);
+  } else {
+    lean_lp_ = 0.0F;
+  }
+  const float rate_alpha = t.lead_lpf_hz > 0.0F
+      ? std::clamp(2.0F * 3.14159265F * t.lead_lpf_hz * in.dt_s, 0.0F, 1.0F) : 1.0F;
+  lean_rate_f_ += rate_alpha * (in.pitch_rate_rad_s - lean_rate_f_);
+  // Full-authority desired hip offset (alpha = 1, unclamped): the signal
+  // that decides whether the legs are running out of range, independent of
+  // how far alpha has already faded (see Tier::sat_margin).
+  const float ratio = std::clamp(pose_.com_above_axle_m / std::max(com_hang_m_, 0.01F),
+                                 0.1F, 1.0F);
+  const float share = t.lean_share * std::pow(ratio, std::max(t.height_exp, 0.0F));
+  const float full_want = share *
+      (lean_plan_ahead + residual - lean_lp_ + t.lead_s * lean_rate_f_) /
+      std::max(j_hip_, 0.2F);
+  const float max_rad = std::max(t.max_rad, 1.0e-3F);
+  const float margin = std::clamp(t.sat_margin, 0.0F, 0.99F);
+  const float mag_ratio = std::abs(full_want) / max_rad;
+  // Gate the fade on the wheel command too (see Tier::sat_margin): only
+  // once tier 1 itself is near its own cap does giving up hip range early
+  // pay for itself.
+  const float wheel_cap = std::max(config_.lqr.max_ground_velocity_m_s, 0.05F) /
+      std::max(config_.wheel_radius_m, 1.0e-4F);
+  const float wheel_ratio = std::max(std::abs(wheel_cmd_rad_s[0]), std::abs(wheel_cmd_rad_s[1])) /
+      wheel_cap;
+  const bool wheel_saturating = wheel_ratio >= std::clamp(t.wheel_sat_margin, 0.0F, 1.0F);
+  const float range_ceiling = (!wheel_saturating || mag_ratio <= margin)
+      ? 1.0F : std::clamp((1.0F - mag_ratio) / (1.0F - margin), 0.0F, 1.0F);
+  const bool on = active && settled && t.trunk && tierVirtual();
+  const float target = on ? range_ceiling : 0.0F;
+  const float up = t.ramp_s > 1.0e-3F ? in.dt_s / t.ramp_s : 1.0F;
+  const float down = t.sat_fade_s > 1.0e-3F ? in.dt_s / t.sat_fade_s : 1.0F;
+  const float diff = target - trunk_alpha_;
+  trunk_alpha_ = std::clamp(trunk_alpha_ + std::clamp(diff, -down, up), 0.0F, 1.0F);
+  const float want = std::clamp(trunk_alpha_ * full_want, -max_rad, max_rad);
+  const float step = std::max(t.rate_rad_s, 0.0F) * in.dt_s;
+  dhip_ += std::clamp(want - dhip_, -step, step);
+}
+
+void V3Controller::updatePlan(float target_v, float dt, bool reset) {
+  const Tier& t = config_.tier;
+  if (reset || !plan_init_) {
+    plan_v_ = reset ? 0.0F : target_v;
+    plan_a_ = plan_j_ = 0.0F;
+    plan_n_ = 0U;
+    plan_init_ = true;
+  }
+  const float amax = std::max(t.plan_accel_m_s2, 0.05F);
+  const float jmax = std::max(t.plan_jerk_m_s3, 0.1F);
+  // Jerk-limited (S-curve) tracking of the operator speed: aim the
+  // acceleration at the sign of the error left after ramping the current
+  // acceleration back to zero at jmax, so it lands on the target without
+  // overshoot.
+  const float v_stop = plan_v_ + plan_a_ * std::abs(plan_a_) / (2.0F * jmax);
+  const float err = target_v - v_stop;
+  const float a_des = std::abs(err) < 1.0e-4F ? 0.0F : std::copysign(amax, err);
+  const float da = std::clamp(a_des - plan_a_, -jmax * dt, jmax * dt);
+  plan_a_ += da;
+  plan_j_ = dt > 0.0F ? da / dt : 0.0F;
+  plan_v_ += plan_a_ * dt;
+  if (std::abs(target_v - plan_v_) < 2.0e-3F && std::abs(plan_a_) <= 2.0F * jmax * dt) {
+    plan_v_ = target_v;
+    plan_a_ = plan_j_ = 0.0F;
+  }
+  plan_buf_[plan_head_] = {plan_v_, plan_a_};
+  plan_head_ = (plan_head_ + 1U) % plan_buf_.size();
+  if (plan_n_ < plan_buf_.size()) ++plan_n_;
+  plan_dt_ = dt;
+}
+
+V3Controller::PlanSample V3Controller::planDelayed() const noexcept {
+  return planAt(config_.tier.preview_s);
+}
+
+V3Controller::PlanSample V3Controller::planAt(float delay_s) const noexcept {
+  const float dt = std::max(plan_dt_, 1.0e-4F);
+  std::size_t lag = static_cast<std::size_t>(std::lround(std::max(delay_s, 0.0F) / dt));
+  lag = std::min({lag, plan_buf_.size() - 1U, plan_n_ > 0U ? plan_n_ - 1U : 0U});
+  const std::size_t i = (plan_head_ + plan_buf_.size() - 1U - lag) % plan_buf_.size();
+  return plan_n_ > 0U ? plan_buf_[i] : PlanSample{plan_v_, plan_a_};
 }
 
 void V3Controller::updateHeight(const Input& in, const Command& cmd) {
