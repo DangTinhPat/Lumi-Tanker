@@ -42,8 +42,10 @@ constexpr std::uint64_t kHeightHoldUs = 300'000U;  // HMOVE refresh window
 // BLE gamepad.
 constexpr std::uint64_t kBlePollUs = 10'000U;
 constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
-constexpr float kBleDriveSpeedMS = 0.15F;   // full stick forward
-constexpr float kBleYawRateRadS = 0.6F;     // full stick sideways
+// Full stick. Forward stays 0.25 m/s under the 0.8 m/s balancer cap: catching
+// a forward lean needs the wheels to run faster than the drive speed.
+constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
+constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
 
 std::atomic<int> g_v3_ble_links{0};
 std::atomic<bool> g_v3_ble_readvertise{false};
@@ -63,6 +65,18 @@ constexpr float kTiltTestMaxRadS = 12.0F;   // below the 15 rad/s runaway guard
 // Legs count as "at zero" once within this of the target after the ramp.
 constexpr float kLegReadyRad = 0.08F;
 constexpr std::array<const char*, 4> kLegNames{"LH", "LK", "RH", "RK"};
+// HIPTEST: 0-2 s steps (+A, 0, -A, 0), 2-6 s sines at 1/2/4/8 Hz (1 s each),
+// 6-6.5 s back at 0. One sample per control tick.
+constexpr float kHipTestDurationS = 6.5F;
+constexpr std::size_t kHipTestMaxSamples = 3400U;
+struct HipTestSample {
+  std::uint32_t t_us;
+  float cmd_rad;
+  float hip_l_rad;
+  float hip_r_rad;
+  std::uint32_t fb_age_us;
+};
+HipTestSample g_hip_test[kHipTestMaxSamples];
 
 std::uint64_t nowUs() { return static_cast<std::uint64_t>(esp_timer_get_time()); }
 
@@ -105,14 +119,39 @@ bool AppV3::begin() noexcept {
 void AppV3::loop() noexcept {
   const std::uint64_t now_us = nowUs();
   pollSerial(now_us);
+  const std::uint64_t t_serial = nowUs();
   pollBle(now_us);
+  const std::uint64_t t_ble = nowUs();
   can_.service(now_us);
   drainFeedback(now_us);
+  const std::uint64_t t_bus = nowUs();
+  pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - now_us));
+  pre_ble_max_us_ = std::max(pre_ble_max_us_, static_cast<std::uint32_t>(t_ble - t_serial));
+  pre_bus_max_us_ = std::max(pre_bus_max_us_, static_cast<std::uint32_t>(t_bus - t_ble));
   if (now_us >= next_control_us_) {
-    next_control_us_ = now_us + tap_fw::board::kControlPeriodUs;
+    // Fixed-rate schedule. `now + period` added each tick's own processing
+    // time to the period: measured 2026-09-30 (HIPTEST) the loop ran at
+    // ~440 Hz (2.27 ms mean, 3.5 ms max) while the controller integrated
+    // with dt = 2 ms, i.e. ~12 % slow. A long stall resyncs instead of
+    // bursting through the missed ticks.
+    constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
+    if (now_us - next_control_us_ > kPeriod) ++tick_late_;
+    next_control_us_ += kPeriod;
+    if (now_us >= next_control_us_ + 4U * kPeriod) next_control_us_ = now_us + kPeriod;
+    tick_dt_s_ = last_tick_us_ == 0U ? static_cast<float>(kPeriod) * 1.0e-6F
+        : std::clamp(static_cast<float>(now_us - last_tick_us_) * 1.0e-6F,
+                     0.5e-6F * static_cast<float>(kPeriod),
+                     3.0e-6F * static_cast<float>(kPeriod));
+    last_tick_us_ = now_us;
     updateImu(now_us);
+    const std::uint64_t t_imu = nowUs();
     controlTick(now_us);
+    const std::uint64_t t_ctrl = nowUs();
     report(now_us);
+    const std::uint64_t t_end = nowUs();
+    tick_imu_max_us_ = std::max(tick_imu_max_us_, static_cast<std::uint32_t>(t_imu - t_bus));
+    tick_ctrl_max_us_ = std::max(tick_ctrl_max_us_, static_cast<std::uint32_t>(t_ctrl - t_imu));
+    tick_exec_max_us_ = std::max(tick_exec_max_us_, static_cast<std::uint32_t>(t_end - now_us));
   }
   delayMicroseconds(100U);
 }
@@ -195,8 +234,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   } else if (std::strncmp(line, "DRIVE ", 6U) == 0) {
     float f = 0.0F, y = 0.0F;
     if (std::sscanf(line + 6, "%f %f", &f, &y) == 2) {
-      drive_forward_ = std::clamp(f, -0.3F, 0.3F);
-      drive_yaw_ = std::clamp(y, -1.0F, 1.0F);
+      drive_forward_ = std::clamp(f, -kBleDriveSpeedMS, kBleDriveSpeedMS);
+      drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
     }
   } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
     if (ctrl_.state() != V3Controller::State::Idle &&
@@ -271,6 +310,28 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     Serial.println("V3 BALANCE cleared: START seeds from the release pitch");
   } else if (std::strcmp(line, "GET") == 0) {
     printTunables();
+  } else if (std::strncmp(line, "HIPTEST", 7) == 0) {
+    float amp = 0.05F;
+    float resend_ms = 4.0F;
+    (void)std::sscanf(line + 7, "%f %f", &amp, &resend_ms);
+    if (hip_test_ || hip_test_dumping_) {
+      Serial.println("V3 HIPTEST refused: already running");
+      return;
+    }
+    if (!legs_.engaged() || !legs_.atZero(now_us)) {
+      Serial.println("V3 HIPTEST refused: legs not locked (robot on the stand, START first)");
+      return;
+    }
+    hip_test_amp_rad_ = std::clamp(amp, 0.01F, 0.10F);
+    hip_test_resend_us_ =
+        static_cast<std::uint32_t>(std::clamp(resend_ms, 2.0F, 20.0F) * 1000.0F);
+    legs_.setResendPeriod(hip_test_resend_us_);
+    hip_test_ = true;
+    hip_test_start_us_ = now_us;
+    hip_test_n_ = 0U;
+    Serial.printf("V3 HIPTEST start: amp=%.3f rad resend=%lu us, wheels off, %.1f s "
+                  "(robot must be on the stand)\n", hip_test_amp_rad_,
+                  static_cast<unsigned long>(hip_test_resend_us_), kHipTestDurationS);
   } else {
     Serial.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
                   "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST)\n", line);
@@ -453,9 +514,16 @@ void AppV3::pollBle(std::uint64_t now_us) noexcept {
 }
 
 void AppV3::freezeHeight() noexcept {
-  // Hold the height the legs are commanded to right now.
+  // Hold where the legs can stop smoothly from their current speed (the
+  // controller ramps the speed down at Height::accel_m_s2), not where they
+  // are this instant: that forced an abrupt stop on every button release.
   const float h = ctrl_.legPose().axle_below_hip_m;
-  if (h > 0.0F) height_request_m_ = h;
+  if (h <= 0.0F) return;
+  const float v = ctrl_.heightSpeed();
+  const float a = std::max(ctrl_.config().height.accel_m_s2, 1.0e-3F);
+  height_request_m_ = std::clamp(h + v * std::abs(v) / (2.0F * a),
+                                 tap_fw::v3::LegHeight::minHeight(),
+                                 tap_fw::v3::LegHeight::maxHeight());
 }
 
 float AppV3::legTargetRad(std::size_t leg) const noexcept {
@@ -552,7 +620,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
 
   V3Controller::Input in{};
   in.now_us = now_us;
-  in.dt_s = static_cast<float>(tap_fw::board::kControlPeriodUs) * 1.0e-6F;
+  in.dt_s = tick_dt_s_;  // measured tick period (fixed-rate schedule, clamped)
   in.pitch_rad = imu_.pitch_rad;
   // Bias-corrected gyro: the raw rate carried a -0.05 rad/s bias that read as
   // a steady backward rotation and wound the wheels up from the first tick.
@@ -601,12 +669,28 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
+  if (hip_test_ && (!out.legs_locked ||
+                    now_us - hip_test_start_us_ >=
+                        static_cast<std::uint64_t>(kHipTestDurationS * 1.0e6F))) {
+    hip_test_ = false;
+    hip_test_dumping_ = true;
+    hip_test_dump_i_ = 0U;
+    legs_.setResendPeriod(LegLock::Config{}.resend_period_us);
+    Serial.printf("HT BEGIN n=%u amp=%.3f resend_us=%lu cols=t_ms,cmd,hipL,hipR,fb_age_ms%s\n",
+                  static_cast<unsigned>(hip_test_n_), hip_test_amp_rad_,
+                  static_cast<unsigned long>(hip_test_resend_us_),
+                  out.legs_locked ? "" : " (ABORTED: legs released)");
+  }
   if (out.legs_locked) {
-    legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
+    const float hip_test = hip_test_ ? hipTestOffset(now_us) : 0.0F;
+    legs_.setOffsets(ctrl_.legPose().hip_offset_rad + hip_test,
+                     ctrl_.legPose().knee_offset_rad);
     (void)legs_.update(now_us, transport_);
+    if (hip_test_) recordHipTest(now_us, ctrl_.legPose().hip_offset_rad + hip_test);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
   }
+  if (hip_test_dumping_) dumpHipTest();
   auto wheel_cmd = out.wheel_cmd_rad_s;
   if (tilt_test_ && out.state == V3Controller::State::Balancing) {
     if (last_state_ != static_cast<int>(out.state)) tilt_ref_rad_ = imu_.pitch_rad;
@@ -615,7 +699,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                                -kTiltTestMaxRadS, kTiltTestMaxRadS);
     wheel_cmd = {w, w};
   }
-  driveWheels(out.wheels_enabled, wheel_cmd, now_us);
+  driveWheels(out.wheels_enabled && !hip_test_ && !hip_test_dumping_, wheel_cmd, now_us);
   (void)feedback_.poll(transport_, now_us, true);  // wheel reads + bus voltage, no MIT probes
 
   const int state = static_cast<int>(out.state);
@@ -660,6 +744,54 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   ctrl_.pitchRef(), ctrl_.positionError(), ctrl_.readyPhase(),
                   ctrl_.heldResets(), ctrl_.legPose().axle_below_hip_m * 1000.0F,
                   ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad);
+  }
+}
+
+float AppV3::hipTestOffset(std::uint64_t now_us) const noexcept {
+  const float t = static_cast<float>(now_us - hip_test_start_us_) * 1.0e-6F;
+  const float a = hip_test_amp_rad_;
+  if (t < 0.5F) return a;
+  if (t < 1.0F) return 0.0F;
+  if (t < 1.5F) return -a;
+  if (t < 2.0F) return 0.0F;
+  if (t < 6.0F) {
+    const float seg = t - 2.0F;
+    const int k = static_cast<int>(seg);  // 0..3 -> 1, 2, 4, 8 Hz
+    const float f = static_cast<float>(1 << k);
+    return a * std::sin(kTwoPi * f * (seg - static_cast<float>(k)));
+  }
+  return 0.0F;
+}
+
+void AppV3::recordHipTest(std::uint64_t now_us, float cmd_rad) noexcept {
+  if (hip_test_n_ >= kHipTestMaxSamples) return;
+  const auto legs = tap_fw::board::MotorIds{}.leg_can;
+  // Leg order LH, LK, RH, RK: hips are 0 and 2; core frame = driver * sign.
+  const float hip_l = legJointRad(0) * legs[0].driver_sign;
+  const float hip_r = legJointRad(2) * legs[2].driver_sign;
+  const std::uint64_t stamp = feedback_.legEstimate(legs[0].joint_index).stamp_us;
+  auto& s = g_hip_test[hip_test_n_++];
+  s.t_us = static_cast<std::uint32_t>(now_us - hip_test_start_us_);
+  s.cmd_rad = cmd_rad;
+  s.hip_l_rad = hip_l;
+  s.hip_r_rad = hip_r;
+  s.fb_age_us = static_cast<std::uint32_t>(now_us > stamp ? now_us - stamp : 0U);
+}
+
+void AppV3::dumpHipTest() noexcept {
+  // A few lines per tick, only while the TX buffer is mostly empty: the
+  // TR/SENS printf calls block when it is full, which stalled the loop and
+  // let the wheel feedback go stale (fault) during the first dump.
+  for (int lines = 0; lines < 2 && Serial.availableForWrite() > 2048; ++lines) {
+    if (hip_test_dump_i_ >= hip_test_n_) {
+      Serial.println("HT END");
+      hip_test_dumping_ = false;
+      ctrl_.returnToReady();  // fresh engage after the wheels were held off
+      return;
+    }
+    const auto& s = g_hip_test[hip_test_dump_i_++];
+    Serial.printf("HT %.1f %+.4f %+.4f %+.4f %.1f\n", s.t_us * 1.0e-3F, s.cmd_rad,
+                  s.hip_l_rad, s.hip_r_rad, s.fb_age_us * 1.0e-3F);
   }
 }
 
@@ -710,7 +842,8 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       "joint_q=[%.3f %.3f %.3f %.3f %.3f %.3f] pitch=%+.3f pitch_rate=%+.3f "
       "yaw_rate=%+.3f acc=[%+.2f %+.2f %+.2f] chip_acc=[%+.2f %+.2f %+.2f] "
       "gyro_bias=%+.4f vbus_min=%.2f state=%s axis=[%u %u %u %u] axis_err=[%lx %lx %lx %lx] "
-      "pitch_avg=%+.4f spread=%.4f balance=%+.4f%s\n",
+      "pitch_avg=%+.4f spread=%.4f balance=%+.4f%s tick_max_us=%lu imu_us=%lu ctrl_us=%lu "
+      "late=%lu serial_us=%lu ble_us=%lu bus_us=%lu\n",
       imu_age, imu_.seeded, legsFresh(now_us), feedback_.allWheelsFresh(now_us),
       legs_.engaged() ? 1 : 0, legJointRad(0), legJointRad(1), state_.joints.position_rad[2],
       legJointRad(2), legJointRad(3), state_.joints.position_rad[5], imu_.pitch_rad,
@@ -726,7 +859,18 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       static_cast<unsigned long>(feedback_.legAxis(1).error),
       static_cast<unsigned long>(feedback_.legAxis(3).error),
       static_cast<unsigned long>(feedback_.legAxis(4).error), pitch_avg_, pitch_spread_,
-      ctrl_.balanceAngle(), ctrl_.balanceAngleSet() ? "" : "(unset)");
+      ctrl_.balanceAngle(), ctrl_.balanceAngleSet() ? "" : "(unset)",
+      static_cast<unsigned long>(tick_exec_max_us_), static_cast<unsigned long>(tick_imu_max_us_),
+      static_cast<unsigned long>(tick_ctrl_max_us_), static_cast<unsigned long>(tick_late_),
+      static_cast<unsigned long>(pre_serial_max_us_), static_cast<unsigned long>(pre_ble_max_us_),
+      static_cast<unsigned long>(pre_bus_max_us_));
+  pre_serial_max_us_ = 0U;
+  pre_ble_max_us_ = 0U;
+  pre_bus_max_us_ = 0U;
+  tick_exec_max_us_ = 0U;
+  tick_imu_max_us_ = 0U;
+  tick_ctrl_max_us_ = 0U;
+  tick_late_ = 0U;
 }
 
 }  // namespace tap_hw

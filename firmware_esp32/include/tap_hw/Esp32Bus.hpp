@@ -72,6 +72,10 @@ class Esp32UartPort {
   int tx_gpio_;
   int rx_gpio_;
   std::array<std::uint8_t, 16> receive_buffer_{};
+  // Bulk RX chunk: one driver read per refill instead of one per byte.
+  std::array<std::uint8_t, 256> rx_chunk_{};
+  std::size_t rx_pos_ = 0U;
+  std::size_t rx_len_ = 0U;
   std::uint8_t receive_size_ = 0U;
   std::uint8_t expected_size_ = 0U;
   bool started_ = false;

@@ -62,6 +62,17 @@ class AppV3 {
   robot_control::RobotState state_{};
 
   std::uint64_t next_control_us_ = 0U;
+  // Loop timing (SENS reports and resets them): real tick period fed to the
+  // controller, worst tick execution time, ticks started >1 period late.
+  std::uint64_t last_tick_us_ = 0U;
+  float tick_dt_s_ = 0.002F;
+  std::uint32_t tick_exec_max_us_ = 0U;
+  std::uint32_t tick_imu_max_us_ = 0U;
+  std::uint32_t tick_ctrl_max_us_ = 0U;
+  std::uint32_t pre_serial_max_us_ = 0U;  // per loop() pass, not only control ticks
+  std::uint32_t pre_ble_max_us_ = 0U;
+  std::uint32_t pre_bus_max_us_ = 0U;
+  std::uint32_t tick_late_ = 0U;
   std::uint64_t last_imu_us_ = 0U;
   std::uint64_t last_report_us_ = 0U;
   std::uint64_t next_trace_us_ = 0U;
@@ -99,6 +110,19 @@ class AppV3 {
   // tilt->wheel direction with the robot lifted.
   bool tilt_test_ = false;
   float tilt_ref_rad_ = 0.0F;
+  // HIPTEST (robot on the stand, legs locked): steps + 1/2/4/8 Hz sines on
+  // both hips, wheels off; commanded vs measured hip recorded every tick and
+  // printed afterwards as "HT" lines, to measure the GDS68 position-mode lag.
+  bool hip_test_ = false;
+  bool hip_test_dumping_ = false;
+  std::uint64_t hip_test_start_us_ = 0U;
+  float hip_test_amp_rad_ = 0.05F;
+  std::uint32_t hip_test_resend_us_ = 4'000U;
+  std::size_t hip_test_n_ = 0U;
+  std::size_t hip_test_dump_i_ = 0U;
+  [[nodiscard]] float hipTestOffset(std::uint64_t now_us) const noexcept;
+  void recordHipTest(std::uint64_t now_us, float cmd_rad) noexcept;
+  void dumpHipTest() noexcept;
   // 0.5 s average of pitch and of its spread, for measuring the balance angle
   // (operator holds the robot at its tipping point and sends BALANCE).
   float pitch_avg_ = 0.0F;

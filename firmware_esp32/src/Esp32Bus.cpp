@@ -227,6 +227,10 @@ void Esp32TwaiPort::printDiagnostics(Print& out) noexcept {
 
 bool Esp32UartPort::begin(std::uint32_t baud) noexcept {
   if (started_) return true;
+  // TX ring buffer: write() queues and the UART ISR drains it, so a wheel
+  // command never waits for the 1 Mbaud line (must be set before begin()).
+  serial_.setTxBufferSize(512U);
+  serial_.setRxBufferSize(1024U);
   serial_.begin(baud, SERIAL_8N1, rx_gpio_, tx_gpio_);
   started_ = true;
   return true;
@@ -250,10 +254,20 @@ bool Esp32UartPort::receive(void* context, frame::DxlFrame& output) noexcept {
 }
 
 bool Esp32UartPort::readFrame(frame::DxlFrame& output) noexcept {
-  while (serial_.available() > 0) {
-    const int value = serial_.read();
-    if (value < 0) break;
-    const auto byte = static_cast<std::uint8_t>(value);
+  // Per-byte available()/read() each went through the IDF driver (mutex):
+  // with both wheels at 1 Mbaud and 500 Hz that was the bulk of a ~2 ms
+  // loop pass (measured 2026-09-30). Pull everything available in one read.
+  for (;;) {
+    if (rx_pos_ >= rx_len_) {
+      const int available = serial_.available();
+      if (available <= 0) break;
+      const std::size_t want =
+          std::min<std::size_t>(static_cast<std::size_t>(available), rx_chunk_.size());
+      rx_len_ = serial_.read(rx_chunk_.data(), want);
+      rx_pos_ = 0U;
+      if (rx_len_ == 0U) break;
+    }
+    const std::uint8_t byte = rx_chunk_[rx_pos_++];
 
     if (receive_size_ == 0U) {
       if (byte == 0xFFU) receive_buffer_[receive_size_++] = byte;

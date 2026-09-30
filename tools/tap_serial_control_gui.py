@@ -239,12 +239,12 @@ class TapSerialControlApp:
         drive = ttk.LabelFrame(self.root, text="Điều hướng · giữ nút để chạy", padding=10)
         drive.pack(fill="x", padx=10, pady=8)
         ttk.Label(drive, text="Tốc độ tiến/lùi (m/s)").grid(row=0, column=0, sticky="w")
-        ttk.Scale(drive, from_=0.02, to=0.25, variable=self.speed_var,
+        ttk.Scale(drive, from_=0.02, to=0.55, variable=self.speed_var,
                   orient="horizontal").grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Label(drive, textvariable=self._number_var(self.speed_var, "%.2f")).grid(
             row=0, column=2, sticky="e")
         ttk.Label(drive, text="Tốc độ quay (rad/s)").grid(row=1, column=0, sticky="w")
-        ttk.Scale(drive, from_=0.05, to=0.8, variable=self.yaw_var,
+        ttk.Scale(drive, from_=0.05, to=1.5, variable=self.yaw_var,
                   orient="horizontal").grid(row=1, column=1, sticky="ew", padx=8)
         ttk.Label(drive, textvariable=self._number_var(self.yaw_var, "%.2f")).grid(
             row=1, column=2, sticky="e")

@@ -117,8 +117,8 @@ int main() {
     assert(mid < 0.8F && mid > 0.0F);
     // Resend cadence.
     bus.can.clear();
-    assert(lock.update(1'005'000U, bus) && bus.can.empty());
-    assert(lock.update(1'010'000U, bus) && bus.can.size() == 4U);
+    assert(lock.update(1'003'000U, bus) && bus.can.empty());  // resend every 4 ms
+    assert(lock.update(1'004'000U, bus) && bus.can.size() == 4U);
     assert(lock.atZero(2'000'000U));
     bus.can.clear();
     assert(lock.update(2'100'000U, bus));

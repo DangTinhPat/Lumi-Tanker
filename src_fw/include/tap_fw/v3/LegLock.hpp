@@ -25,7 +25,11 @@ class LegLock {
   struct Config {
     Mode mode = Mode::Position;
     float ramp_s = 1.0F;                   // current pose -> 0
-    std::uint32_t resend_period_us = 10'000U;
+    // 250 Hz (kLegCommandPeriodUs): position-mode targets are passthrough,
+    // so every resend is a step; at 100 Hz a height move was a coarse
+    // staircase kicking the underdamped GDS68 servo (HIPTEST 2026-09-30:
+    // +17 % at 1 Hz). HIPTEST ran at 4 ms without CAN errors.
+    std::uint32_t resend_period_us = 4'000U;
     float mit_kp_nm_per_rad = 15.0F;
     float mit_kd_nm_s_per_rad = 0.5F;
     float gear_ratio = 8.0F;               // rotor turns per joint turn
@@ -55,6 +59,9 @@ class LegLock {
   void setOffsets(float hip_core_rad, float knee_core_rad) noexcept {
     hip_offset_rad_ = hip_core_rad;
     knee_offset_rad_ = knee_core_rad;
+  }
+  void setResendPeriod(std::uint32_t period_us) noexcept {
+    config_.resend_period_us = period_us;
   }
   void setMitGains(float kp, float kd) noexcept {
     config_.mit_kp_nm_per_rad = kp;

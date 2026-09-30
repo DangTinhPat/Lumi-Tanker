@@ -47,6 +47,9 @@ class V3Controller {
     // the sent command leads the integrated speed by accel * lead_s (a
     // first-order servo then realises the commanded acceleration sooner).
     float lead_s = 0.12F;
+    // Operator drive speed ramp [m/s^2] (was a step). 0.2: a 0.55 m/s
+    // command peaks at ~0.74 m/s in the sim, under the 0.8 cap (0.5 -> 0.80).
+    float drive_accel_m_s2 = 0.2F;
     // Wheel deadband compensation [rad/s]: the BL4820 wheels barely move
     // below ~1 rad/s (2026-09-27 floor log; a 1 rad/s deadband in the plant
     // reproduces the measured 0.19 deg / 1.6 cm sway at 0.46 Hz). Added
@@ -90,15 +93,25 @@ class V3Controller {
   // v3.1 height change while balancing (both algorithms).
   struct Height {
     float rate_m_s = 0.015F;          // hip-axle height change speed
-    // Move only while the balance is settled; otherwise the target waits.
-    float max_pitch_error_rad = 0.05F;
-    float max_pitch_rate_rad_s = 0.5F;
+    // Height speed changes at most this fast (start, stop, slow-down): the
+    // speed used to step 0 <-> 15 mm/s in one tick.
+    float accel_m_s2 = 0.05F;
+    // Speed scales down smoothly with the balance quality and reaches zero
+    // at these: (1 - |pitch - ref| / err) * (1 - |pitch_rate| / rate). A hard
+    // on/off gate here (0.05 rad / 0.5 rad/s) stopped and restarted the legs
+    // 14 % of a 188 -> 78 mm lowering (2026-09-30), and each stop/start kick
+    // fed the ~5 Hz pitch wobble that tripped the gate again.
+    float max_pitch_error_rad = 0.10F;
+    float max_pitch_rate_rad_s = 1.0F;
     std::uint64_t held_suppress_us = 400'000U;  // after the legs stop
-    // Scale of the CAD balance-angle feed-forward. Off: the 2026-09-27 floor
-    // run went 188 -> 110 mm with the true balance pitch -0.02 -> -0.045 rad
-    // while the CAD model predicts +0.054, so the model made the transitions
-    // worse; theta_b learns each height instead.
-    float balance_ff_scale = 0.0F;
+    // Scale of the CAD balance-angle feed-forward. The CAD mass model has the
+    // wrong sign on this robot: measured shifts were -0.025 rad at 110 mm
+    // (2026-09-27, CAD +0.054 -> ratio -0.46) and -0.03 rad at 78 mm
+    // (2026-09-30, CAD +0.097 -> ratio -0.31). Without it the trim relearns
+    // too slowly and the robot parked 12-17 cm away after a height change;
+    // -0.38 (between the two) cut the sim drift over 188->78 mm from 24-35 cm
+    // to 3-8 cm for both algorithms. Runtime: SET hff.
+    float balance_ff_scale = -0.38F;
   };
 
   struct Config {
@@ -113,12 +126,24 @@ class V3Controller {
     // change only interpolates (cheap) instead of re-solving the Riccati
     // equation (~50 ms on the ESP32-S3's single-precision FPU).
     unsigned lqr_gain_table_points = 12U;
+    // Wheel deadband push on the LQR path (the PID path keeps Pid's 0.6).
+    float lqr_deadband_comp_rad_s = 0.3F;
+    // Wheel-lag lead on the LQR path. The real BL4820 answers after ~50 ms
+    // dead time + ~75 ms lag (fitted on the 2026-09-29/30 logs); with that
+    // delay the PID's 0.12 s lead rang at ~4 Hz, 0 fell - 0.08 is the sim
+    // optimum (see input_cost_scale in defaultV3Config).
+    float lqr_lead_s = 0.08F;
+    // LQR position-error trim integral [rad per m*s] (half the PID kix).
+    float lqr_trim_gain = 0.01F;
     std::uint64_t lock_settle_us = 1'200'000U;  // leg ramp + settle before wheels
     float fall_pitch_rad = 0.60F;
     // Below the 0.8 m/s ground-speed cap (20 rad/s): a lifted or held robot
     // saturates the wheels at the cap and must still trip this guard.
     float runaway_wheel_rad_s = 15.0F;
     std::uint64_t runaway_us = 500'000U;
+    // The runaway guard stays off while the operator drives and this long
+    // after the last drive command (covers LqrBalancer's stop ramp).
+    std::uint64_t drive_guard_hold_us = 1'500'000U;
     float wheel_radius_m = 0.04F;
   };
 
@@ -202,6 +227,7 @@ class V3Controller {
   // Number of held/lifted re-zeroes since the balance loop engaged.
   [[nodiscard]] int heldResets() const noexcept { return held_resets_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  [[nodiscard]] float heightSpeed() const noexcept { return height_speed_m_s_; }
   [[nodiscard]] bool legsHeld() const noexcept { return legs_held_; }
   [[nodiscard]] const LegPose& legPose() const noexcept { return pose_; }
   [[nodiscard]] bool lqrGainTableReady() const noexcept { return lqr_.gainTableReady(); }
@@ -228,6 +254,7 @@ class V3Controller {
   // zeroed the command mid-fall on real hardware (2026-09-29), guaranteeing
   // the fall it should have let fall_pitch_rad catch cleanly instead.
   float runaway_start_pitch_ = 0.0F;
+  std::uint64_t drive_seen_us_ = 0U;  // last tick with a nonzero drive command
   const char* last_fault_ = "";
   // The legs are structure in v3: once locked they stay locked through a
   // fault; only DISABLE (command.disable) releases them.
@@ -239,6 +266,7 @@ class V3Controller {
   float height_target_m_ = 0.0F;
   float knee_target_rad_ = 0.0F;
   float knee_cmd_rad_ = 0.0F;
+  float height_speed_m_s_ = 0.0F;  // signed hip-axle speed, + = up
   LegPose pose_{};
   float chain_prev_rad_ = 0.0F;
   float chain_rate_f_ = 0.0F;
@@ -260,6 +288,7 @@ class V3Controller {
   float pid_x_ = 0.0F;
   float pid_x_target_ = 0.0F;
   bool pid_driving_ = false;
+  float pid_drive_v_ = 0.0F;  // ramped operator speed (PID path)
   // v3.2 LQR: absolute ground-position anchor (position_anchor_hold), moved
   // by cmd.forward_m_s while driving, frozen at the current position on
   // release - same job as pid_x_target_ but LqrBalancer takes it directly as
