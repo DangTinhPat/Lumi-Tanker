@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -413,6 +414,12 @@ class V3Controller {
   [[nodiscard]] bool balanceAngleSet() const noexcept { return balance_set_; }
   // Back to Ready (legs stay locked) so the next GO engages the real balance
   // loop, e.g. from the hand-held TILTTEST check.
+  // KNEETEST FLOOR: knee offset [rad, |.| <= 0.1] added to the height pose's
+  // knee while balancing; the hip follows through LegHeight::forKnee as for a
+  // height change. Dropped as soon as the robot leaves Balancing.
+  void setKneeExcitation(float dk_rad) noexcept {
+    knee_excite_rad_ = std::clamp(dk_rad, -0.1F, 0.1F);
+  }
   void returnToReady() noexcept {
     if (state_ == State::Balancing) {
       state_ = State::Ready;
@@ -509,6 +516,9 @@ class V3Controller {
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
+  void applyKneeExcitation(const Input& in);
+  float knee_excite_rad_ = 0.0F;
+  bool excite_applied_ = false;
   // The virtual pitch already carries the balance shift with height (from
   // the measured legs), so the CAD feed-forward is off with it.
   [[nodiscard]] float ffPitch() const noexcept {

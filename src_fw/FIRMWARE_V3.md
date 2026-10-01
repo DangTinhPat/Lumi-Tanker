@@ -53,6 +53,13 @@ Build/nạp: `pio run -e esp32-s3-v3 -t upload`. Điều khiển: `python3 tools
 `LEGMODE POS|MIT` (khi đang Idle), `SET trim_gain|trim_max|trim|margin|accel|pitch_scale v`,
 `SET leg_kp|leg_kd v` (chỉ cho MIT).
 
+Đo đạc (một bộ ghi RAM 250 Hz, ≤ 8 s, đổ ra thành dòng `RC` vào log sau khi xong;
+phân tích bằng `tools/fit_leg_servo.py`):
+`HIPTEST [amp] [resend_ms]` / `KNEETEST [amp]` (trên giá, bánh tắt: bước + sin 1/2/4/8 Hz
+trên hông / gối), `KNEETEST FLOOR [amp]` (đang cân bằng trên sàn, ≥ 120 mm, cần vpitch:
+gối ±amp rad, mặc định 0.03, ở 0.5/1/2/3 Hz qua đường tư thế chiều cao; tự hủy nếu θv lệch
+trim > 0.08 rad), `REC [s]` (chỉ ghi, mặc định 6 s: đẩy, qua gờ, ôm cua).
+
 v3.3 (điều khiển phân tầng, chỉ LQR, mặc định bật; xem `docs/V3.3_HANDOFF.md` mục 5):
 `SET vpitch 0|1` (con lắc ảo, chỉ khi không Balancing), `SET trunk 0|1` (hông giữ thân),
 `SET tshare|tlead|tmax|trate|thpf|texp|texpt v` (`texpt`: số mũ phần hông gánh ở độ cao lớn, `texp`: ở độ cao thấp), `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`

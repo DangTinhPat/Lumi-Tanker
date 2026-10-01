@@ -1,21 +1,18 @@
-// v3.3 two-tier control on a two-body plant. The v3_physics_tests plant is
-// one rigid pendulum (legs locked); here the body (IMU) and the legs are
-// separate bodies joined at the hips:
-//  - generalized coordinates s = (x axle, theta body pitch, q hip offset);
-//    the knee is held at the height pose (prescribed, slow);
-//  - masses, CoMs and link geometry from the CAD model (GeneratedGeometry),
-//    body CoM shifted by a "true" fore/aft offset (the calibrated one or not);
-//  - hips: the GDS68 position servo fitted to the 2026-09-30 HIPTEST log
-//    (on the stand: position gain 16 /s, velocity loop 48 /s, ~3 ms delay;
-//    rms fit error 3 mrad of 28 mrad), realised here as a torque servo on
-//    the real inertia so the floor load (the body) slows it as it would;
+// v3.3 control on a planar multi-body plant (src_fw/tests/LegPlant.hpp). The
+// v3_physics_tests plant is one rigid pendulum (legs locked); here the body
+// (IMU), the thighs and the shins are separate bodies joined at the hips and
+// knees, s = (x axle, theta body pitch, q hip offset, k knee offset):
+//  - hips and knees: the GDS68 position servo fitted to the 2026-09-30
+//    HIPTEST log (on the stand: position gain 16 /s, velocity loop 48 /s,
+//    ~3 ms delay; rms fit error 3 mrad of 28 mrad), realised as a torque
+//    servo on the real inertia so the floor load (the body) slows it as it
+//    would; the knees use the same fit until KNEETEST data replaces it;
 //    250 Hz command, ~96 Hz position/velocity feedback;
 //  - wheels: speed servo on the wheel-to-shin angle with dead time, lag or a
 //    resonant second-order response, whole-rpm command, deadband, torque cap;
 //  - the IMU specific force at its body point through the real
-//    ImuStateEstimator (balancing config), as AppV3 does.
-// Kane's method on numeric Jacobians of the forward kinematics: M(s) s'' +
-// J^T (J' s') = Q. Numeric but exact to O(eps^2) for this holonomic chain.
+//    ImuStateEstimator (balancing config), as AppV3 does;
+//  - optional ground bumps/steps under the axle.
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -28,6 +25,8 @@
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/WholeBodyModel.hpp"
+#include "LegPlant.hpp"
+#include "tap_fw/v3/JointTestSchedule.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 
@@ -67,6 +66,20 @@ struct Case {
   // Hips (per joint, doubled for two legs).
   double hip_kp = 16.0, hip_vel_bw = 48.0, hip_rotor = 0.004, hip_tau_max = 4.0;
   std::size_t hip_delay_ticks = 2;
+  // Knees: no KNEETEST yet. Position gain as the hips' fit (16 /s); the
+  // velocity gain calibrated to the one loaded fact we have - v3.2, which
+  // reads every knee motion as body pitch, stood calm on the robot
+  // (2026-09-29 TR logs: pitch-rate rms 0.09-0.32 rad/s). The hip fit's
+  // bandwidth on the knee's own inertia (bw 48 -> 0.35 N m s/rad) rang v3.2
+  // at 0.69 rad/s, the hips' absolute gain (0.84) at 0.66; bw 350 on the knee
+  // inertia (2.6 N m s/rad, 41 N m/rad per knee) gives 0.28. The tiers barely
+  // care (rest 0.02-0.04 rad/s, push body 0.015 rad over the whole sweep,
+  // TIER_KNEECAL); kVariants carries a soft and a stiff knee. Torque cap at
+  // the GDS68 rating (5 N m). knee_vel_bw < 0: the hips' absolute gain.
+  double knee_kp = 16.0, knee_vel_bw = 350.0, knee_rotor = 0.004, knee_tau_max = 5.0;
+  // Ground: a step of bump_h [m] at x = bump_x0, smoothed over bump_ramp; with
+  // bump_width > 0 it comes back down that far on (a bump, not a step).
+  double bump_h = 0.0, bump_x0 = 0.3, bump_ramp = 0.02, bump_width = 0.0;
   double leg_fb_period_s = 0.0104;  // 0x009 estimate period (~96 Hz)
   double hip_vel_noise = 0.03;      // driver velocity estimate noise [rad/s]
   // Scenario.
@@ -92,6 +105,8 @@ struct Case {
   double grab_release_bias_rad = 0.02;
   double learn_hold = -1.0;  // < 0: firmware default (Config::learn_hold_s)
   double held_cap = -1.0;    // < 0: firmware default (Config::held_wheel_cap_m_s)
+  // KNEETEST FLOOR: knee excitation amplitude [rad] from excite_start_s.
+  double excite_amp = 0.0, excite_start_s = 10.0;
   bool no_rezero = false;    // diagnostics: held and runaway re-zeroes disabled
   // Static level loop (Tier::level): -1 firmware default. The target is
   // the true resting body pitch at the hang pose (as the IMU reads it) plus
@@ -115,12 +130,15 @@ struct Result {
   double rest_rate_rms = 0.0;     // body pitch-rate rms over the last 4 s (standing calm)
   double rest_hip_rms = 0.0;      // hip rate rms over the last 4 s
   double x_end = 0.0, max_x = 0.0, x_stop_travel = 0.0;
-  double max_tau_hip = 0.0;
+  double max_tau_hip = 0.0, max_tau_knee = 0.0, max_knee_err = 0.0;
+  double body_vacc_peak = 0.0;     // |vertical body CoM acceleration| peak after 2 s (20 Hz)
   double held_max_dhip = 0.0, held_max_wheel = 0.0;  // while on the stand
   double est_err_max = 0.0, est_err_rms = 0.0;  // IMU pitch estimate - truth (after 2 s)
   double grab_detect_s = -1.0;     // grab start -> first held re-zero
   double grab_max_dhip_end = 0.0;  // |tier-2 hip| over the last second of the grab
   double grab_max_wheel = 0.0;     // wheel speed while grabbed [rad/s]
+  double excite_lean = 0.0, excite_body = 0.0;  // peak change during the excitation
+  double excite_knee_err = 0.0;                 // |knee cmd - knee| peak during it
   double putdown_wheel = 0.0;      // wheel speed (rel. to shin) at the grab's put-down [rad/s]
   double putdown_cmd = 0.0;        // wheel command at put-down
   double level_hip_end = 0.0;      // static level loop's hip offset at the end [rad]
@@ -138,156 +156,33 @@ struct Result {
   double start_dip = 0.0;    // max body speed loss (against the command) after drive start
 };
 
-struct Pt { double x, z; };
-Pt rot(Pt p, double a) {
-  const double c = std::cos(a), s = std::sin(a);
-  return {c * p.x + s * p.z, -s * p.x + c * p.z};
-}
-Pt add(Pt a, Pt b) { return {a.x + b.x, a.z + b.z}; }
-Pt sub(Pt a, Pt b) { return {a.x - b.x, a.z - b.z}; }
-
-// Points in the body frame (hip origin) for a hip/knee offset (core).
-struct Points {
-  std::array<Pt, 4> com;  // body, thigh, shin, wheel (one leg; legs identical)
-  Pt axle, imu;
-};
-
-class TwoBody {
- public:
-  TwoBody(double body_dx, double mass_scale, double rotor, double hip_cad0)
-      : dx_(body_dx), hip_cad0_(hip_cad0), rotor_(rotor) {
-    m_[0] = geo::parts[0].mass * mass_scale;
-    for (int i = 1; i < 4; ++i) m_[i] = 2.0 * geo::parts[i].mass;
-    i_body_ = geo::parts[0].iyy * mass_scale;
-    i_legs_ = 2.0 * (geo::parts[1].iyy + geo::parts[2].iyy);
-    i_wheel_ = 2.0 * geo::parts[3].iyy;
-  }
-  double knee = 0.0;
-
-  Points points(double q) const {
-    Points p{};
-    const double hip = hip_cad0_ + q;
-    const double upper = hip, lower = hip + knee + geo::knee_zero_rebase_rad;
-    p.com[0] = {geo::parts[0].x + dx_, geo::parts[0].z};
-    const Pt knee_pt = rot({geo::origins[1].x, geo::origins[1].z}, upper);
-    p.com[1] = rot({geo::parts[1].x, geo::parts[1].z}, upper);
-    p.com[2] = add(knee_pt, rot({geo::parts[2].x, geo::parts[2].z}, lower));
-    p.axle = add(knee_pt, rot({geo::origins[2].x, geo::origins[2].z}, lower));
-    p.com[3] = add(p.axle, rot({geo::parts[3].x, geo::parts[3].z}, lower));
-    p.imu = {robot_control::geometry::imu_offset_x_m, robot_control::geometry::imu_offset_z_m};
-    return p;
-  }
-  // World position of body-frame point k (0..3 CoMs, 4 IMU) at state s.
-  Pt world(const std::array<double, 3>& s, int k) const {
-    const Points p = points(s[2]);
-    const Pt local = k < 4 ? p.com[k] : p.imu;
-    const Pt w = rot(sub(local, p.axle), s[1]);
-    return {s[0] + w.x, geo::wheel_radius_m + w.z};
-  }
-  // Jacobian columns d world / d s_j and the velocity-product term.
-  void kin(const std::array<double, 3>& s, const std::array<double, 3>& sd, int k,
-           std::array<Pt, 3>& jac, Pt& jdot_sd) const {
-    const double e = 1.0e-6;
-    for (int j = 0; j < 3; ++j) {
-      auto a = s, b = s;
-      a[j] += e;
-      b[j] -= e;
-      const Pt pa = world(a, k), pb = world(b, k);
-      jac[j] = {(pa.x - pb.x) / (2 * e), (pa.z - pb.z) / (2 * e)};
-    }
-    const double h = 1.0e-4;
-    auto a = s, b = s;
-    for (int j = 0; j < 3; ++j) { a[j] += h * sd[j]; b[j] -= h * sd[j]; }
-    const Pt p0 = world(s, k), pa = world(a, k), pb = world(b, k);
-    jdot_sd = {(pa.x - 2 * p0.x + pb.x) / (h * h), (pa.z - 2 * p0.z + pb.z) / (h * h)};
-  }
-  // Accelerations for wheel torque tw (on the wheel-to-shin angle), hip
-  // torque th (on q) and a horizontal push fx at the body CoM.
-  std::array<double, 3> accel(const std::array<double, 3>& s, const std::array<double, 3>& sd,
-                              double tw, double th, double fx, double slope) const {
-    double M[3][3] = {};
-    double Q[3] = {};
-    const double gx = -kG * std::sin(slope), gz = -kG * std::cos(slope);
-    for (int k = 0; k < 4; ++k) {
-      std::array<Pt, 3> J;
-      Pt jd;
-      kin(s, sd, k, J, jd);
-      for (int a = 0; a < 3; ++a) {
-        for (int b = 0; b < 3; ++b) M[a][b] += m_[k] * (J[a].x * J[b].x + J[a].z * J[b].z);
-        Q[a] += m_[k] * (J[a].x * (gx - jd.x) + J[a].z * (gz - jd.z));
-        if (k == 0) Q[a] += J[a].x * fx;
-      }
-    }
-    const double R = geo::wheel_radius_m;
-    // Rotational inertia: body (theta), leg links (theta + q), wheel rotors
-    // (x / R), hip rotors through the gear (q).
-    M[1][1] += i_body_;
-    for (int a : {1, 2}) for (int b : {1, 2}) M[a][b] += i_legs_;
-    M[0][0] += i_wheel_ / (R * R);
-    M[2][2] += 2.0 * rotor_;
-    // Wheel torque does work on u = x / R - theta - q (knee fixed).
-    Q[0] += tw / R; Q[1] -= tw; Q[2] -= tw;
-    Q[2] += th;
-    // Solve 3x3 (Cramer).
-    const double det = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) -
-        M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) +
-        M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
-    std::array<double, 3> out{};
-    for (int c = 0; c < 3; ++c) {
-      double A[3][3];
-      for (int r = 0; r < 3; ++r) for (int k = 0; k < 3; ++k) A[r][k] = k == c ? Q[r] : M[r][k];
-      out[c] = (A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) -
-                A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
-                A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0])) / det;
-    }
-    return out;
-  }
-  // Kinetic + potential energy (plant self-check).
-  double energy(const std::array<double, 3>& s, const std::array<double, 3>& sd) const {
-    double e = 0.0;
-    for (int k = 0; k < 4; ++k) {
-      std::array<Pt, 3> J;
-      Pt jd;
-      kin(s, sd, k, J, jd);
-      double vx = 0, vz = 0;
-      for (int j = 0; j < 3; ++j) { vx += J[j].x * sd[j]; vz += J[j].z * sd[j]; }
-      e += 0.5 * m_[k] * (vx * vx + vz * vz) + m_[k] * kG * world(s, k).z;
-    }
-    const double R = geo::wheel_radius_m;
-    e += 0.5 * i_body_ * sd[1] * sd[1] + 0.5 * i_legs_ * (sd[1] + sd[2]) * (sd[1] + sd[2]) +
-        0.5 * i_wheel_ * sd[0] * sd[0] / (R * R) + 0.5 * 2.0 * rotor_ * sd[2] * sd[2];
-    return e;
-  }
-  // Angle of the axle -> CoM line from vertical (world), true masses.
-  double leanAngle(const std::array<double, 3>& s) const {
-    double mx = 0, mz = 0, mt = 0;
-    for (int k = 0; k < 4; ++k) {
-      const Pt w = world(s, k);
-      mx += m_[k] * (w.x - s[0]);
-      mz += m_[k] * (w.z - geo::wheel_radius_m);
-      mt += m_[k];
-    }
-    return std::atan2(mx / mt, mz / mt);
-  }
-
- private:
-  double dx_, hip_cad0_, rotor_;
-  std::array<double, 4> m_{};
-  double i_body_ = 0, i_legs_ = 0, i_wheel_ = 0;
-};
+using tap_fw::sim::LegPlant;
+using tap_fw::sim::Pt;
+using State = LegPlant::Vec;
 
 Result simulate(const Case& c) {
   const double dt_c = 0.002;
   const int sub = 8;
   const double dt = dt_c / sub;
   const double R = geo::wheel_radius_m;
-  TwoBody plant(c.body_dx, c.mass_scale, c.hip_rotor, LegHeight::hangHipCad());
+  LegPlant plant(c.body_dx, c.mass_scale, c.hip_rotor, c.knee_rotor, LegHeight::hangHipCad());
+  if (c.bump_h != 0.0) {
+    plant.ground = [c](double x) {
+      auto edge = [&](double x0) {
+        const double a = std::clamp((x - x0) / std::max(c.bump_ramp, 1e-4), 0.0, 1.0);
+        return 0.5 * (1.0 - std::cos(kPi * a));
+      };
+      double h = c.bump_h * edge(c.bump_x0);
+      if (c.bump_width > 0.0) h -= c.bump_h * edge(c.bump_x0 + c.bump_ramp + c.bump_width);
+      return h;
+    };
+  }
   std::mt19937 rng(7);
   std::normal_distribution<double> n_acc(0, 0.05), n_gyr(0, 0.005), n_w(0, 0.3),
       n_q(0, 0.0005), n_qd(0, 0.03);
 
   // Stand at the hang pose, CoM over the axle plus the seed error.
-  std::array<double, 3> s{0.0, 0.0, 0.0}, sd{0.0, 0.0, 0.0};
+  State s{}, sd{};
   for (int i = 0; i < 40; ++i) s[1] -= plant.leanAngle(s) - c.seed_error;
   const double theta_rest0 = s[1] - c.seed_error;  // body pitch at balance, hang pose
 
@@ -396,18 +291,25 @@ Result simulate(const Case& c) {
       }
     }
     s[2] = q;
-    held_wheel_pos = wp - q;  // encoder = x / R - theta - q (x = 0 here)
+    s[3] = ctrl.legPose().knee_offset_rad;
+    held_wheel_pos = wp - q - s[3];  // encoder = x / R - theta - q - k (x = 0 here)
     for (int i = 0; i < 40; ++i) s[1] -= plant.leanAngle(s) - c.seed_error;
   }
-  std::deque<double> wheel_q, hip_q;
-  double wheel_applied = 0.0, hip_applied = 0.0;
+  std::deque<double> wheel_q, hip_q, knee_q;
+  double wheel_applied = 0.0, hip_applied = 0.0, knee_applied = s[3];
   double u = held_wheel_pos, ud = 0.0;  // wheel-to-shin angle and rate
   double ws_acc = 0.0;              // resonant servo acceleration state
-  double hip_integ = 0.0;
-  double q_meas = 0.0, qd_meas = 0.0, next_leg_fb = 0.0;
-  double hip_zoh = 0.0, next_hip_cmd = 0.0;
-  double s_acc[3] = {0, 0, 0};
+  // The GDS68s are already holding the robot up when the balance loop
+  // starts: their integrators carry the static joint torques.
+  const auto hold = plant.staticJointTorques(s);
+  double hip_integ = std::clamp(hold[0], -2.0, 2.0), knee_integ = hold[1];
+  double q_meas = 0.0, qd_meas = 0.0, k_meas = s[3], kd_meas = 0.0, next_leg_fb = 0.0;
+  double hip_zoh = 0.0, knee_zoh = s[3], next_hip_cmd = 0.0;
+  double s_acc[LegPlant::kDof] = {};
+  double abz_f = 0.0;
   const double kv_joint = c.hip_vel_bw * (geo::leg_hip_inertia_kgm2 + c.hip_rotor);
+  const double kv_knee = c.knee_vel_bw > 0.0
+      ? c.knee_vel_bw * (geo::leg_knee_inertia_kgm2 + c.knee_rotor) : kv_joint;
   double rate_sq = 0.0, body_sq = 0.0, x_stop = 0.0, rest_rate_sq = 0.0, rest_hip_sq = 0.0;
   double est_sq = 0.0, est_bias0 = 0.0;
   double ab_f = 0.0, ev_acc_sq = 0.0, ev_jerk_sq = 0.0, v_release = 0.0, v_start = 0.0;
@@ -416,6 +318,7 @@ Result simulate(const Case& c) {
   bool put_down = false, grab_biased = false;
   double grab_from = 0.0, grab_to = 0.0;
   double push_b0 = 0.0, push_l0 = 0.0, push_q0 = 0.0;
+  double excite_center = 0.0, excite_b0 = 0.0, excite_l0 = 0.0;
   double put_down_t = 0.0;
   int rate_n = 0, body_n = 0;
   for (int k = 0; k < static_cast<int>(c.duration_s / dt_c); ++k) {
@@ -428,13 +331,26 @@ Result simulate(const Case& c) {
       cmd.height_m = static_cast<float>(t < c.height_low_s ? 0.0
           : t < c.height_up_s ? c.height_low_m : LegHeight::maxHeight());
     }
-    // Knee follows the height pose (slow, prescribed).
-    plant.knee += (ctrl.legPose().knee_offset_rad - plant.knee) * std::min(dt_c / 0.03, 1.0);
     // Leg feedback (0x009) at ~96 Hz.
     if (t >= next_leg_fb) {
       next_leg_fb = t + c.leg_fb_period_s;
       q_meas = s[2] + n_q(rng);
       qd_meas = sd[2] + n_qd(rng) * (c.hip_vel_noise / 0.03);
+      k_meas = s[3] + n_q(rng);
+      kd_meas = sd[3] + n_qd(rng) * (c.hip_vel_noise / 0.03);
+    }
+    if (c.excite_amp > 0.0 && t >= c.excite_start_s) {
+      // Same centring as AppV3: keep the whole swing inside the knee range.
+      if (t - c.excite_start_s < 1e-9) {
+        const double k = ctrl.legPose().knee_offset_rad;
+        excite_center = k + c.excite_amp > 0.0 ? -c.excite_amp
+            : k - c.excite_amp < LegHeight::kKneeMinRad ? c.excite_amp : 0.0;
+      }
+      const double te = t - c.excite_start_s;
+      const double dz = tap_fw::v3::floorTestOffset(static_cast<float>(te),
+                                                    static_cast<float>(c.excite_amp),
+                                                    static_cast<float>(excite_center));
+      ctrl.setKneeExcitation(static_cast<float>(dz));
     }
     in.now_us = t0_us + static_cast<std::uint64_t>(k) * 2000U;
     in.pitch_rad = c.ideal_imu ? static_cast<float>(s[1] + c.imu_mount) : imu.pitch_rad;
@@ -444,12 +360,11 @@ Result simulate(const Case& c) {
     const double wm = ud + n_w(rng);
     in.wheel_rad_s = {static_cast<float>(wm), static_cast<float>(wm)};
     in.wheel_pos_rad = {static_cast<float>(u), static_cast<float>(u)};
-    const float kq = static_cast<float>(plant.knee);
     in.hip_rad = {static_cast<float>(q_meas + 0.004), static_cast<float>(q_meas - 0.004)};
-    in.knee_rad = {kq, kq};
+    in.knee_rad = {static_cast<float>(k_meas), static_cast<float>(k_meas)};
     in.hip_rate_rad_s = {static_cast<float>(qd_meas), static_cast<float>(qd_meas)};
-    in.knee_rate_rad_s = {0.0F, 0.0F};
-    in.leg_chain_rad = static_cast<float>(q_meas + plant.knee);
+    in.knee_rate_rad_s = {static_cast<float>(kd_meas), static_cast<float>(kd_meas)};
+    in.leg_chain_rad = static_cast<float>(q_meas + k_meas);
     const auto out = ctrl.update(in, cmd);
     {
       const auto v = ctrl.imuVelocity();
@@ -469,9 +384,12 @@ Result simulate(const Case& c) {
     if (t >= next_hip_cmd) {
       next_hip_cmd = t + 0.004;
       hip_zoh = ctrl.hipCommand();
+      knee_zoh = ctrl.legPose().knee_offset_rad;
     }
     hip_q.push_back(hip_zoh);
     if (hip_q.size() > c.hip_delay_ticks) { hip_applied = hip_q.front(); hip_q.pop_front(); }
+    knee_q.push_back(knee_zoh);
+    if (knee_q.size() > c.hip_delay_ticks) { knee_applied = knee_q.front(); knee_q.pop_front(); }
     r.max_dhip = std::max(r.max_dhip, std::abs(double(ctrl.trunkHip())));
 
     const double fx = (t >= c.push_start_s && t < c.push_end_s) ? c.push_n : 0.0;
@@ -504,7 +422,7 @@ Result simulate(const Case& c) {
       if (t > c.grab_s + c.grab_len_s - 1.0) {
         r.grab_max_dhip_end = std::max(r.grab_max_dhip_end, std::abs(double(ctrl.trunkHip())));
       }
-      sd = {0.0, 0.0, sd[2]};
+      sd = {0.0, 0.0, sd[2], sd[3]};
       ud += (wheel_applied - ud) * dt_c / c.wheel_tau;
       u += ud * dt_c;
       r.grab_max_wheel = std::max(r.grab_max_wheel, std::abs(ud));
@@ -518,6 +436,10 @@ Result simulate(const Case& c) {
         const double acc = c.hip_vel_bw * (c.hip_kp * (hip_applied - s[2]) - sd[2]);
         sd[2] += acc * dt;
         s[2] += sd[2] * dt;
+        const double acck = kv_knee / (geo::leg_knee_inertia_kgm2 + c.knee_rotor) *
+            (c.knee_kp * (knee_applied - s[3]) - sd[3]);
+        sd[3] += acck * dt;
+        s[3] += sd[3] * dt;
       }
       for (double& a : s_acc) a = 0.0;
       const double th = s[1] + c.imu_mount;
@@ -532,7 +454,7 @@ Result simulate(const Case& c) {
       put_down_t = t;
       r.putdown_wheel = ud;
       r.putdown_cmd = 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]);
-      sd = {0.0, 0.0, 0.0};
+      sd = {0.0, 0.0, 0.0, 0.0};
     }
     if (put_down && t >= put_down_t && t < put_down_t + 2.0) {
       r.post_release_dev = std::max(r.post_release_dev, std::abs(s[1] - theta_rest0));
@@ -559,26 +481,36 @@ Result simulate(const Case& c) {
       const double tau_h = std::clamp(2.0 * kv_joint * vel_err + hip_integ,
                                       -2.0 * c.hip_tau_max, 2.0 * c.hip_tau_max);
       r.max_tau_hip = std::max(r.max_tau_hip, std::abs(tau_h));
+      // Knee position servo, same structure; its integrator carries the
+      // body's weight, so it may use the whole torque range.
+      const double vel_err_k = c.knee_kp * (knee_applied - s[3]) - sd[3];
+      const double cap_k = 2.0 * c.knee_tau_max;
+      knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
+      const double tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
+      if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
       // Wheel torque that realises udd_des (linear in the torque), capped.
-      const auto a0 = plant.accel(s, sd, 0.0, tau_h, fx, c.slope);
-      const auto a1 = plant.accel(s, sd, 1.0, tau_h, fx, c.slope);
-      const double u0 = a0[0] / R - a0[1] - a0[2], u1 = a1[0] / R - a1[1] - a1[2];
+      const auto a0 = plant.accel(s, sd, 0.0, tau_h, tau_k, fx, c.slope);
+      const auto a1 = plant.accel(s, sd, 1.0, tau_h, tau_k, fx, c.slope);
+      const double u0 = a0[0] / R - a0[1] - a0[2] - a0[3];
+      const double u1 = a1[0] / R - a1[1] - a1[2] - a1[3];
       const double tw = std::clamp((udd_des - u0) / (u1 - u0), -c.wheel_tau_max, c.wheel_tau_max);
-      std::array<double, 3> a{};
-      for (int j = 0; j < 3; ++j) a[j] = a0[j] + tw * (a1[j] - a0[j]);
-      for (int j = 0; j < 3; ++j) { sd[j] += a[j] * dt; s[j] += sd[j] * dt; s_acc[j] = a[j]; }
-      const double udd = a[0] / R - a[1] - a[2];
+      State a{};
+      for (int j = 0; j < LegPlant::kDof; ++j) a[j] = a0[j] + tw * (a1[j] - a0[j]);
+      for (int j = 0; j < LegPlant::kDof; ++j) {
+        sd[j] += a[j] * dt; s[j] += sd[j] * dt; s_acc[j] = a[j];
+      }
+      const double udd = a[0] / R - a[1] - a[2] - a[3];
       if (c.wheel_mode == 1) ws_acc = udd;  // the servo state follows the real wheel
       ud += udd * dt;
       u += ud * dt;
     }
     // IMU specific force at its body point.
     {
-      std::array<Pt, 3> J;
+      LegPlant::Jac J;
       Pt jd;
-      plant.kin(s, sd, 4, J, jd);
+      plant.kin(s, sd, LegPlant::kImu, J, jd);
       double ax = jd.x, az = jd.z;
-      for (int j = 0; j < 3; ++j) { ax += J[j].x * s_acc[j]; az += J[j].z * s_acc[j]; }
+      for (int j = 0; j < LegPlant::kDof; ++j) { ax += J[j].x * s_acc[j]; az += J[j].z * s_acc[j]; }
       const double fxw = ax + kG * std::sin(c.slope), fzw = az + kG * std::cos(c.slope);
       const double th = s[1] + c.imu_mount;
       const double cth = std::cos(th), sth = std::sin(th);
@@ -595,11 +527,16 @@ Result simulate(const Case& c) {
     // Body CoM horizontal velocity / acceleration (exact, from the plant).
     double vb = 0.0, ab = 0.0;
     {
-      std::array<Pt, 3> J;
+      LegPlant::Jac J;
       Pt jd;
       plant.kin(s, sd, 0, J, jd);
       ab = jd.x;
-      for (int j = 0; j < 3; ++j) { vb += J[j].x * sd[j]; ab += J[j].x * s_acc[j]; }
+      double abz = jd.z;
+      for (int j = 0; j < LegPlant::kDof; ++j) {
+        vb += J[j].x * sd[j]; ab += J[j].x * s_acc[j]; abz += J[j].z * s_acc[j];
+      }
+      abz_f += std::min(2.0 * kPi * 20.0 * dt_c, 1.0) * (abz - abz_f);
+      if (t > 2.0) r.body_vacc_peak = std::max(r.body_vacc_peak, std::abs(abz_f));
     }
     {
       const double a_prev = ab_f;
@@ -632,6 +569,15 @@ Result simulate(const Case& c) {
     // hips at the height pose), relative to which the body deviation counts.
     const double rest = theta_rest0 + (level_active ? c.level_rel : 0.0);
     const double dev = s[1] - rest;
+    if (c.excite_amp > 0.0) {
+      if (t < c.excite_start_s) { excite_b0 = s[1]; excite_l0 = lean; }
+      else if (t < c.excite_start_s + tap_fw::v3::kFloorTestDurationS + 1.0) {
+        r.excite_body = std::max(r.excite_body, std::abs(s[1] - excite_b0));
+        r.excite_lean = std::max(r.excite_lean, std::abs(lean - excite_l0));
+        r.excite_knee_err = std::max(r.excite_knee_err,
+                                     std::abs(double(ctrl.legPose().knee_offset_rad) - s[3]));
+      }
+    }
     if (c.push_n != 0.0) {
       if (t < c.push_start_s) { push_b0 = s[1]; push_l0 = lean; push_q0 = s[2]; }
       else if (t < c.push_start_s + 2.0) {
@@ -646,6 +592,7 @@ Result simulate(const Case& c) {
       r.lean_max = std::max(r.lean_max, std::abs(lean));
       r.max_hip_rate = std::max(r.max_hip_rate, std::abs(sd[2]));
       r.max_hip_err = std::max(r.max_hip_err, std::abs(hip_applied - s[2]));
+      r.max_knee_err = std::max(r.max_knee_err, std::abs(knee_applied - s[3]));
     }
     if (c.drive_m_s != 0.0 && t >= c.drive_start_s && t < c.drive_end_s + 1.0) {
       r.body_dev_drive = std::max(r.body_dev_drive, std::abs(dev));
@@ -726,24 +673,28 @@ const Variant kVariants[] = {
     {"fast wheel no db", [](Case& c) { c.wheel_delay_ticks = 3; c.deadband = 0; c.wheel_tau = 0.05; }},
     {"hip vel noise 0.2", [](Case& c) { c.hip_vel_noise = 0.2; }},
     {"leg feedback 50 Hz", [](Case& c) { c.leg_fb_period_s = 0.02; }},
+    {"knee soft (hip gains)", [](Case& c) { c.knee_vel_bw = -1.0; }},
+    {"knee stiff", [](Case& c) { c.knee_kp = 50.0; }},
 };
 
 }  // namespace
 
 int main() {
-  // V1: plant self-check - passive motion (no torques, free hip) conserves
+  // V1: plant self-check - passive motion (no torques, free hip and knee) conserves
   // energy, so the numeric Kane equations are consistent.
   {
-    TwoBody p(0.021, 1.0, 0.004, LegHeight::hangHipCad());
-    std::array<double, 3> s{0.0, 0.3, -0.2}, sd{0.2, 0.5, 1.5};
+    LegPlant p(0.021, 1.0, 0.004, 0.004, LegHeight::hangHipCad());
+    State s{0.0, 0.3, -0.2, -0.6}, sd{0.2, 0.5, 1.5, -1.0};
     const double e0 = p.energy(s, sd);
     const double dt = 1.0e-5;
     for (int i = 0; i < 50000; ++i) {  // 0.5 s, midpoint
-      const auto a = p.accel(s, sd, 0.0, 0.0, 0.0, 0.0);
-      std::array<double, 3> sm, sdm;
-      for (int j = 0; j < 3; ++j) { sm[j] = s[j] + 0.5 * dt * sd[j]; sdm[j] = sd[j] + 0.5 * dt * a[j]; }
-      const auto am = p.accel(sm, sdm, 0.0, 0.0, 0.0, 0.0);
-      for (int j = 0; j < 3; ++j) { s[j] += dt * sdm[j]; sd[j] += dt * am[j]; }
+      const auto a = p.accel(s, sd, 0.0, 0.0, 0.0, 0.0, 0.0);
+      State sm, sdm;
+      for (int j = 0; j < LegPlant::kDof; ++j) {
+        sm[j] = s[j] + 0.5 * dt * sd[j]; sdm[j] = sd[j] + 0.5 * dt * a[j];
+      }
+      const auto am = p.accel(sm, sdm, 0.0, 0.0, 0.0, 0.0, 0.0);
+      for (int j = 0; j < LegPlant::kDof; ++j) { s[j] += dt * sdm[j]; sd[j] += dt * am[j]; }
     }
     const double e1 = p.energy(s, sd);
     std::printf("V1 plant energy: %.6f -> %.6f J\n", e0, e1);
@@ -825,6 +776,9 @@ int main() {
     if (const char* v = std::getenv("TR_LEVEL")) c.level_rel = std::atof(v);
     if (const char* v = std::getenv("TR_HVN")) c.hip_vel_noise = std::atof(v);
     if (const char* v = std::getenv("TR_LEARN")) c.learn_hold = std::atof(v);
+    if (const char* v = std::getenv("TR_KKP")) c.knee_kp = std::atof(v);
+    if (const char* v = std::getenv("TR_KBW")) c.knee_vel_bw = std::atof(v);
+    if (const char* v = std::getenv("TR_EXC")) { c.excite_amp = std::atof(v); c.excite_start_s = 10.0; c.duration_s = 20.0; }
     if (const char* v = std::getenv("TR_LVL")) c.level = std::atoi(v);
     if (const char* v = std::getenv("TR_DUR")) c.duration_s = std::atof(v);
     if (const char* v = std::getenv("TR_SEED")) c.seed_error = std::atof(v);
@@ -835,13 +789,58 @@ int main() {
     run(c);
     return 0;
   }
+  if (std::getenv("TIER_BUMP") != nullptr) {
+    // Which floor bumps can the wheels climb (BL4820 torque cap)?
+    for (double h : {0.003, 0.005, 0.008, 0.012}) {
+      for (double ramp : {0.02, 0.04, 0.06}) {
+        std::printf("h %2.0f mm ramp %2.0f mm (max slope %2.0f deg):", h * 1000, ramp * 1000,
+                    std::atan(h * kPi / (2 * ramp)) * 180 / kPi);
+        for (double v : {0.15, 0.30}) {
+          Case c = withMode(Case{}, 2);
+          c.bump_h = h; c.bump_x0 = 0.25; c.bump_ramp = ramp; c.bump_width = 0.03;
+          c.drive_m_s = v; c.drive_start_s = 6.0; c.drive_end_s = 6.0 + 0.6 / v + 1.0;
+          c.duration_s = c.drive_end_s + 5.0;
+          const Result r = simulate(c);
+          std::printf("  %.2f m/s: %s az %.1f body %.3f x_end %.2f", v, r.fell ? "FALL" : "ok  ",
+                      r.body_vacc_peak, r.body_dev_all, r.x_end);
+        }
+        std::printf("\n");
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_KNEECAL") != nullptr) {
+    // Knee servo stiffness vs the hardware: v3.2 (no theta_v) standing calm at
+    // a pitch-rate rms of 0.09-0.32 rad/s on 2026-09-29 (TR logs).
+    for (double kp : {16.0, 30.0, 50.0}) {
+      for (double bw : {115.0, 200.0, 350.0}) {
+        double rr[3] = {};
+        for (int mode : {0, 2}) {
+          Case c = withMode(Case{}, mode);
+          c.knee_kp = kp; c.knee_vel_bw = bw;
+          rr[mode] = simulate(c).rest_rate_rms;
+        }
+        Case p = withMode(Case{}, 2);
+        p.knee_kp = kp; p.knee_vel_bw = bw; p.push_n = 4.0;
+        const Result rp = simulate(p);
+        std::printf("knee kp %4.0f bw %4.0f (stiffness %5.1f N m/rad/knee): v3.2 rest rate %.3f, "
+                    "tiers rest %.3f, tiers push body %.3f lean %.3f\n", kp, bw,
+                    kp * bw * (geo::leg_knee_inertia_kgm2 + 0.004), rr[0], rr[2], rp.body_dev_all,
+                    rp.lean_max);
+      }
+    }
+    return 0;
+  }
   if (std::getenv("TIER_RATIO") != nullptr) {
     const double hang = LegHeight::forHeight(LegHeight::maxHeight()).com_above_axle_m;
     for (double h : {0.189, 0.170, 0.150, 0.136, 0.120, 0.110, 0.095, 0.078}) {
       const auto p = LegHeight::forHeight(static_cast<float>(h));
       const double r = p.com_above_axle_m / hang;
-      std::printf("h %3.0f mm: com %.1f mm ratio %.3f  share^1.5 %.2f  ^1.0 %.2f  ^0.5 %.2f\n", h * 1000,
-                  p.com_above_axle_m * 1000, r, std::pow(r, 1.5), r, std::sqrt(r));
+      const auto lo = LegHeight::forHeight(static_cast<float>(h - 0.008));
+      std::printf("h %3.0f mm: com %.1f mm ratio %.3f  share^1.5 %.2f  ^1.0 %.2f  ^0.5 %.2f  knee %+.3f hip %+.3f"
+                  "  (-8 mm: dknee %+.3f dhip %+.3f)\n", h * 1000,
+                  p.com_above_axle_m * 1000, r, std::pow(r, 1.5), r, std::sqrt(r), p.knee_offset_rad,
+                  p.hip_offset_rad, lo.knee_offset_rad - p.knee_offset_rad, lo.hip_offset_rad - p.hip_offset_rad);
     }
     return 0;
   }
@@ -1477,6 +1476,57 @@ int main() {
         c.name = name;
         const Result r = run(c);
         assert(!r.fell && r.held_resets == 0);
+      }
+    }
+  }
+  // V21: KNEETEST FLOOR (knee +-0.03 rad around the height pose while
+  // balancing, hips following as for a height change, 0.5/1/2/3 Hz) must be
+  // safe to run on the robot: no fall, never looks held/lifted, the CoM line
+  // and body barely move. At the top height the knee can only fold, so the
+  // swing is centred 0.03 rad folded (AppV3 does the same). Default tiers
+  // only: the v3.2 fallback has no theta_v and sees every leg motion as a
+  // body tilt. AppV3 refuses it below 120 mm (90 mm: body 0.028 rad, the
+  // crouched robot already wobbles more).
+  {
+    for (double h : {0.0, 0.136}) {
+      Case c = withMode(Case{}, 2);
+      if (h > 0) { c.height_low_m = h; c.height_low_s = 3.0; c.height_up_s = 60.0; }
+      c.excite_amp = 0.03;
+      c.excite_start_s = 10.0;
+      c.duration_s = 22.0;
+      static char name[64];
+      std::snprintf(name, sizeof name, "V21 knee floor test at %s", h > 0 ? "136" : "189");
+      c.name = name;
+      const Result r = run(c);
+      std::printf("   floor test: lean %.4f rad, body %.4f rad, knee lag %.4f rad\n",
+                  r.excite_lean, r.excite_body, r.excite_knee_err);
+      assert(!r.fell && r.held_resets == 0);
+      assert(r.excite_lean < 0.05 && r.excite_body < 0.02);
+    }
+  }
+  // V22: rolling over floor bumps the wheels can climb (default tiers): 5 mm
+  // with a 2 cm edge (21 deg at its steepest) and 8 mm with a 4 cm edge (17
+  // deg), 3 cm on top, at 0.15 and 0.30 m/s. No fall, never looks held; the
+  // body's vertical acceleration peak is the baseline the whole-body
+  // controller's suspension has to beat. Known limit (TIER_BUMP sweep): past
+  // ~20-25 deg the BL4820 torque cap (0.6 N m, ~15 N at the floor for a
+  // 45 N robot) cannot lift it - a square 8 mm step or 12 mm over 4 cm falls,
+  // 8-12 mm over 6 cm stalls at 0.15 m/s.
+  {
+    for (int b = 0; b < 2; ++b) {
+      for (double v : {0.15, 0.30}) {
+        Case c = withMode(Case{}, 2);
+        c.bump_h = b ? 0.008 : 0.005; c.bump_ramp = b ? 0.04 : 0.02;
+        c.bump_x0 = 0.25; c.bump_width = 0.03;
+        c.drive_m_s = v; c.drive_start_s = 6.0; c.drive_end_s = 6.0 + 0.6 / v + 1.0;
+        c.duration_s = c.drive_end_s + 5.0;
+        static char name[64];
+        std::snprintf(name, sizeof name, "V22 bump %.0f mm at %.2f m/s", c.bump_h * 1000, v);
+        c.name = name;
+        const Result r = run(c);
+        std::printf("   bump: body vertical accel peak %.2f m/s^2, body %.3f rad, lean %.3f rad\n",
+                    r.body_vacc_peak, r.body_dev_all, r.lean_max);
+        assert(!r.fell && r.held_resets == 0 && r.x_end > 0.5);
       }
     }
   }

@@ -234,6 +234,19 @@ class TapSerialControlApp:
         tiers.pack(fill="x", padx=10, pady=(0, 8))
         ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
 
+        # Measurements for the hardware sessions (docs/V3.3_HANDOFF.md §6):
+        # recorded at 250 Hz in the firmware, dumped as RC lines into the log.
+        measure = ttk.LabelFrame(self.root, text="Đo đạc (ghi 250 Hz, tự đổ vào log)", padding=10)
+        measure.pack(fill="x", padx=10, pady=(0, 8))
+        for column, (label, command) in enumerate((
+                ("Ghi 6 s (REC)", "REC 6"),
+                ("Gối trên giá (KNEETEST)", "KNEETEST 0.05"),
+                ("Gối trên sàn (KNEETEST FLOOR)", "KNEETEST FLOOR 0.03"),
+                ("Hông trên giá (HIPTEST)", "HIPTEST 0.05"))):
+            ttk.Button(measure, text=label, command=lambda c=command: self._send(c)).grid(
+                row=0, column=column, padx=4, sticky="ew")
+            measure.columnconfigure(column, weight=1)
+
         console = ttk.LabelFrame(self.root, text="Lệnh console (vd: SET leg_kp 15 · SET leg_kd 0.5 · GET)",
                                  padding=10)
         console.pack(fill="x", padx=10, pady=(0, 8))
@@ -513,6 +526,11 @@ class TapSerialControlApp:
             except queue.Empty:
                 break
             self._parse_status(line)
+            # Recording dumps (thousands of RC/HT samples) go to the log file
+            # only; the window shows their BEGIN/END lines.
+            if (line.startswith("RC ") or line.startswith("HT ")) and \
+                    "BEGIN" not in line and "END" not in line:
+                continue
             self._append_log(line)
 
         now = time.monotonic()

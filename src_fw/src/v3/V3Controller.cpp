@@ -84,6 +84,11 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
   Input in = raw;
   in.pitch_rad = theta_v_;
   in.pitch_rate_rad_s = theta_v_rate_;
+  if (state_ != State::Balancing && excite_applied_) {
+    knee_excite_rad_ = 0.0F;
+    excite_applied_ = false;
+    pose_ = LegHeight::forKnee(knee_cmd_rad_);
+  }
   if (state_ != State::Balancing) updateTrunk(in, false, {0.0F, 0.0F});
 
   Output out{};
@@ -238,6 +243,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
       }
     }
     updateHeight(in, cmd);
+    applyKneeExcitation(in);
     out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
     updateTrunk(in, true, out.wheel_cmd_rad_s);
     out.leg_hip_offset_rad = hipCommand();
@@ -958,6 +964,19 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
     knee_cmd_rad_ = std::clamp(next, LegHeight::kKneeMinRad, 0.0F);
   }
   pose_ = LegHeight::forKnee(knee_cmd_rad_);
+  legs_moved_us_ = in.now_us;
+}
+
+void V3Controller::applyKneeExcitation(const Input& in) {
+  if (knee_excite_rad_ == 0.0F && !excite_applied_) return;
+  if (knee_excite_rad_ == 0.0F) {
+    pose_ = LegHeight::forKnee(knee_cmd_rad_);
+    excite_applied_ = false;
+    return;
+  }
+  pose_ = LegHeight::forKnee(
+      std::clamp(knee_cmd_rad_ + knee_excite_rad_, LegHeight::kKneeMinRad, 0.0F));
+  excite_applied_ = true;
   legs_moved_us_ = in.now_us;
 }
 

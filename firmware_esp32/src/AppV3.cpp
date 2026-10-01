@@ -18,6 +18,7 @@
 
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "tap_fw/ImuMount.hpp"
+#include "tap_fw/v3/JointTestSchedule.hpp"
 
 namespace tap_hw {
 namespace {
@@ -65,18 +66,48 @@ constexpr float kTiltTestMaxRadS = 12.0F;   // below the 15 rad/s runaway guard
 // Legs count as "at zero" once within this of the target after the ramp.
 constexpr float kLegReadyRad = 0.08F;
 constexpr std::array<const char*, 4> kLegNames{"LH", "LK", "RH", "RK"};
-// HIPTEST: 0-2 s steps (+A, 0, -A, 0), 2-6 s sines at 1/2/4/8 Hz (1 s each),
-// 6-6.5 s back at 0. One sample per control tick.
-constexpr float kHipTestDurationS = 6.5F;
-constexpr std::size_t kHipTestMaxSamples = 3400U;
-struct HipTestSample {
+// Joint-test / REC recorder: 250 Hz, 19 int16 channels with fixed scales
+// (printed in the RC BEGIN header), 2000 samples = 8 s, ~88 KB.
+constexpr std::uint64_t kRecPeriodUs = 4'000U;
+constexpr std::size_t kRecMaxSamples = 2000U;
+constexpr std::size_t kRecChannels = 19U;
+constexpr float kRecScale[kRecChannels] = {
+    1e-4F,                                    // cmd: excitation [rad]
+    1e-4F, 1e-4F, 1e-4F, 1e-4F,               // hipL hipR kneeL kneeR [rad, core]
+    1e-4F, 1e-4F,                             // hipcmd kneecmd [rad, core offsets]
+    1e-4F, 1e-3F, 1e-3F, 1e-3F,               // pitch, pitch/roll/yaw rate
+    1e-4F,                                    // theta_v
+    1e-3F, 1e-3F, 1e-3F,                      // body accel x y z [m/s^2]
+    1e-2F, 1e-2F, 1e-2F,                      // wheel L R measured, mean command [rad/s]
+    1e-1F};                                   // leg feedback age [ms]
+constexpr const char* kRecColumns =
+    "t_ms,cmd,hipL,hipR,kneeL,kneeR,hipcmd,kneecmd,pitch,prate,rrate,yrate,tv,ax,ay,az,"
+    "wL,wR,wcmd,fbage_ms";
+struct RecSample {
   std::uint32_t t_us;
-  float cmd_rad;
-  float hip_l_rad;
-  float hip_r_rad;
-  std::uint32_t fb_age_us;
+  std::int16_t v[kRecChannels];
 };
-HipTestSample g_hip_test[kHipTestMaxSamples];
+RecSample g_rec[kRecMaxSamples];
+// KNEETEST FLOOR: abort when the CoM line leaves the trim by this much (sim
+// V21: +-0.03 rad knee swings it <= 0.05 at 189/136 mm), and refuse below
+// this height (sim: a crouched robot already wobbles more).
+constexpr float kKneeFloorAbortRad = 0.08F;
+constexpr float kKneeFloorMinHeightM = 0.120F;
+
+std::int16_t recQuant(float x, float scale) {
+  const float q = std::round(x / scale);
+  return static_cast<std::int16_t>(std::clamp(q, -32767.0F, 32767.0F));
+}
+
+const char* recName(int kind) {
+  switch (kind) {
+    case 1: return "HIPTEST";
+    case 2: return "KNEETEST";
+    case 3: return "KNEETEST_FLOOR";
+    case 4: return "REC";
+    default: return "?";
+  }
+}
 
 std::uint64_t nowUs() { return static_cast<std::uint64_t>(esp_timer_get_time()); }
 
@@ -351,31 +382,66 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     Serial.println("V3 BALANCE cleared: START seeds from the release pitch");
   } else if (std::strcmp(line, "GET") == 0) {
     printTunables();
-  } else if (std::strncmp(line, "HIPTEST", 7) == 0) {
+  } else if (std::strncmp(line, "HIPTEST", 7) == 0 || std::strncmp(line, "KNEETEST", 8) == 0 ||
+             std::strncmp(line, "REC", 3) == 0) {
+    const bool hip = line[0] == 'H';
+    const bool rec = line[0] == 'R';
+    const bool floor = !hip && !rec && std::strstr(line, "FLOOR") != nullptr;
+    const char* name = hip ? "HIPTEST" : rec ? "REC" : floor ? "KNEETEST FLOOR" : "KNEETEST";
+    if (rec_active_ || rec_dumping_) {
+      Serial.printf("V3 %s refused: a recording is already running\n", name);
+      return;
+    }
+    if (rec) {
+      float seconds = 6.0F;
+      (void)std::sscanf(line + 3, "%f", &seconds);
+      startRecording(RecKind::Free, 0.0F, std::clamp(seconds, 1.0F, 8.0F), now_us);
+      Serial.printf("V3 REC start: %.1f s at 250 Hz (wheels and legs unchanged)\n",
+                    rec_duration_s_);
+      return;
+    }
+    if (floor) {
+      float amp = 0.03F;
+      (void)std::sscanf(line + 14, "%f", &amp);
+      if (ctrl_.state() != V3Controller::State::Balancing || ctrl_.heldOuterOff()) {
+        Serial.println("V3 KNEETEST FLOOR refused: not balancing free on the floor");
+        return;
+      }
+      if (!ctrl_.config().tier.virtual_pitch) {
+        Serial.println("V3 KNEETEST FLOOR refused: needs SET vpitch 1 (the v3.2 balancer "
+                       "reads every leg motion as a body tilt)");
+        return;
+      }
+      if (ctrl_.legPose().axle_below_hip_m < kKneeFloorMinHeightM) {
+        Serial.printf("V3 KNEETEST FLOOR refused: below %.0f mm\n",
+                      kKneeFloorMinHeightM * 1000.0F);
+        return;
+      }
+      startRecording(RecKind::KneeFloor, std::clamp(amp, 0.01F, 0.05F),
+                     tap_fw::v3::kFloorTestDurationS, now_us);
+      Serial.printf("V3 KNEETEST FLOOR start: knee +-%.3f rad (centre %+.3f) at 0.5/1/2/3 Hz, "
+                    "%.1f s, aborts past %.2f rad of CoM lean\n", rec_amp_, rec_centre_,
+                    rec_duration_s_, kKneeFloorAbortRad);
+      return;
+    }
     float amp = 0.05F;
     float resend_ms = 4.0F;
-    (void)std::sscanf(line + 7, "%f %f", &amp, &resend_ms);
-    if (hip_test_ || hip_test_dumping_) {
-      Serial.println("V3 HIPTEST refused: already running");
-      return;
-    }
+    (void)std::sscanf(line + (hip ? 7 : 8), "%f %f", &amp, &resend_ms);
     if (!legs_.engaged() || !legs_.atZero(now_us)) {
-      Serial.println("V3 HIPTEST refused: legs not locked (robot on the stand, START first)");
+      Serial.printf("V3 %s refused: legs not locked (robot on the stand, START first)\n", name);
       return;
     }
-    hip_test_amp_rad_ = std::clamp(amp, 0.01F, 0.10F);
-    hip_test_resend_us_ =
-        static_cast<std::uint32_t>(std::clamp(resend_ms, 2.0F, 20.0F) * 1000.0F);
-    legs_.setResendPeriod(hip_test_resend_us_);
-    hip_test_ = true;
-    hip_test_start_us_ = now_us;
-    hip_test_n_ = 0U;
-    Serial.printf("V3 HIPTEST start: amp=%.3f rad resend=%lu us, wheels off, %.1f s "
-                  "(robot must be on the stand)\n", hip_test_amp_rad_,
-                  static_cast<unsigned long>(hip_test_resend_us_), kHipTestDurationS);
+    rec_resend_us_ = static_cast<std::uint32_t>(std::clamp(resend_ms, 2.0F, 20.0F) * 1000.0F);
+    legs_.setResendPeriod(rec_resend_us_);
+    startRecording(hip ? RecKind::HipStand : RecKind::KneeStand, std::clamp(amp, 0.01F, 0.10F),
+                   tap_fw::v3::kStandTestDurationS, now_us);
+    Serial.printf("V3 %s start: amp=%.3f rad resend=%lu us, wheels off, %.1f s "
+                  "(robot must be on the stand)\n", name, rec_amp_,
+                  static_cast<unsigned long>(rec_resend_us_), rec_duration_s_);
   } else {
     Serial.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
-                  "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST)\n", line);
+                  "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
+                  "REC)\n", line);
   }
 }
 
@@ -734,6 +800,16 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                                                           : "ok");
   }
 
+  if (rec_active_ && rec_kind_ == RecKind::KneeFloor) {
+    const bool lost = ctrl_.state() != V3Controller::State::Balancing || ctrl_.heldOuterOff() ||
+        std::abs(ctrl_.virtualPitch() - ctrl_.balanceRef()) > kKneeFloorAbortRad;
+    if (lost) {
+      stopRecording(true);
+    } else {
+      rec_cmd_ = recExcitation(now_us);
+    }
+    ctrl_.setKneeExcitation(rec_active_ ? rec_cmd_ : 0.0F);
+  }
   const auto out = ctrl_.update(in, cmd);
   if (out.fault != nullptr) {
     Serial.printf("V3 FAULT: %s (wheels stopped, legs %s; START retries, DISABLE releases)\n",
@@ -752,30 +828,28 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
-  if (hip_test_ && (!out.legs_locked ||
-                    now_us - hip_test_start_us_ >=
-                        static_cast<std::uint64_t>(kHipTestDurationS * 1.0e6F))) {
-    hip_test_ = false;
-    hip_test_dumping_ = true;
-    hip_test_dump_i_ = 0U;
-    legs_.setResendPeriod(LegLock::Config{}.resend_period_us);
-    Serial.printf("HT BEGIN n=%u amp=%.3f resend_us=%lu cols=t_ms,cmd,hipL,hipR,fb_age_ms%s\n",
-                  static_cast<unsigned>(hip_test_n_), hip_test_amp_rad_,
-                  static_cast<unsigned long>(hip_test_resend_us_),
-                  out.legs_locked ? "" : " (ABORTED: legs released)");
+  if (rec_active_ &&
+      ((recStand() && !out.legs_locked) ||
+       now_us - rec_start_us_ >= static_cast<std::uint64_t>(rec_duration_s_ * 1.0e6F))) {
+    stopRecording(recStand() && !out.legs_locked);
   }
+  float hip_cmd = 0.0F, knee_cmd = 0.0F;
   if (out.legs_locked) {
-    const float hip_test = hip_test_ ? hipTestOffset(now_us) : 0.0F;
+    const bool stand = rec_active_ && recStand();
+    if (stand) rec_cmd_ = recExcitation(now_us);
     // v3.3: the height pose plus the tier-2 hip offset (0 unless trunk is
-    // on and balancing); HIPTEST drives the bare pose.
-    const float hip_base = hip_test_ ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
-    legs_.setOffsets(hip_base + hip_test, ctrl_.legPose().knee_offset_rad);
+    // on and balancing); the stand tests drive the bare pose.
+    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
+    knee_cmd = ctrl_.legPose().knee_offset_rad;
+    if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
+    if (stand && rec_kind_ == RecKind::KneeStand) {
+      knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
+    }
+    legs_.setOffsets(hip_cmd, knee_cmd);
     (void)legs_.update(now_us, transport_);
-    if (hip_test_) recordHipTest(now_us, ctrl_.legPose().hip_offset_rad + hip_test);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
   }
-  if (hip_test_dumping_) dumpHipTest();
   auto wheel_cmd = out.wheel_cmd_rad_s;
   if (tilt_test_ && out.state == V3Controller::State::Balancing) {
     if (last_state_ != static_cast<int>(out.state)) tilt_ref_rad_ = imu_.pitch_rad;
@@ -784,7 +858,13 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                                -kTiltTestMaxRadS, kTiltTestMaxRadS);
     wheel_cmd = {w, w};
   }
-  driveWheels(out.wheels_enabled && !hip_test_ && !hip_test_dumping_, wheel_cmd, now_us);
+  const bool stand_test = (rec_active_ || rec_dumping_) && recStand();
+  driveWheels(out.wheels_enabled && !stand_test, wheel_cmd, now_us);
+  if (rec_active_ && now_us >= rec_next_us_) {
+    rec_next_us_ += kRecPeriodUs;
+    recordSample(now_us, hip_cmd, knee_cmd, 0.5F * (last_wheel_cmd_[0] + last_wheel_cmd_[1]));
+  }
+  if (rec_dumping_) dumpRecording();
   (void)feedback_.poll(transport_, now_us, true);  // wheel reads + bus voltage, no MIT probes
 
   const int state = static_cast<int>(out.state);
@@ -836,51 +916,96 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
 }
 
-float AppV3::hipTestOffset(std::uint64_t now_us) const noexcept {
-  const float t = static_cast<float>(now_us - hip_test_start_us_) * 1.0e-6F;
-  const float a = hip_test_amp_rad_;
-  if (t < 0.5F) return a;
-  if (t < 1.0F) return 0.0F;
-  if (t < 1.5F) return -a;
-  if (t < 2.0F) return 0.0F;
-  if (t < 6.0F) {
-    const float seg = t - 2.0F;
-    const int k = static_cast<int>(seg);  // 0..3 -> 1, 2, 4, 8 Hz
-    const float f = static_cast<float>(1 << k);
-    return a * std::sin(kTwoPi * f * (seg - static_cast<float>(k)));
+void AppV3::startRecording(RecKind kind, float amp, float duration_s,
+                           std::uint64_t now_us) noexcept {
+  rec_kind_ = kind;
+  rec_amp_ = amp;
+  rec_duration_s_ = duration_s;
+  rec_start_us_ = now_us;
+  rec_next_us_ = now_us;
+  rec_n_ = 0U;
+  rec_cmd_ = 0.0F;
+  rec_aborted_ = false;
+  // Knee swings stay inside [kKneeMinRad, 0]: at the hang pose (knee 0) the
+  // knee can only fold, so the swing is centred amp folded.
+  rec_centre_ = 0.0F;
+  if (kind == RecKind::KneeStand || kind == RecKind::KneeFloor) {
+    const float knee = ctrl_.legPose().knee_offset_rad;
+    if (knee + amp > 0.0F) rec_centre_ = -amp;
+    if (knee - amp < tap_fw::v3::LegHeight::kKneeMinRad) rec_centre_ = amp;
   }
-  return 0.0F;
+  rec_active_ = true;
 }
 
-void AppV3::recordHipTest(std::uint64_t now_us, float cmd_rad) noexcept {
-  if (hip_test_n_ >= kHipTestMaxSamples) return;
+void AppV3::stopRecording(bool aborted) noexcept {
+  rec_active_ = false;
+  rec_aborted_ = aborted;
+  rec_dumping_ = true;
+  rec_dump_i_ = 0U;
+  rec_cmd_ = 0.0F;
+  ctrl_.setKneeExcitation(0.0F);
+  if (recStand()) legs_.setResendPeriod(LegLock::Config{}.resend_period_us);
+  Serial.printf("RC BEGIN kind=%s n=%u rate_hz=250 amp=%.3f centre=%+.3f resend_us=%lu "
+                "aborted=%d cols=%s scales=", recName(static_cast<int>(rec_kind_)),
+                static_cast<unsigned>(rec_n_), rec_amp_, rec_centre_,
+                static_cast<unsigned long>(rec_resend_us_), aborted ? 1 : 0, kRecColumns);
+  for (std::size_t i = 0; i < kRecChannels; ++i) {
+    Serial.printf(i + 1U < kRecChannels ? "%g," : "%g\n", kRecScale[i]);
+  }
+}
+
+float AppV3::recExcitation(std::uint64_t now_us) const noexcept {
+  const float t = static_cast<float>(now_us - rec_start_us_) * 1.0e-6F;
+  switch (rec_kind_) {
+    case RecKind::HipStand: return tap_fw::v3::standTestOffset(t, rec_amp_);
+    case RecKind::KneeStand: return rec_centre_ + tap_fw::v3::standTestOffset(t, rec_amp_);
+    case RecKind::KneeFloor: return tap_fw::v3::floorTestOffset(t, rec_amp_, rec_centre_);
+    default: return 0.0F;
+  }
+}
+
+void AppV3::recordSample(std::uint64_t now_us, float hip_cmd, float knee_cmd,
+                         float wheel_cmd) noexcept {
+  if (rec_n_ >= kRecMaxSamples) return;
   const auto legs = tap_fw::board::MotorIds{}.leg_can;
-  // Leg order LH, LK, RH, RK: hips are 0 and 2; core frame = driver * sign.
-  const float hip_l = legJointRad(0) * legs[0].driver_sign;
-  const float hip_r = legJointRad(2) * legs[2].driver_sign;
   const std::uint64_t stamp = feedback_.legEstimate(legs[0].joint_index).stamp_us;
-  auto& s = g_hip_test[hip_test_n_++];
-  s.t_us = static_cast<std::uint32_t>(now_us - hip_test_start_us_);
-  s.cmd_rad = cmd_rad;
-  s.hip_l_rad = hip_l;
-  s.hip_r_rad = hip_r;
-  s.fb_age_us = static_cast<std::uint32_t>(now_us > stamp ? now_us - stamp : 0U);
+  const float values[kRecChannels] = {
+      rec_cmd_,
+      legJointRad(0) * legs[0].driver_sign, legJointRad(2) * legs[2].driver_sign,
+      legJointRad(1) * legs[1].driver_sign, legJointRad(3) * legs[3].driver_sign,
+      hip_cmd, knee_cmd,
+      imu_.pitch_rad, imu_.pitch_rate_rad_s, imu_.roll_rate_rad_s, imu_.yaw_rate_rad_s,
+      ctrl_.virtualPitch(),
+      body_.accel_m_s2[0], body_.accel_m_s2[1], body_.accel_m_s2[2],
+      state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5], wheel_cmd,
+      static_cast<float>(now_us > stamp ? now_us - stamp : 0U) * 1.0e-3F};
+  auto& sample = g_rec[rec_n_++];
+  sample.t_us = static_cast<std::uint32_t>(now_us - rec_start_us_);
+  for (std::size_t i = 0; i < kRecChannels; ++i) sample.v[i] = recQuant(values[i], kRecScale[i]);
 }
 
-void AppV3::dumpHipTest() noexcept {
+void AppV3::dumpRecording() noexcept {
   // A few lines per tick, only while the TX buffer is mostly empty: the
   // TR/SENS printf calls block when it is full, which stalled the loop and
-  // let the wheel feedback go stale (fault) during the first dump.
+  // let the wheel feedback go stale (fault) during the first HIPTEST dump.
+  char text[160];
   for (int lines = 0; lines < 2 && Serial.availableForWrite() > 2048; ++lines) {
-    if (hip_test_dump_i_ >= hip_test_n_) {
-      Serial.println("HT END");
-      hip_test_dumping_ = false;
-      ctrl_.returnToReady();  // fresh engage after the wheels were held off
+    if (rec_dump_i_ >= rec_n_) {
+      Serial.println("RC END");
+      rec_dumping_ = false;
+      // Stand tests held the wheels off: engage afresh.
+      if (recStand()) ctrl_.returnToReady();
+      rec_kind_ = RecKind::None;
       return;
     }
-    const auto& s = g_hip_test[hip_test_dump_i_++];
-    Serial.printf("HT %.1f %+.4f %+.4f %+.4f %.1f\n", s.t_us * 1.0e-3F, s.cmd_rad,
-                  s.hip_l_rad, s.hip_r_rad, s.fb_age_us * 1.0e-3F);
+    const auto& sample = g_rec[rec_dump_i_++];
+    int len = std::snprintf(text, sizeof(text), "RC %.1f", sample.t_us * 1.0e-3F);
+    for (std::size_t i = 0; i < kRecChannels && len > 0 && len < static_cast<int>(sizeof(text));
+         ++i) {
+      len += std::snprintf(text + len, sizeof(text) - static_cast<std::size_t>(len), " %d",
+                           sample.v[i]);
+    }
+    Serial.println(text);
   }
 }
 

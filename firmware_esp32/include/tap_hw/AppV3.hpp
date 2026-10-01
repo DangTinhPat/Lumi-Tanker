@@ -114,19 +114,36 @@ class AppV3 {
   // tilt->wheel direction with the robot lifted.
   bool tilt_test_ = false;
   float tilt_ref_rad_ = 0.0F;
-  // HIPTEST (robot on the stand, legs locked): steps + 1/2/4/8 Hz sines on
-  // both hips, wheels off; commanded vs measured hip recorded every tick and
-  // printed afterwards as "HT" lines, to measure the GDS68 position-mode lag.
-  bool hip_test_ = false;
-  bool hip_test_dumping_ = false;
-  std::uint64_t hip_test_start_us_ = 0U;
-  float hip_test_amp_rad_ = 0.05F;
-  std::uint32_t hip_test_resend_us_ = 4'000U;
-  std::size_t hip_test_n_ = 0U;
-  std::size_t hip_test_dump_i_ = 0U;
-  [[nodiscard]] float hipTestOffset(std::uint64_t now_us) const noexcept;
-  void recordHipTest(std::uint64_t now_us, float cmd_rad) noexcept;
-  void dumpHipTest() noexcept;
+  // Joint tests and recordings, one RAM recorder (250 Hz, <= 8 s) dumped
+  // afterwards as "RC" lines (tools/fit_leg_servo.py):
+  //  - HIPTEST / KNEETEST [amp]: robot on the stand, legs locked, wheels off;
+  //    steps + 1/2/4/8 Hz sines on both hips / knees (GDS68 lag, no load);
+  //  - KNEETEST FLOOR [amp]: balancing on the floor, knee sines at 0.5-3 Hz
+  //    through the height pose (knee under the body's weight);
+  //  - REC [s]: record only (pushes, bumps, turns).
+  enum class RecKind : std::uint8_t { None, HipStand, KneeStand, KneeFloor, Free };
+  RecKind rec_kind_ = RecKind::None;
+  bool rec_active_ = false;
+  bool rec_dumping_ = false;
+  bool rec_aborted_ = false;
+  std::uint64_t rec_start_us_ = 0U;
+  std::uint64_t rec_next_us_ = 0U;
+  float rec_duration_s_ = 0.0F;
+  float rec_amp_ = 0.0F;
+  float rec_centre_ = 0.0F;
+  float rec_cmd_ = 0.0F;  // current excitation (rad)
+  std::uint32_t rec_resend_us_ = 4'000U;
+  std::size_t rec_n_ = 0U;
+  std::size_t rec_dump_i_ = 0U;
+  [[nodiscard]] bool recStand() const noexcept {
+    return rec_kind_ == RecKind::HipStand || rec_kind_ == RecKind::KneeStand;
+  }
+  void startRecording(RecKind kind, float amp, float duration_s, std::uint64_t now_us) noexcept;
+  void stopRecording(bool aborted) noexcept;
+  [[nodiscard]] float recExcitation(std::uint64_t now_us) const noexcept;
+  void recordSample(std::uint64_t now_us, float hip_cmd, float knee_cmd,
+                    float wheel_cmd) noexcept;
+  void dumpRecording() noexcept;
   // 0.5 s average of pitch and of its spread, for measuring the balance angle
   // (operator holds the robot at its tipping point and sends BALANCE).
   float pitch_avg_ = 0.0F;
