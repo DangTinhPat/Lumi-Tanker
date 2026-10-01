@@ -32,6 +32,7 @@ struct Case {
   // Plant uncertainty around the CAD estimates, and the wheel command delay.
   double mass_scale = 1.0, inertia_scale = 1.0, l_scale = 1.0;
   std::size_t delay_ticks = 2;  // 2 ms control ticks
+  std::size_t meas_delay_ticks = 0;  // age of the wheel speed/position reading
   double eq = 0.10;          // body pitch with the COM over the axle
   double seed_error = 0.035; // pitch held at engage minus eq
   double tau_s = 0.08;       // wheel speed servo lag
@@ -186,6 +187,7 @@ Result simulate(const Case& c) {
   }
 
   std::deque<double> queue;
+  std::deque<std::pair<double, double>> readings;  // (speed, position)
   double applied = 0.0, sum_th2 = 0.0, x_at_stop = 0.0, drive_rate_sq = 0.0;
   int drive_rate_n = 0;
   int n_rms = 0;
@@ -217,9 +219,11 @@ Result simulate(const Case& c) {
     in.accel_x_m_s2 = last_accel[0];
     in.accel_z_m_s2 = last_accel[2];
     // Wheel encoders turn with the shin: body-relative wheel minus the chain.
-    const double wm = phid - chain_rate + n_w(rng);
+    readings.emplace_back(phid - chain_rate + n_w(rng), phi - chain);
+    if (readings.size() > c.meas_delay_ticks + 1) readings.pop_front();
+    const double wm = readings.front().first, wp = readings.front().second;
     in.wheel_rad_s = {static_cast<float>(wm), static_cast<float>(wm)};
-    in.wheel_pos_rad = {static_cast<float>(phi - chain), static_cast<float>(phi - chain)};
+    in.wheel_pos_rad = {static_cast<float>(wp), static_cast<float>(wp)};
     const auto out = ctrl.update(in, cmd);
     cmd.go = false;
     if (out.state == V3Controller::State::Fault) { r.fell = true; break; }
@@ -481,11 +485,14 @@ int main() {
     assert(r.max_wheel_cmd_rad_s < 25.0);
   }
   // T14 (LQR): robustness sweep, mirrors T7 (a reduced grid: mass and COM
-  // height are what the pendulum-length gain table is sensitive to).
+  // height are what the pendulum-length gain table is sensitive to). Wheel
+  // lag 0.06/0.12 around the measured 0.035 s + 55 ms reading age
+  // (2026-10-01; this plant reads fresh): with lqr_lead_s 0.03 the 0.15 s
+  // corner (m0.7 l1.2) rings (th_rms 0.05).
   {
     int n = 0;
     for (double ms : {0.7, 1.3}) for (double ls : {0.8, 1.2})
-    for (double tau : {0.10, 0.15}) {
+    for (double tau : {0.06, 0.12}) {
       Case c;
       c.algo = V3Controller::Algo::Lqr;
       c.mass_scale = ms; c.l_scale = ls;
@@ -579,23 +586,25 @@ int main() {
     assert(r.max_wheel_cmd_rad_s < 25.0);
     assert(r.th_rms < 0.003);
   }
-  // T21 (LQR): the real wheel delay (~50 ms dead time, ~75 ms lag, fitted on
-  // the 2026-09-29/30 logs). With the earlier gains this rang at ~4 Hz
-  // ("pecking", pitch-rate rms ~1 rad/s); standing and driving must now stay
-  // calm, and the operator flow and a large seed error must still stand.
+  // T21 (LQR): the real wheel as measured on the 2026-10-01 logs (25 Hz
+  // response): 20 ms dead time + 0.035 s lag, speed/position reading 55 ms
+  // old (the earlier 50 ms + 0.09 s fit took the reading's age for lag). With
+  // the earlier gains the robot rang at ~4 Hz ("pecking"); standing and
+  // driving must stay calm, and a large seed error must still stand.
   for (double v : {1e-9, 0.45, -0.45}) {
-    for (double tau : {0.06, 0.09, 0.12}) {
+    for (double tau : {0.035, 0.06, 0.10}) {
       Case c;
       c.algo = V3Controller::Algo::Lqr;
       c.eq = 0.03;
       c.seed_error = 0.0;
       c.tau_s = tau;
       c.deadband = 1.0;
-      c.delay_ticks = 25;
+      c.delay_ticks = 10;
+      c.meas_delay_ticks = 27;
       c.drive_m_s = v;
       c.duration_s = 20.0;
       const auto r = simulate(c);
-      std::printf("T21 LQR delay 50 ms tau %.2f drive %+.2f: fell=%d held=%d rate_rms=%.3f "
+      std::printf("T21 LQR measured wheel tau %.3f drive %+.2f: fell=%d held=%d rate_rms=%.3f "
                   "th_rms_end=%.4f\n", tau, v, r.fell, r.held_resets, r.drive_rate_rms, r.th_rms);
       assert(!r.fell && r.held_resets == 0);
       assert(r.drive_rate_rms < 0.25);
@@ -607,10 +616,11 @@ int main() {
     Case c;
     c.algo = V3Controller::Algo::Lqr;
     c.seed_error = err;
-    c.tau_s = 0.09;
-    c.delay_ticks = 25;
+    c.tau_s = 0.035;
+    c.delay_ticks = 10;
+    c.meas_delay_ticks = 27;
     const auto r = simulate(c);
-    report("T21 LQR delay 50 ms seed", c, r);
+    report("T21 LQR measured wheel seed", c, r);
     assert(!r.fell);
   }
   std::puts("v3_physics_tests: all checks passed");

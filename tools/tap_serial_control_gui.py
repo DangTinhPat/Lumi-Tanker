@@ -25,7 +25,7 @@ except ImportError:  # Keep the window available to explain the dependency.
     list_ports = None
 
 
-BAUD = 115200
+BAUD = 921600  # firmware v3 AppV3 (was 115200: the link saturated)
 # Every received and sent line is also appended here (one file per session),
 # so a second tool can read the robot log without opening the serial port.
 LOG_DIR = os.path.expanduser("~/tap_logs")
@@ -120,8 +120,10 @@ class SerialLink:
         while not self.stop_event.is_set():
             try:
                 raw = port.readline()
-            except (OSError, serial.SerialException) as exc:
-                self.incoming.put(f"[serial read error] {exc}")
+            except (OSError, serial.SerialException, TypeError) as exc:
+                # TypeError: pyserial reading a port that close() just shut.
+                if not self.stop_event.is_set():
+                    self.incoming.put(f"[serial read error] {exc}")
                 return
             if raw:
                 line = raw.decode("utf-8", errors="replace").rstrip()
@@ -573,6 +575,11 @@ class TapSerialControlApp:
                 if pitch and lvl:
                     text += (f"\nThân pitch: {float(pitch.group(1)):+.3f} rad   "
                              f"Hông cân thân (tĩnh): {float(lvl.group(1)):+.3f} rad")
+                roll = re.search(r"\broll=([-+0-9.]+)", line)
+                rdh = re.search(r"\brdh=([-+0-9.]+)", line)
+                if roll and rdh:
+                    text += (f"\nThân roll: {float(roll.group(1)):+.3f} rad (+ = trái cao)   "
+                             f"Chân trái/phải: ±{float(rdh.group(1)):+.1f} mm")
                 if held and held.group(1) == "1":
                     text += "   [đang bị giữ/nhấc: bánh giới hạn]"
                 self.tier_var.set(text)

@@ -1,6 +1,7 @@
 // v3: leg lock frames, start sequencing and closed-loop two-wheel balance.
 
 #include <cassert>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -9,6 +10,7 @@
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "tap_fw/v3/LegLock.hpp"
+#include "tap_fw/FastFormat.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 
 using namespace robot_control::motor_frame;
@@ -145,6 +147,79 @@ int main() {
           6.28318530718F;
       assert(near(lock.targetTurns(i, 2'000'000U), expect, 1.0e-5F));
     }
+  }
+
+  // Roll side offsets: left joints (LH, LK) get side 0, right (RH, RK) side 1,
+  // added to the common offsets.
+  {
+    FakeTransport bus;
+    LegLock lock;
+    lock.setOffsets(0.2F, -0.4F);
+    lock.setSideOffsets({0.01F, -0.01F}, {0.03F, -0.03F});
+    assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const bool left = legs[i].joint_index < 3U;
+      const float core = knee ? -0.4F + (left ? 0.03F : -0.03F) : 0.2F + (left ? 0.01F : -0.01F);
+      const float expect = core * legs[i].driver_sign * 8.0F / 6.28318530718F;
+      assert(near(lock.targetTurns(i, 2'000'000U), expect, 1.0e-5F));
+    }
+  }
+
+  // Roll side rates go out as Set_Input_Pos vel_ff (milli-turns/s, driver
+  // frame through the 8:1 gear); none without them.
+  {
+    FakeTransport bus;
+    LegLock::Config cfg{};
+    cfg.ramp_s = 0.0F;
+    LegLock lock(cfg);
+    lock.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F}, {0.1F, -0.1F}, {0.5F, -0.5F});
+    assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
+    bus.can.clear();
+    assert(lock.update(1'000'000U, bus) && bus.can.size() == 4U);
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const bool left = legs[i].joint_index < 3U;
+      const float rate = (knee ? 0.5F : 0.1F) * (left ? 1.0F : -1.0F);
+      const float expect = rate * legs[i].driver_sign * 8.0F / 6.28318530718F * 1000.0F;
+      const auto& d = bus.can[i].data;
+      const auto vff = static_cast<std::int16_t>(static_cast<std::uint16_t>(d[4] | (d[5] << 8)));
+      assert(std::abs(vff - expect) <= 1.0F);
+    }
+  }
+
+  // FastFormat matches printf's "%+.Nf" / "%.Nf" on telemetry-sized values.
+  {
+    const float vals[] = {0.0F, -0.0F, 1.0F, -1.0F, 0.12345F, -0.12345F, 0.0005F, -0.0004F, 0.00049F,
+                          2.5F, 3.5F, -2.5F, 123.456F, -987.654F, 188.6F, 1e-7F, -1e-7F, 9.99996F,
+                          0.31F, -20.0F, 1234567.0F};
+    for (float v : vals) {
+      for (int d = 0; d <= 4; ++d) {
+        for (int plus = 0; plus < 2; ++plus) {
+          char ref[64], buf[64];
+          char fmt[8] = {'%', plus ? '+' : '.', plus ? '.' : static_cast<char>('0' + d),
+                         plus ? static_cast<char>('0' + d) : 'f', plus ? 'f' : '\0', '\0', '\0', '\0'};
+          std::snprintf(ref, sizeof ref, fmt, static_cast<double>(v));
+          tap_fw::LineBuf lb(buf, sizeof buf);
+          lb.fix(v, d, plus != 0);
+          if (std::strcmp(ref, lb.c_str()) != 0) {
+            std::printf("FastFormat mismatch v=%.9g d=%d plus=%d: printf '%s' fast '%s'\n",
+                        static_cast<double>(v), d, plus, ref, lb.c_str());
+            std::fflush(stdout);
+            assert(false);
+          }
+        }
+      }
+    }
+    char buf[32];
+    tap_fw::LineBuf lb(buf, sizeof buf);
+    lb.str("t=").u32(4294967295U).chr(' ').i32(-2147483647);
+    assert(std::strcmp(lb.c_str(), "t=4294967295 -2147483647") == 0);
+    tap_fw::LineBuf hx(buf, sizeof buf);
+    hx.hex(0x40U).chr(' ').hex(0U).chr(' ').hex(0xDEADBEEFU);
+    assert(std::strcmp(hx.c_str(), "40 0 deadbeef") == 0);
   }
 
   // MIT fallback: joint radians, fixed Kp/Kd.

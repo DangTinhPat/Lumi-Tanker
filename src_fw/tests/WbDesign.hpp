@@ -33,8 +33,13 @@ namespace tap_fw::sim {
 
 struct WbActuators {
   double dt = 0.002;
-  double wheel_tau = 0.09;
-  int wheel_delay_ticks = 25;
+  // The wheel as the robot behaves (2026-10-01 logs, see
+  // V3Controller::WheelPredict): ~20 ms dead time + 35 ms lag; the 55 ms age
+  // of the speed reading is taken out by the predictor, so the design sees
+  // a fresh reading. The old 50 ms + 0.09 s lag model rolled the high
+  // frequencies off that the real wheel passes - the gains rang at 2-4 Hz.
+  double wheel_tau = 0.035;
+  int wheel_delay_ticks = 10;
   int joint_delay_ticks = 3;  // 2 ticks CAN/driver + half the 250 Hz resend
   // GDS68 position servo, per joint (see v3_tier_tests Case).
   double hip_kp = 16.0, hip_kv = 48.0 * (geo::leg_hip_inertia_kgm2 + 0.004);
@@ -46,25 +51,54 @@ struct WbActuators {
 // Output weights are 1 / (acceptable size)^2. Values from the coordinate
 // search over the two-body sim scenarios (v3_tier_tests TIER_WBTUNE).
 struct WbWeights {
-  double pitch = 1.0 / (0.04 * 0.04);
-  double pitch_rate = 1.0 / (1.0 * 1.0);
-  double lean = 1.0 / (0.05 * 0.05);
-  double pos = 1.0 / (0.10 * 0.10);
-  double vel = 1.0 / (0.15 * 0.15);
-  double pos_int = 1.0 / (0.30 * 0.30);
-  double hip = 1.0 / (0.30 * 0.30);
-  double knee = 1.0 / (0.10 * 0.10);
-  double hip_rate = 1.0 / (2.0 * 2.0);
-  double knee_rate = 1.0 / (4.0 * 4.0);
-  double wheel_cmd = 1.0 / (15.0 * 15.0);
-  double hip_cmd = 1.0 / (0.20 * 0.20);
-  double knee_cmd = 1.0 / (0.15 * 0.15);
-  double wheel_step = 1.0 / (1.0 * 1.0);
-  double hip_step = 1.0 / (0.02 * 0.02);
-  double knee_step = 1.0 / (0.04 * 0.04);
-  double body_vacc = 1.0 / (1.5 * 1.5);  // body CoM vertical acceleration [m/s^2]
+  // Robust search (TIER_WBTUNE, 2026-10-01): the first table rang cap to
+  // cap on the robot; in the sim it did so with encoder-rate noise or a
+  // stiffer knee servo. Scored on those plants (WB_ROBUST), on 8 random
+  // episodes disjoint from the TIER_GENERAL check (WB_GEN) - a pass on the
+  // fixed scenarios alone overfit (push body 0.008 rad, but 3 falls / 12
+  // false holds in 48 random episodes) - with the body steadiness weighted
+  // 2x (WB_BODYW). The comments give the weight as 1/size^2 of an
+  // acceptable value.
+  double pitch = 312.5;           // 0.057 rad
+  double pitch_rate = 0.125;      // 2.8 rad/s
+  double lean = 6.25;             // 0.4 rad
+  double pos = 1.5625;            // 0.8 m
+  double vel = 2.7778;            // 0.6 m/s
+  double pos_int = 2.7778;        // 0.6
+  double hip = 2.7778;            // 0.6 rad
+  double knee = 6400.0;           // 0.0125 rad
+  double hip_rate = 0.0625;       // 4 rad/s
+  double knee_rate = 0.0019531;   // 23 rad/s
+  double wheel_cmd = 0.0011111;   // 30 rad/s
+  double hip_cmd = 12.5;          // 0.28 rad
+  double knee_cmd = 11377.8;      // 0.0094 rad
+  double wheel_step = 4.0;        // 0.5 rad/s
+  double hip_step = 312.5;        // 0.057 rad
+  double knee_step = 10000.0;     // 0.01 rad
+  double body_vacc = 0.027778;    // 6 m/s^2: body CoM vertical acceleration
   double body_hacc = 0.0;                // body CoM horizontal acceleration
+  double body_z = 0.0;                   // body CoM height off the pose [m] (knee holds it)
 };
+
+// The softer set (first robust pass): the body is held looser, so near the
+// wheel limit it can lean to help the catch. V3Controller blends toward the
+// table built from it as the wheel command approaches its cap (the stiff
+// set alone fell where this one held: a 70 ms wheel dead time, driving
+// backwards into a push, sim episode 2).
+inline WbWeights softWeights() {
+  WbWeights w;
+  w.pitch = 156.25;
+  w.pitch_rate = 0.25;
+  w.lean = 25.0;
+  w.vel = 1.0 / (0.15 * 0.15);
+  w.hip = 0.6944;
+  w.knee = 1600.0;
+  w.knee_rate = 0.015625;
+  w.knee_cmd = 2844.4;
+  w.hip_step = 2500.0;
+  w.knee_step = 2500.0;
+  return w;
+}
 
 struct WbPoint {
   double height_m = 0.0;
@@ -222,6 +256,21 @@ class WbDesign {
       Cy.push_back(c);
       Dy.push_back(Eigen::RowVectorXd::Zero(kNv));
       Wy.push_back(w_.lean);
+    }
+    // Body CoM height (linearised): the knee keeps the body at its height
+    // while the hip swings the legs.
+    if (w_.body_z > 0.0) {
+      Eigen::RowVectorXd c = Eigen::RowVectorXd::Zero(N);
+      LegPlant::Vec s{0.0, p.theta0, p.q0, p.k0};
+      for (int j = 1; j < 4; ++j) {
+        LegPlant::Vec a = s, b = s;
+        a[j] += e;
+        b[j] -= e;
+        c[j] = (plant_.world(a, 0).z - plant_.world(b, 0).z) / (2 * e);
+      }
+      Cy.push_back(c);
+      Dy.push_back(Eigen::RowVectorXd::Zero(kNv));
+      Wy.push_back(w_.body_z);
     }
     // Body CoM accelerations (linearised: d pos / d s times s'', s'' from
     // the continuous model with the commands that act now - the oldest in

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -14,6 +15,11 @@
 #include "tap_fw/v3/V3Controller.hpp"
 #include "tap_hw/Esp32Bus.hpp"
 #include "tap_hw/Mpu6500Spi.hpp"
+#include "tap_hw/OutSink.hpp"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 namespace tap_hw {
 
@@ -28,6 +34,27 @@ class AppV3 {
   void loop() noexcept;
 
  private:
+  // FreeRTOS split: a control task (core 1, above the Arduino loop) runs
+  // every 2 ms - commands, BLE, buses, IMU, controller, telemetry text -
+  // and the Arduino loop only moves serial bytes (input lines to a queue,
+  // output from OutSink to the UART). All controller state lives in the
+  // control task; the loop touches none of it. If the task cannot be made,
+  // the old single loop runs everything (rtos_ false).
+  static void controlTaskEntry(void* arg) noexcept;
+  // Serial in/out on core 0: on core 1 under the control task it starved
+  // whenever a tick ran past 2 ms (LQR + roll during a height ramp:
+  // ~2.8 ms), the GUI heartbeat stopped arriving and the 0.5 s session
+  // lease disabled the robot right after engage (hardware 2026-10-01).
+  static void commsTaskEntry(void* arg) noexcept;
+  TaskHandle_t comms_task_ = nullptr;
+  void step(bool task) noexcept;
+  void controlPart(std::uint64_t now_us) noexcept;
+  struct LineItem { char text[96]; };
+  OutSink out_{};
+  TaskHandle_t control_task_ = nullptr;
+  QueueHandle_t line_q_ = nullptr;
+  bool rtos_ = false;
+  std::uint32_t lines_dropped_ = 0U;
   void pollSerial(std::uint64_t now_us) noexcept;
   void handleLine(const char* line, std::uint64_t now_us) noexcept;
   void drainFeedback(std::uint64_t now_us) noexcept;
@@ -71,6 +98,14 @@ class AppV3 {
   std::uint32_t tick_exec_max_us_ = 0U;
   std::uint32_t tick_imu_max_us_ = 0U;
   std::uint32_t tick_ctrl_max_us_ = 0U;
+  // Per-section maxima of the control tick [us] (SENS prof=[update legs
+  // wheels trace]) and the mean controller time (upd_avg).
+  std::array<std::uint32_t, 4> prof_max_{};
+  std::uint32_t prof_upd_sum_ = 0U, prof_upd_n_ = 0U;
+  void prof(int i, std::uint64_t us) noexcept {
+    prof_max_[static_cast<std::size_t>(i)] =
+        std::max(prof_max_[static_cast<std::size_t>(i)], static_cast<std::uint32_t>(us));
+  }
   std::uint32_t pre_serial_max_us_ = 0U;  // per loop() pass, not only control ticks
   std::uint32_t pre_ble_max_us_ = 0U;
   std::uint32_t pre_bus_max_us_ = 0U;
@@ -154,6 +189,7 @@ class AppV3 {
   float drive_forward_ = 0.0F;
   float drive_yaw_ = 0.0F;
   int last_state_ = -1;
+  int last_ready_phase_ = -1;
   char line_[96]{};
   std::size_t line_length_ = 0U;
   std::array<float, 2> last_wheel_cmd_{};

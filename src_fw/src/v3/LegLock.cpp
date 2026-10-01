@@ -48,9 +48,20 @@ float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept
   // Height offsets (core rad) in driver turns: hip joints 0/3, knees 1/4.
   const auto binding = board::MotorIds{}.leg_can[leg];
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
-  const float offset_core = knee ? knee_offset_rad_ : hip_offset_rad_;
+  const std::size_t side = binding.joint_index < 3U ? 0U : 1U;  // LH LK | RH RK
+  const float offset_core = knee ? knee_offset_rad_ + side_knee_rad_[side]
+                                 : hip_offset_rad_ + side_hip_rad_[side];
   const float offset_turns = offset_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
   return start_turns_[leg] * (1.0F - blend) + offset_turns;
+}
+
+float LegLock::velFfTurns(std::size_t leg) const noexcept {
+  if (leg >= kLegs) return 0.0F;
+  const auto binding = board::MotorIds{}.leg_can[leg];
+  const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
+  const std::size_t side = binding.joint_index < 3U ? 0U : 1U;
+  const float rate_core = knee ? side_knee_rate_[side] : side_hip_rate_[side];
+  return rate_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
 }
 
 bool LegLock::atZero(std::uint64_t now_us) const noexcept {
@@ -69,7 +80,10 @@ bool LegLock::sendTargets(std::uint64_t now_us,
     const auto id = frame::canId(legs[i].node_id, config_.mode == Mode::Position
         ? frame::kSetInputPosCmdId : frame::kMitControlCmdId);
     if (config_.mode == Mode::Position) {
-      ok = transport.sendCan(id, frame::packSetInputPos(turns, 0, 0)) && ok;
+      // vel_ff in milli-turns/s (int16): only the roll side rate, 0 otherwise.
+      const float vff = std::clamp(velFfTurns(i) * 1000.0F, -32767.0F, 32767.0F);
+      ok = transport.sendCan(id, frame::packSetInputPos(
+                                     turns, static_cast<std::int16_t>(std::lround(vff)), 0)) && ok;
     } else {
       // MIT works in joint radians (after the 8:1 gear), driver frame.
       const float joint_rad = turns * kTwoPi / config_.gear_ratio;

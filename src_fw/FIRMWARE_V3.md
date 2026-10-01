@@ -62,16 +62,31 @@ trim > 0.08 rad), `REC [s]` (chỉ ghi, mặc định 6 s: đẩy, qua gờ, ôm
 
 v3.3 (điều khiển phân tầng, chỉ LQR, mặc định bật; xem `docs/V3.3_HANDOFF.md` mục 5):
 `SET vpitch 0|1` (con lắc ảo, chỉ khi không Balancing), `SET trunk 0|1` (hông giữ thân),
-`SET tshare|tlead|tmax|trate|thpf|texp|texpt v` (`texpt`: số mũ phần hông gánh ở độ cao lớn, `texp`: ở độ cao thấp), `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`
+`SET tshare|tlead|tmax|trate|thpf|texp|texpt v` (`texpt`: số mũ phần hông gánh ở độ cao lớn, `texp`: ở độ cao thấp; mặc định 0/0 = hông gánh toàn bộ), `SET tleadexp v` (lead tầng 2 = `tlead`·ratio^v, mặc định 0.5), `SET tplanfull 0|1` (nghiêng theo kế hoạch đủ 100 %, mặc định 1), `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`
 (bù động học IMU), `SET tvg <0..1>` (trọng số vận tốc khớp trong θv_rate), `SET tprev 0|1`
 (dự báo thao tác, cần vpitch), `SET tpacc|tpjerk|tpvmax|tpt v` (gia tốc/giật/trần tốc độ/
 tầm dự báo của quỹ đạo), `SET tlvl 0|1` (giữ thân ngang, cần trunk), `SET tlevel <rad>`
 (pitch thân mục tiêu, mặc định 0), `SET tltau|tlvmax v`, `SET hcap <m/s>` (trần tốc độ bánh
 khi đang bị giữ/nhấc), `SET tsus 0|1` (gối nhún giữ độ cao thân, cần vpitch), `SET tsusg v`
-(độ lợi), `SET tsusmax <mm>`; `SET algo 2` (LQR toàn thân, thử nghiệm), `SET wbff|wbslack|wbbg v`. TR thêm
+(độ lợi), `SET tsusmax <mm>`; `SET algo 2` (LQR toàn thân, thử nghiệm; chỉ vào cân bằng qua chuỗi
+ARMED: đặt xuống sàn, giữ yên 0.7 s, buông - `SET wbarm 0` bỏ ràng buộc này; lệnh bánh đập trần
+qua lại 4 lần trong 2 s thì FAULT "whole-body loop ringing"), `SET wbgive <0.3..1>` (trên tỉ lệ
+này của trần tốc độ bánh, mốc vị trí lùi theo robot; 1 = tắt), `SET wbenv 0|1` (giới hạn chuyển
+động theo chiều cao khi WB: trần tốc độ, giật, gia tốc ≈ 1 m/s²), `SET tenv 0|1` (như vậy cho tầng
+1/2, mặc định tắt), `SET tenvlean <rad>` (độ nghiêng chân nhận cho gia tốc kế hoạch), `SET wbkhold 0|1` / `SET khold 0|1`
+(gối giữ chiều cao hông–trục khi hông vung, IK; mặc định bật cho cả WB và tầng 1/2), `SET wbsoft <0.2..1>`
+(WB: từ tỉ lệ này của trần tốc độ bánh, gain chuyển dần sang bảng "mềm" để thân phụ đỡ; 1 = luôn
+bảng cứng), `SET roll 0|1` (trục roll: thân ngang trái/phải, nghiêng vào cua; mặc định tắt),
+`SET rolltau|rollkp|rollff|rolltgt|rollyaw v`, `SET rollmax|rollres <mm>`, `SET rollsign 1|-1`, `SET rollvff 0|1` (tốc độ phần roll gửi kèm
+`Set_Input_Pos` làm vel_ff cho GDS68 + gain roll nhanh); TR thêm `roll`
+(rad, + = trái cao) và `rdh` (mm, chân trái +, phải −), `SET wbff|wbslack|wbbg v`,
+`SET imm 0|1` (0: mọi thuật toán chờ ARMED như trên thay vì cân bằng ngay khi khóa chân). TR thêm
 `tv` (θv), `dhip` (hông tầng 2), `ta` (quyền 0..1), `me` (sai lệch mô hình chân), `lvl`
 (phần hông giữ thân ngang), `ho` (1 = đang bị giữ, bánh bị giới hạn), `lt` (trim đã học/hợp
-lệ), `sus` (offset nhún, mm), `vz` (vận tốc dọc thân ước lượng); SENS thêm `hipv_rms` (nhiễu vận tốc hông).
+lệ), `sus` (offset nhún, mm), `vz` (vận tốc dọc thân ước lượng); SENS thêm `hipv_rms` (nhiễu vận tốc hông), `prof=[update legs wheels trace]` (thời gian lớn
+nhất từng phần của tick điều khiển trong cửa sổ báo cáo, µs) và `upd_avg` (trung bình
+`V3Controller::update`, µs). Dòng TR/SENS dựng bằng `tap_fw/FastFormat.hpp` (cùng văn bản như
+printf cũ, không tốn chi phí đổi số thực của printf).
 
 ## Log
 

@@ -17,6 +17,7 @@
 #include <esp_timer.h>
 
 #include "robot_hal/MotorFrameCodec.hpp"
+#include "tap_fw/FastFormat.hpp"
 #include "tap_fw/ImuMount.hpp"
 #include "tap_fw/v3/JointTestSchedule.hpp"
 
@@ -119,37 +120,114 @@ AppV3::AppV3() noexcept
 
 bool AppV3::begin() noexcept {
   Serial.setTxBufferSize(4096U);
-  Serial.begin(115200);
+  // 921600: at 115200 the TR + SENS stream alone used ~90 % of the link, and
+  // a recorder dump on top stalled the loop on a full TX buffer until the
+  // wheel feedback went stale (FAULT after KNEETEST, 2026-10-01).
+  Serial.begin(921600);
   delay(300);
   pinMode(tap_fw::board::kLed1Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed2Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed3Gpio, OUTPUT);
-  Serial.println("TAP firmware v3: two-wheel inverted pendulum, legs locked at the "
+  out_.println("TAP firmware v3: two-wheel inverted pendulum, legs locked at the "
                  "power-up pose (driver position mode), USB serial control");
   can_ready_ = can_.begin();
   uart_ready_ = uart1_.begin(tap_fw::board::kMotorUartBaud) &&
       uart2_.begin(tap_fw::board::kMotorUartBaud);
   imu_ready_ = mpu_.begin();
-  Serial.printf("TWAI=%s UART=%s MPU6500 WHO_AM_I=0x%02X (%s)\n",
+  out_.printf("TWAI=%s UART=%s MPU6500 WHO_AM_I=0x%02X (%s)\n",
                 can_ready_ ? "PASS" : "FAIL", uart_ready_ ? "READY" : "FAIL",
                 mpu_.whoAmI(), imu_ready_ ? "PASS" : "FAIL");
-  Serial.println("V3 procedure: arrange the legs BEFORE switching the motor supply on "
+  out_.println("V3 procedure: arrange the legs BEFORE switching the motor supply on "
                  "(that pose is zero). Stand the robot on its wheels, press START, "
                  "let go (loose tether). DISABLE / ESTOP stop everything.");
   Dabble.begin("TAP-RB");
   BLEDevice::setCustomGattsHandler(onV3GattsEvent);
-  Serial.println("BLE: Dabble GamePad as TAP-RB (joystick drive, Start=START, Select=GO, "
+  out_.println("BLE: Dabble GamePad as TAP-RB (joystick drive, Start=START, Select=GO, "
                  "Triangle/Cross hold = raise/lower); USB serial GUI also works");
+  // Operator request 2026-10-01: every new feature on at boot - roll
+  // leveling/lean-in with the servo velocity feed-forward (SET roll 0,
+  // SET rollvff 0 turn them off).
+  // WB rang on the floor twice (2026-10-01 17:2x) - boots on the tiers
+  // until it is re-designed against the measured wheel response (SET algo 2
+  // still selects it).
+  ctrl_.config().roll.enabled = true;
+  // rollvff stays off: with it the side legs hunted on the robot (SET rollvff 1).
   printTunables();
   const std::uint64_t now_us = nowUs();
   next_control_us_ = now_us;
   last_rx_us_ = now_us;
+  // FreeRTOS split (see AppV3.hpp). Output switches to the stream buffer
+  // only once the control task exists; otherwise the single loop runs on.
+  // Build with -DTAP_V3_SINGLE_LOOP=1 to keep the old single loop.
+#if !defined(TAP_V3_SINGLE_LOOP) || !TAP_V3_SINGLE_LOOP
+  line_q_ = xQueueCreate(16, sizeof(LineItem));
+  if (line_q_ != nullptr && out_.begin(16384U)) {
+    rtos_ = true;  // set before the task can run: pollSerial queues from now on
+    if (xTaskCreatePinnedToCore(&AppV3::controlTaskEntry, "v3ctrl", 12288, this,
+                                configMAX_PRIORITIES - 4, &control_task_, 1) != pdPASS) {
+      rtos_ = false;
+      Serial.println("V3 RTOS: control task not created - single loop");
+    } else {
+      if (xTaskCreatePinnedToCore(&AppV3::commsTaskEntry, "v3comms", 6144, this, 3,
+                                  &comms_task_, 0) != pdPASS) {
+        comms_task_ = nullptr;
+      }
+      out_.println(comms_task_ != nullptr
+                       ? "V3 RTOS: control task on core 1 every 2 ms, serial task on core 0"
+                       : "V3 RTOS: control task on core 1 every 2 ms, serial on the loop task");
+    }
+  }
+#endif
   return can_ready_ && uart_ready_ && imu_ready_;
 }
 
 void AppV3::loop() noexcept {
+  if (!rtos_) {
+    step(false);
+    out_.drainTo(Serial);  // no-op unless the stream buffer exists without its task
+    delayMicroseconds(100U);
+    return;
+  }
+  if (comms_task_ != nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(100));  // serial runs in the comms task (core 0)
+    return;
+  }
+  // Comms only: serial input lines to the control task, its output to the UART.
+  pollSerial(nowUs());
+  out_.drainTo(Serial);
+  vTaskDelay(1);
+}
+
+void AppV3::commsTaskEntry(void* arg) noexcept {
+  auto* app = static_cast<AppV3*>(arg);
+  for (;;) {
+    app->pollSerial(nowUs());
+    app->out_.drainTo(Serial);
+    vTaskDelay(1);
+  }
+}
+
+void AppV3::controlTaskEntry(void* arg) noexcept {
+  static_assert(configTICK_RATE_HZ >= 500, "the 2 ms control period needs a >= 500 Hz RTOS tick");
+  auto* app = static_cast<AppV3*>(arg);
+  const TickType_t period = pdMS_TO_TICKS(tap_fw::board::kControlPeriodUs / 1000U);
+  TickType_t last = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last, period);
+    app->step(true);
+  }
+}
+
+void AppV3::step(bool task) noexcept {
   const std::uint64_t now_us = nowUs();
-  pollSerial(now_us);
+  if (task) {
+    // Command lines the loop task queued: handled here, so every state
+    // change happens in this task.
+    LineItem item;
+    while (xQueueReceive(line_q_, &item, 0) == pdTRUE) handleLine(item.text, now_us);
+  } else {
+    pollSerial(now_us);
+  }
   const std::uint64_t t_serial = nowUs();
   pollBle(now_us);
   const std::uint64_t t_ble = nowUs();
@@ -159,32 +237,46 @@ void AppV3::loop() noexcept {
   pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - now_us));
   pre_ble_max_us_ = std::max(pre_ble_max_us_, static_cast<std::uint32_t>(t_ble - t_serial));
   pre_bus_max_us_ = std::max(pre_bus_max_us_, static_cast<std::uint32_t>(t_bus - t_ble));
+  constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
+  if (task) {
+    // The RTOS timer already paces the ticks (tick-aligned wake-ups may land
+    // a few us before the old us schedule): run every wake, count a wake
+    // more than half a period late.
+    if (last_tick_us_ != 0U && now_us - last_tick_us_ > kPeriod + kPeriod / 2U) ++tick_late_;
+    next_control_us_ = now_us + kPeriod;
+    controlPart(now_us);
+    return;
+  }
   if (now_us >= next_control_us_) {
     // Fixed-rate schedule. `now + period` added each tick's own processing
     // time to the period: measured 2026-09-30 (HIPTEST) the loop ran at
     // ~440 Hz (2.27 ms mean, 3.5 ms max) while the controller integrated
     // with dt = 2 ms, i.e. ~12 % slow. A long stall resyncs instead of
     // bursting through the missed ticks.
-    constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
     if (now_us - next_control_us_ > kPeriod) ++tick_late_;
     next_control_us_ += kPeriod;
     if (now_us >= next_control_us_ + 4U * kPeriod) next_control_us_ = now_us + kPeriod;
-    tick_dt_s_ = last_tick_us_ == 0U ? static_cast<float>(kPeriod) * 1.0e-6F
-        : std::clamp(static_cast<float>(now_us - last_tick_us_) * 1.0e-6F,
-                     0.5e-6F * static_cast<float>(kPeriod),
-                     3.0e-6F * static_cast<float>(kPeriod));
-    last_tick_us_ = now_us;
-    updateImu(now_us);
-    const std::uint64_t t_imu = nowUs();
-    controlTick(now_us);
-    const std::uint64_t t_ctrl = nowUs();
-    report(now_us);
-    const std::uint64_t t_end = nowUs();
-    tick_imu_max_us_ = std::max(tick_imu_max_us_, static_cast<std::uint32_t>(t_imu - t_bus));
-    tick_ctrl_max_us_ = std::max(tick_ctrl_max_us_, static_cast<std::uint32_t>(t_ctrl - t_imu));
-    tick_exec_max_us_ = std::max(tick_exec_max_us_, static_cast<std::uint32_t>(t_end - now_us));
+    controlPart(now_us);
   }
-  delayMicroseconds(100U);
+}
+
+void AppV3::controlPart(std::uint64_t now_us) noexcept {
+  constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
+  const std::uint64_t t_bus = nowUs();
+  tick_dt_s_ = last_tick_us_ == 0U ? static_cast<float>(kPeriod) * 1.0e-6F
+      : std::clamp(static_cast<float>(now_us - last_tick_us_) * 1.0e-6F,
+                   0.5e-6F * static_cast<float>(kPeriod),
+                   3.0e-6F * static_cast<float>(kPeriod));
+  last_tick_us_ = now_us;
+  updateImu(now_us);
+  const std::uint64_t t_imu = nowUs();
+  controlTick(now_us);
+  const std::uint64_t t_ctrl = nowUs();
+  report(now_us);
+  const std::uint64_t t_end = nowUs();
+  tick_imu_max_us_ = std::max(tick_imu_max_us_, static_cast<std::uint32_t>(t_imu - t_bus));
+  tick_ctrl_max_us_ = std::max(tick_ctrl_max_us_, static_cast<std::uint32_t>(t_ctrl - t_imu));
+  tick_exec_max_us_ = std::max(tick_exec_max_us_, static_cast<std::uint32_t>(t_end - now_us));
 }
 
 void AppV3::pollSerial(std::uint64_t now_us) noexcept {
@@ -197,7 +289,15 @@ void AppV3::pollSerial(std::uint64_t now_us) noexcept {
     }
     line_[line_length_] = '\0';
     line_length_ = 0U;
-    if (line_[0] != '\0') handleLine(line_, now_us);
+    if (line_[0] == '\0') continue;
+    if (rtos_) {
+      LineItem item;
+      std::strncpy(item.text, line_, sizeof(item.text) - 1U);
+      item.text[sizeof(item.text) - 1U] = '\0';
+      if (xQueueSend(line_q_, &item, 0) != pdTRUE) ++lines_dropped_;
+    } else {
+      handleLine(line_, now_us);
+    }
   }
 }
 
@@ -207,13 +307,13 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   auto& lqr = ctrl_.balancer();
   if (std::strcmp(line, "START") == 0 || std::strcmp(line, "TILTTEST") == 0) {
     if (estop_) {
-      Serial.println("V3 START refused: E-STOP latched (CLEAR_ESTOP)");
+      out_.println("V3 START refused: E-STOP latched (CLEAR_ESTOP)");
       return;
     }
     start_pending_ = true;
     tilt_test_ = line[0] == 'T';
     if (!ctrl_.legsHeld()) height_request_m_ = 0.0F;  // fresh lock: hang height
-    Serial.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
+    out_.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
                                 "max 12 rad/s, no balance loop)"
                               : "V3 START");
   } else if (std::strcmp(line, "GO") == 0) {
@@ -223,19 +323,19 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     // on the stand would spin the wheels in the air into a runaway.
     const auto st = ctrl_.state();
     if (st == V3Controller::State::Ready) {
-      Serial.println("V3 GO: armed. Carry the robot to the floor, hold it still ~1 s at its "
+      out_.println("V3 GO: armed. Carry the robot to the floor, hold it still ~1 s at its "
                      "standing point, let go -> balancing starts by itself");
     } else if (st == V3Controller::State::Balancing && tilt_test_) {
       go_pending_ = true;  // leave TILTTEST for the armed Ready state
     } else if (st == V3Controller::State::Balancing || st == V3Controller::State::Locking) {
-      Serial.println("V3 GO: already running");
+      out_.println("V3 GO: already running");
     } else if (estop_) {
-      Serial.println("V3 GO refused: E-STOP latched (CLEAR_ESTOP)");
+      out_.println("V3 GO refused: E-STOP latched (CLEAR_ESTOP)");
     } else {
       start_pending_ = true;
       tilt_test_ = false;
       if (!ctrl_.legsHeld()) height_request_m_ = 0.0F;
-      Serial.println("V3 GO: locking legs, then wheels hold (armed; balances after the robot "
+      out_.println("V3 GO: locking legs, then wheels hold (armed; balances after the robot "
                      "is put on the floor and let go)");
     }
   } else if (std::strncmp(line, "HMOVE ", 6U) == 0) {
@@ -244,7 +344,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   } else if (std::strcmp(line, "GO NOW") == 0) {
     if (ctrl_.state() == V3Controller::State::Ready) {
       go_pending_ = true;
-      Serial.println("V3 GO NOW: balance loop engaged immediately");
+      out_.println("V3 GO NOW: balance loop engaged immediately");
     }
   } else if (std::strcmp(line, "DISABLE") == 0) {
     disable_pending_ = true;
@@ -252,14 +352,14 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     go_after_ready_ = false;
     height_request_m_ = 0.0F;
     hmove_dir_ = 0;
-    Serial.println("V3 DISABLE");
+    out_.println("V3 DISABLE");
   } else if (std::strcmp(line, "ESTOP") == 0) {
     estop_ = true;
     disable_pending_ = true;
-    Serial.println("V3 E-STOP latched");
+    out_.println("V3 E-STOP latched");
   } else if (std::strcmp(line, "CLEAR_ESTOP") == 0) {
     estop_ = false;
-    Serial.println("V3 E-STOP cleared");
+    out_.println("V3 E-STOP cleared");
   } else if (std::strcmp(line, "STOP") == 0) {
     drive_forward_ = drive_yaw_ = 0.0F;
   } else if (std::strncmp(line, "DRIVE ", 6U) == 0) {
@@ -271,7 +371,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
     if (ctrl_.state() != V3Controller::State::Idle &&
         ctrl_.state() != V3Controller::State::Fault) {
-      Serial.println("V3 LEGMODE refused: DISABLE first");
+      out_.println("V3 LEGMODE refused: DISABLE first");
       return;
     }
     legs_.setMode(line[8] == 'P' ? LegLock::Mode::Position : LegLock::Mode::Mit);
@@ -280,7 +380,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     char key[20]{};
     float v = 0.0F;
     if (std::sscanf(line + 4, "%19s %f", key, &v) != 2 || !std::isfinite(v)) {
-      Serial.println("V3 SET usage: SET <key> <value>");
+      out_.println("V3 SET usage: SET <key> <value>");
       return;
     }
     if (!std::strcmp(key, "trim_gain")) lqr.setBalanceTrimGain(std::clamp(v, 0.0F, 2.0F));
@@ -300,7 +400,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       height_request_m_ = std::clamp(v * 0.001F, tap_fw::v3::LegHeight::minHeight(),
                                      tap_fw::v3::LegHeight::maxHeight());
       if (ctrl_.state() != V3Controller::State::Balancing) {
-        Serial.println("V3 SET height: stored; the legs move once balancing is settled");
+        out_.println("V3 SET height: stored; the legs move once balancing is settled");
       }
     }
     else if (!std::strcmp(key, "hff")) ctrl_.config().height.balance_ff_scale = std::clamp(v, -2.0F, 2.0F);
@@ -311,12 +411,38 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "kx")) ctrl_.config().pid.kx = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "kix")) ctrl_.config().pid.kix = std::clamp(v, 0.0F, 0.2F);
     else if (!std::strcmp(key, "auto")) ctrl_.config().engage.automatic = v >= 0.5F;
+    else if (!std::strcmp(key, "imm")) ctrl_.config().engage.immediate = v >= 0.5F;
+    else if (!std::strcmp(key, "wbarm")) ctrl_.config().engage.wb_armed_only = v >= 0.5F;
+    else if (!std::strcmp(key, "wbgive")) ctrl_.config().wb_give_from = std::clamp(v, 0.3F, 1.0F);
+    else if (!std::strcmp(key, "wbsoft")) ctrl_.config().wb_soft_from = std::clamp(v, 0.2F, 1.0F);
+    else if (!std::strcmp(key, "tenv")) ctrl_.config().tier.envelope = v >= 0.5F;
+    else if (!std::strcmp(key, "khold")) ctrl_.config().tier.knee_hold = v >= 0.5F;
+    else if (!std::strcmp(key, "tplanfull")) ctrl_.config().tier.plan_full = v >= 0.5F;
+    else if (!std::strcmp(key, "roll")) ctrl_.config().roll.enabled = v >= 0.5F;
+    else if (!std::strcmp(key, "rolltau")) ctrl_.config().roll.tau_s = std::clamp(v, 0.05F, 5.0F);
+    else if (!std::strcmp(key, "rollmax")) ctrl_.config().roll.max_dh_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "rollres")) ctrl_.config().roll.reserve_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "rollff")) ctrl_.config().roll.turn_ff = std::clamp(v, 0.0F, 2.0F);
+    else if (!std::strcmp(key, "rolltgt")) ctrl_.config().roll.target_rad = std::clamp(v, -0.15F, 0.15F);
+    else if (!std::strcmp(key, "rollyaw")) ctrl_.config().roll.yaw_accel_rad_s2 = std::clamp(v, 0.0F, 50.0F);
+    else if (!std::strcmp(key, "rollsign")) ctrl_.config().roll.sign = v < 0.0F ? -1.0F : 1.0F;
+    else if (!std::strcmp(key, "rollkp")) ctrl_.config().roll.kp = std::clamp(v, 0.0F, 3.0F);
+    else if (!std::strcmp(key, "lqrlead")) ctrl_.config().lqr_lead_s = std::clamp(v, 0.0F, 0.2F);
+    else if (!std::strcmp(key, "wpred")) ctrl_.config().wheel_pred.enabled = v >= 0.5F;
+    else if (!std::strcmp(key, "wbpred")) ctrl_.config().wheel_pred.with_wb = v >= 0.5F;
+    else if (!std::strcmp(key, "wpdelay")) ctrl_.config().wheel_pred.act_delay_s = std::clamp(v, 0.0F, 200.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "wptau")) ctrl_.config().wheel_pred.tau_s = std::clamp(v, 1.0F, 300.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "wpmeas")) ctrl_.config().wheel_pred.meas_delay_s = std::clamp(v, 0.0F, 200.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "rollvff")) ctrl_.config().roll.vel_ff = v >= 0.5F;
+    else if (!std::strcmp(key, "wbkhold")) ctrl_.config().tier.knee_hold_wb = v >= 0.5F;
+    else if (!std::strcmp(key, "wbenv")) ctrl_.config().tier.envelope_wb = v >= 0.5F;
+    else if (!std::strcmp(key, "tenvlean")) ctrl_.config().tier.env_lean_rad = std::clamp(v, 0.0F, 0.3F);
     else if (!std::strcmp(key, "amax")) ctrl_.config().pid.accel_max_m_s2 = std::clamp(v, 0.5F, 30.0F);
     else if (!std::strcmp(key, "algo")) {
       if (ctrl_.state() == V3Controller::State::Balancing ||
           ctrl_.state() == V3Controller::State::Ready ||
           ctrl_.state() == V3Controller::State::Locking) {
-        Serial.println("V3 SET algo: only while Idle/Fault");
+        out_.println("V3 SET algo: only while Idle/Fault");
         return;
       }
       // 0 = LQR + tiers (default), 1 = PID, 2 = whole-body LQR (wheel + hip + knee).
@@ -328,7 +454,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     // so it only switches outside Balancing; trunk ramps in and out anytime.
     else if (!std::strcmp(key, "vpitch")) {
       if (ctrl_.state() == V3Controller::State::Balancing) {
-        Serial.println("V3 SET vpitch: not while balancing (DISABLE or wait for a fault)");
+        out_.println("V3 SET vpitch: not while balancing (DISABLE or wait for a fault)");
         return;
       }
       ctrl_.config().tier.virtual_pitch = v >= 0.5F;
@@ -336,13 +462,14 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     }
     else if (!std::strcmp(key, "trunk")) {
       if (v >= 0.5F && !ctrl_.config().tier.virtual_pitch) {
-        Serial.println("V3 SET trunk: needs SET vpitch 1 first");
+        out_.println("V3 SET trunk: needs SET vpitch 1 first");
         return;
       }
       ctrl_.config().tier.trunk = v >= 0.5F;
     }
     else if (!std::strcmp(key, "tshare")) ctrl_.config().tier.lean_share = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tlead")) ctrl_.config().tier.lead_s = std::clamp(v, 0.0F, 0.15F);
+    else if (!std::strcmp(key, "tleadexp")) ctrl_.config().tier.lead_exp = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "tmax")) ctrl_.config().tier.max_rad = std::clamp(v, 0.0F, 0.30F);
     else if (!std::strcmp(key, "trate")) ctrl_.config().tier.rate_rad_s = std::clamp(v, 0.1F, 6.0F);
     else if (!std::strcmp(key, "thpf")) ctrl_.config().tier.hpf_s = std::clamp(v, 0.0F, 30.0F);
@@ -374,23 +501,23 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else {
-      Serial.printf("V3 SET unknown key '%s'\n", key);
+      out_.printf("V3 SET unknown key '%s'\n", key);
       return;
     }
     printTunables();
   } else if (std::strcmp(line, "BALANCE") == 0) {
     if (!imuFresh(now_us)) {
-      Serial.println("V3 BALANCE refused: IMU not ready");
+      out_.println("V3 BALANCE refused: IMU not ready");
       return;
     }
     // Measurement only: a reading taken on the stand is not the balance
     // angle, so it is not stored (use SET balance <rad> to store one).
-    Serial.printf("V3 BALANCE measured pitch_avg=%+.4f rad (%+.2f deg) spread=%.4f rad "
+    out_.printf("V3 BALANCE measured pitch_avg=%+.4f rad (%+.2f deg) spread=%.4f rad "
                   "(not stored; SET balance %.4f to use it)\n",
                   pitch_avg_, pitch_avg_ * 57.29578F, pitch_spread_, pitch_avg_);
   } else if (std::strcmp(line, "BALANCE CLEAR") == 0) {
     ctrl_.setBalanceAngle(false, 0.0F);
-    Serial.println("V3 BALANCE cleared: START seeds from the release pitch");
+    out_.println("V3 BALANCE cleared: START seeds from the release pitch");
   } else if (std::strcmp(line, "GET") == 0) {
     printTunables();
   } else if (std::strncmp(line, "HIPTEST", 7) == 0 || std::strncmp(line, "KNEETEST", 8) == 0 ||
@@ -400,14 +527,14 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     const bool floor = !hip && !rec && std::strstr(line, "FLOOR") != nullptr;
     const char* name = hip ? "HIPTEST" : rec ? "REC" : floor ? "KNEETEST FLOOR" : "KNEETEST";
     if (rec_active_ || rec_dumping_) {
-      Serial.printf("V3 %s refused: a recording is already running\n", name);
+      out_.printf("V3 %s refused: a recording is already running\n", name);
       return;
     }
     if (rec) {
       float seconds = 6.0F;
       (void)std::sscanf(line + 3, "%f", &seconds);
       startRecording(RecKind::Free, 0.0F, std::clamp(seconds, 1.0F, 8.0F), now_us);
-      Serial.printf("V3 REC start: %.1f s at 250 Hz (wheels and legs unchanged)\n",
+      out_.printf("V3 REC start: %.1f s at 250 Hz (wheels and legs unchanged)\n",
                     rec_duration_s_);
       return;
     }
@@ -415,22 +542,22 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       float amp = 0.03F;
       (void)std::sscanf(line + 14, "%f", &amp);
       if (ctrl_.state() != V3Controller::State::Balancing || ctrl_.heldOuterOff()) {
-        Serial.println("V3 KNEETEST FLOOR refused: not balancing free on the floor");
+        out_.println("V3 KNEETEST FLOOR refused: not balancing free on the floor");
         return;
       }
       if (!ctrl_.config().tier.virtual_pitch) {
-        Serial.println("V3 KNEETEST FLOOR refused: needs SET vpitch 1 (the v3.2 balancer "
+        out_.println("V3 KNEETEST FLOOR refused: needs SET vpitch 1 (the v3.2 balancer "
                        "reads every leg motion as a body tilt)");
         return;
       }
       if (ctrl_.legPose().axle_below_hip_m < kKneeFloorMinHeightM) {
-        Serial.printf("V3 KNEETEST FLOOR refused: below %.0f mm\n",
+        out_.printf("V3 KNEETEST FLOOR refused: below %.0f mm\n",
                       kKneeFloorMinHeightM * 1000.0F);
         return;
       }
       startRecording(RecKind::KneeFloor, std::clamp(amp, 0.01F, 0.05F),
                      tap_fw::v3::kFloorTestDurationS, now_us);
-      Serial.printf("V3 KNEETEST FLOOR start: knee +-%.3f rad (centre %+.3f) at 0.5/1/2/3 Hz, "
+      out_.printf("V3 KNEETEST FLOOR start: knee +-%.3f rad (centre %+.3f) at 0.5/1/2/3 Hz, "
                     "%.1f s, aborts past %.2f rad of CoM lean\n", rec_amp_, rec_centre_,
                     rec_duration_s_, kKneeFloorAbortRad);
       return;
@@ -439,18 +566,18 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     float resend_ms = 4.0F;
     (void)std::sscanf(line + (hip ? 7 : 8), "%f %f", &amp, &resend_ms);
     if (!legs_.engaged() || !legs_.atZero(now_us)) {
-      Serial.printf("V3 %s refused: legs not locked (robot on the stand, START first)\n", name);
+      out_.printf("V3 %s refused: legs not locked (robot on the stand, START first)\n", name);
       return;
     }
     rec_resend_us_ = static_cast<std::uint32_t>(std::clamp(resend_ms, 2.0F, 20.0F) * 1000.0F);
     legs_.setResendPeriod(rec_resend_us_);
     startRecording(hip ? RecKind::HipStand : RecKind::KneeStand, std::clamp(amp, 0.01F, 0.10F),
                    tap_fw::v3::kStandTestDurationS, now_us);
-    Serial.printf("V3 %s start: amp=%.3f rad resend=%lu us, wheels off, %.1f s "
+    out_.printf("V3 %s start: amp=%.3f rad resend=%lu us, wheels off, %.1f s "
                   "(robot must be on the stand)\n", name, rec_amp_,
                   static_cast<unsigned long>(rec_resend_us_), rec_duration_s_);
   } else {
-    Serial.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
+    out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
                   "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
                   "REC)\n", line);
   }
@@ -459,7 +586,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
 void AppV3::printTunables() noexcept {
   const auto& c = ctrl_.balancer().config();
   const auto& pid = ctrl_.config().pid;
-  Serial.printf("V3 TUNE algo=%s (SET algo 0=LQR 1=PID 2=WB) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
+  out_.printf("V3 TUNE algo=%s (SET algo 0=LQR 1=PID 2=WB) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
                 "kix=%.3f amax=%.1f lead=%.2f dbc=%.2f dbe=%.2f auto=%d balance=%s%+.4f "
                 "height %.0f-%.0f mm hrate=%.0f mm/s\n",
                 ctrl_.config().algo == V3Controller::Algo::Pid       ? "PID"
@@ -474,21 +601,34 @@ void AppV3::printTunables() noexcept {
                 tap_fw::v3::LegHeight::maxHeight() * 1000.0F,
                 ctrl_.config().height.rate_m_s * 1000.0F);
   const auto& tier = ctrl_.config().tier;
-  Serial.printf("V3 TUNE tiers: vpitch=%d trunk=%d (LQR only) tshare=%.2f tlead=%.3f tmax=%.3f "
-                "trate=%.1f thpf=%.1f texp=%.2f texpt=%.2f cdx=%.1f mm timu=%d tvg=%.2f\n",
+  out_.printf("V3 TUNE tiers: vpitch=%d trunk=%d (LQR only) tshare=%.2f tlead=%.3f tleadexp=%.2f "
+                "tplanfull=%d tmax=%.3f trate=%.1f thpf=%.1f texp=%.2f texpt=%.2f cdx=%.1f mm timu=%d tvg=%.2f\n",
                 tier.virtual_pitch ? 1 : 0, tier.trunk ? 1 : 0, tier.lean_share, tier.lead_s,
-                tier.max_rad, tier.rate_rad_s, tier.hpf_s, tier.height_exp, tier.height_exp_tall,
+                tier.lead_exp, tier.plan_full ? 1 : 0, tier.max_rad, tier.rate_rad_s, tier.hpf_s, tier.height_exp, tier.height_exp_tall,
                 tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain);
-  Serial.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
+  out_.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
                 "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
                 tier.plan_vmax_m_s, tier.preview_s);
-  Serial.printf("V3 TUNE suspension: tsus=%d (needs vpitch) tsusg=%.1f tsusmax=%.0f mm\n",
+  out_.printf("V3 TUNE suspension: tsus=%d (needs vpitch) tsusg=%.1f tsusmax=%.0f mm\n",
                 tier.suspension ? 1 : 0, tier.sus_gain, tier.sus_max_m * 1000.0F);
-  Serial.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "
+  out_.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "
                 "hcap=%.2f m/s learned_trim=%s%+.4f\n", tier.level ? 1 : 0, tier.level_pitch_rad,
                 tier.level_tau_s, tier.level_max_rad, ctrl_.config().held_wheel_cap_m_s,
                 ctrl_.learnedTrimValid() ? "" : "(none) ", ctrl_.learnedTrim());
-  Serial.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
+  {
+    const auto& rl = ctrl_.config().roll;
+    out_.printf("V3 TUNE roll: roll=%d rolltau=%.2f rollkp=%.2f rollmax=%.0f mm rollres=%.0f mm rollff=%.2f "
+                  "rolltgt=%+.3f rollyaw=%.1f rollsign=%+.0f rollvff=%d est=%+.4f\n", rl.enabled ? 1 : 0, rl.tau_s, rl.kp,
+                  rl.max_dh_m * 1000.0F, rl.reserve_m * 1000.0F, rl.turn_ff, rl.target_rad,
+                  rl.yaw_accel_rad_s2, rl.sign, rl.vel_ff ? 1 : 0, ctrl_.rollEstimate());
+  }
+  {
+    const auto& wp = ctrl_.config().wheel_pred;
+    out_.printf("V3 TUNE wheel predictor: wpred=%d wbpred=%d wpdelay=%.0f ms wptau=%.0f ms wpmeas=%.0f ms\n",
+                wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
+                wp.meas_delay_s * 1000.0F);
+  }
+  out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
                 tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
                 legs_.config().mit_kd_nm_s_per_rad, c.balance_trim_gain_rad_per_m,
@@ -588,7 +728,7 @@ void AppV3::pollBle(std::uint64_t now_us) noexcept {
   if (link_up != ble_link_up_) {
     ble_link_up_ = link_up;
     ble_inputs_armed_ = false;
-    Serial.printf("BLE %s\n", link_up ? "connected" : "disconnected");
+    out_.printf("BLE %s\n", link_up ? "connected" : "disconnected");
     if (!link_up) {
       // Phone gone: stop driving and height moves (the session lease then
       // follows the USB rules: no serial either -> disabled after 0.5 s).
@@ -718,7 +858,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   cmd.disable = disable_pending_ || estop_;
   if (active && now_us - last_rx_us_ > kLeaseUs) {
     cmd.disable = true;
-    Serial.println("V3 serial lease expired (no command for 0.5 s): disabled");
+    out_.println("V3 serial lease expired (no command for 0.5 s): disabled");
   }
 
   // START checks that need the hardware: every leg near its power-up pose.
@@ -746,7 +886,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       }
     }
     if (refuse != nullptr) {
-      Serial.printf("V3 START refused: %s\n", refuse);
+      out_.printf("V3 START refused: %s\n", refuse);
     } else {
       cmd.start = true;
     }
@@ -758,7 +898,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     go_pending_ = false;
     ctrl_.returnToReady();
     last_state_ = -1;  // re-run the state-change block: estimator, READY log
-    Serial.println("V3 GO: TILTTEST -> armed Ready (balances after put down and let go)");
+    out_.println("V3 GO: TILTTEST -> armed Ready (balances after put down and let go)");
   }
   // TILTTEST skips the carry-to-floor wait (it is a hand-held check).
   const bool ready_now = ctrl_.state() == V3Controller::State::Ready;
@@ -773,6 +913,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   // a steady backward rotation and wound the wheels up from the first tick.
   in.pitch_rate_rad_s = imu_.pitch_rate_rad_s;
   in.yaw_rate_rad_s = imu_.yaw_rate_rad_s;
+  in.roll_rate_rad_s = imu_.roll_rate_rad_s;  // raw: the roll estimate learns its bias
+  in.accel_y_m_s2 = body_.accel_m_s2[1];
   in.accel_x_m_s2 = body_.accel_m_s2[0];
   in.accel_z_m_s2 = body_.accel_m_s2[2];
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
@@ -806,11 +948,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.legs_ready = legs_ready;
   if (st == V3Controller::State::Locking && now_us - state_since_us_ > kLockTimeoutUs) {
     cmd.disable = true;
-    Serial.printf("V3 legs did not reach zero within 5 s: [%+.3f %+.3f %+.3f %+.3f] rad; "
+    out_.printf("V3 legs did not reach zero within 5 s: [%+.3f %+.3f %+.3f %+.3f] rad; "
                   "disabled\n", legJointRad(0), legJointRad(1), legJointRad(2), legJointRad(3));
   }
   if (!in.sensors_ok && active) {
-    Serial.printf("V3 sensors: imu=%d wheels=%d legs=%d axis=%s\n", imuFresh(now_us),
+    out_.printf("V3 sensors: imu=%d wheels=%d legs=%d axis=%s\n", imuFresh(now_us),
                   feedback_.allWheelsFresh(now_us), legsFresh(now_us),
                   legAxisProblem(now_us, closed_loop_due) ? legAxisProblem(now_us, closed_loop_due)
                                                           : "ok");
@@ -826,9 +968,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     }
     ctrl_.setKneeExcitation(rec_active_ ? rec_cmd_ : 0.0F);
   }
+  const std::uint64_t p0 = nowUs();
   const auto out = ctrl_.update(in, cmd);
+  const std::uint64_t p1 = nowUs();
+  prof(0, p1 - p0);
+  prof_upd_sum_ += static_cast<std::uint32_t>(p1 - p0);
+  ++prof_upd_n_;
   if (out.fault != nullptr) {
-    Serial.printf("V3 FAULT: %s (wheels stopped, legs %s; START retries, DISABLE releases)\n",
+    out_.printf("V3 FAULT: %s (wheels stopped, legs %s; START retries, DISABLE releases)\n",
                   out.fault, out.legs_locked ? "still locked" : "free");
   }
 
@@ -840,7 +987,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     engage_us_ = now_us;
     legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
     (void)legs_.engage(start, now_us, transport_);
-    Serial.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
+    out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
@@ -849,6 +996,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
        now_us - rec_start_us_ >= static_cast<std::uint64_t>(rec_duration_s_ * 1.0e6F))) {
     stopRecording(recStand() && !out.legs_locked);
   }
+  const std::uint64_t p2 = nowUs();
   float hip_cmd = 0.0F, knee_cmd = 0.0F;
   if (out.legs_locked) {
     const bool stand = rec_active_ && recStand();
@@ -862,10 +1010,16 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
     }
     legs_.setOffsets(hip_cmd, knee_cmd);
+    // Roll: per-side offsets (zero unless SET roll 1 and balancing).
+    if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
+    else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,
+                              out.leg_roll_hip_rate, out.leg_roll_knee_rate);
     (void)legs_.update(now_us, transport_);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
   }
+  const std::uint64_t p3 = nowUs();
+  prof(1, p3 - p2);
   auto wheel_cmd = out.wheel_cmd_rad_s;
   if (tilt_test_ && out.state == V3Controller::State::Balancing) {
     if (last_state_ != static_cast<int>(out.state)) tilt_ref_rad_ = imu_.pitch_rad;
@@ -882,13 +1036,15 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   if (rec_dumping_) dumpRecording();
   (void)feedback_.poll(transport_, now_us, true);  // wheel reads + bus voltage, no MIT probes
+  const std::uint64_t p4 = nowUs();
+  prof(2, p4 - p3);
 
   const int state = static_cast<int>(out.state);
   if (state != last_state_) {
     last_state_ = state;
     state_since_us_ = now_us;
     next_trace_us_ = now_us;
-    Serial.printf("CONTROL mode=%s enable=%d result=0\n", tap_fw::v3::toString(out.state),
+    out_.printf("CONTROL mode=%s enable=%d result=0\n", tap_fw::v3::toString(out.state),
                   out.legs_locked ? 1 : 0);
     // Gyro-dominant pitch estimate only while balancing on the floor (see
     // balancingEstimatorConfig); TILTTEST is hand-held and keeps the base.
@@ -897,40 +1053,64 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         ? tap_fw::v3::balancingEstimatorConfig(robot_control::ImuStateEstimator::Config{})
         : robot_control::ImuStateEstimator::Config{});
     if (out.state == V3Controller::State::Ready) {
-      Serial.println(tilt_test_ ? "V3 READY (TILTTEST: engaging at once)"
+      out_.println(tilt_test_ ? "V3 READY (TILTTEST: engaging at once)"
           : ctrl_.config().engage.automatic
           ? "V3 READY: wheels holding. Carry the robot to the floor, hold it still at its best "
             "standing point (0.7 s), let go: balancing starts when it tips (or send GO)"
           : "V3 READY: wheels holding. Put the robot on the floor, hold it, send GO");
     }
     if (out.state == V3Controller::State::Balancing) {
-      Serial.printf("RELEASE pitch=%+.4f seeded_trim=%+.4f estimator=%s\n", imu_.pitch_rad,
+      out_.printf("RELEASE pitch=%+.4f seeded_trim=%+.4f estimator=%s\n", imu_.pitch_rad,
                     ctrl_.balanceRef(), floor_balance ? "gyro-dominant" : "base");
     }
   }
   digitalWrite(tap_fw::board::kLed2Gpio, out.legs_locked ? HIGH : LOW);
   digitalWrite(tap_fw::board::kLed3Gpio, out.wheels_enabled ? HIGH : LOW);
 
-  if (out.state != V3Controller::State::Idle && now_us >= next_trace_us_) {
+  // The recorder dump has the link while it runs (TR resumes after RC END).
+  // Ready (not immediate): tell the operator where the auto engage stands.
+  {
+    const int phase = out.state == V3Controller::State::Ready ? ctrl_.readyPhase() : -1;
+    if (phase != last_ready_phase_) {
+      if (phase == 0) out_.println("V3 READY: wheels held still - put it on the floor, hold it still at its standing angle");
+      if (phase == 1) out_.println("V3 READY: moved - now hold it still on the floor (0.7 s)");
+      if (phase == 2) out_.println("V3 ARMED: let go - it balances as soon as it starts to tip");
+      last_ready_phase_ = phase;
+    }
+  }
+  const std::uint64_t p5 = nowUs();
+  if (out.state != V3Controller::State::Idle && now_us >= next_trace_us_ && !rec_dumping_) {
     next_trace_us_ = now_us + kTraceUs;
-    Serial.printf("TR t=%lu mode=%s pitch=%+.3f rate=%+.2f wcmd=[%+.2f %+.2f] "
-                  "wmeas=[%+.2f %+.2f] axle_v=%+.3f axle_x=%+.3f trim=%+.4f "
-                  "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d "
-                  "h=%.1f htgt=%.1f knee=%+.3f tv=%+.4f dhip=%+.4f ta=%.2f me=%+.3f "
-                  "lvl=%+.4f ho=%d lt=%+.4f/%d dknee=%+.4f wbb=%+.4f sus=%+.1f vz=%+.3f\n",
-                  static_cast<unsigned long>((now_us - state_since_us_) / 1000U),
-                  tap_fw::v3::toString(out.state), imu_.pitch_rad, imu_.pitch_rate_rad_s,
-                  last_wheel_cmd_[0], last_wheel_cmd_[1], in.wheel_rad_s[0], in.wheel_rad_s[1],
-                  ctrl_.groundVelocity(), ctrl_.groundPosition(), ctrl_.balanceRef(),
-                  legJointRad(0), legJointRad(1), legJointRad(2), legJointRad(3),
-                  ctrl_.pitchRef(), ctrl_.positionError(), ctrl_.readyPhase(),
-                  ctrl_.heldResets(), ctrl_.legPose().axle_below_hip_m * 1000.0F,
-                  ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad,
-                  ctrl_.virtualPitch(), ctrl_.trunkHip(), ctrl_.trunkAuthority(),
-                  ctrl_.legModelError(), ctrl_.levelHip(), ctrl_.heldOuterOff() ? 1 : 0,
-                  ctrl_.learnedTrim(), ctrl_.learnedTrimValid() ? 1 : 0,
-                  ctrl_.kneeCommand() - ctrl_.legPose().knee_offset_rad, ctrl_.wbDebug().bias,
-                  ctrl_.suspensionOffset() * 1000.0F, ctrl_.bodyVerticalSpeed());
+    // Same text as the former printf (tools parse it), built without
+    // printf's float conversion (FastFormat.hpp: that was most of the tick).
+    static char line[640];
+    tap_fw::LineBuf b(line, sizeof line);
+    b.str("TR t=").u32(static_cast<std::uint32_t>((now_us - state_since_us_) / 1000U))
+        .str(" mode=").str(tap_fw::v3::toString(out.state))
+        .str(" pitch=").fix(imu_.pitch_rad, 3, true).str(" rate=").fix(imu_.pitch_rate_rad_s, 2, true)
+        .str(" wcmd=[").fix(last_wheel_cmd_[0], 2, true).chr(' ').fix(last_wheel_cmd_[1], 2, true)
+        .str("] wmeas=[").fix(in.wheel_rad_s[0], 2, true).chr(' ').fix(in.wheel_rad_s[1], 2, true)
+        .str("] axle_v=").fix(ctrl_.groundVelocity(), 3, true).str(" axle_x=").fix(ctrl_.groundPosition(), 3, true)
+        .str(" trim=").fix(ctrl_.balanceRef(), 4, true)
+        .str(" legs=[").fix(legJointRad(0), 3, true).chr(' ').fix(legJointRad(1), 3, true).chr(' ')
+        .fix(legJointRad(2), 3, true).chr(' ').fix(legJointRad(3), 3, true)
+        .str("] ref=").fix(ctrl_.pitchRef(), 4, true).str(" ex=").fix(ctrl_.positionError(), 3, true)
+        .str(" ready=").i32(ctrl_.readyPhase()).str(" held=").i32(static_cast<std::int32_t>(ctrl_.heldResets()))
+        .str(" h=").fix(ctrl_.legPose().axle_below_hip_m * 1000.0F, 1)
+        .str(" htgt=").fix(ctrl_.heightTarget() * 1000.0F, 1)
+        .str(" knee=").fix(ctrl_.legPose().knee_offset_rad, 3, true)
+        .str(" tv=").fix(ctrl_.virtualPitch(), 4, true).str(" dhip=").fix(ctrl_.trunkHip(), 4, true)
+        .str(" ta=").fix(ctrl_.trunkAuthority(), 2).str(" me=").fix(ctrl_.legModelError(), 3, true)
+        .str(" lvl=").fix(ctrl_.levelHip(), 4, true).str(" ho=").i32(ctrl_.heldOuterOff() ? 1 : 0)
+        .str(" lt=").fix(ctrl_.learnedTrim(), 4, true).chr('/').i32(ctrl_.learnedTrimValid() ? 1 : 0)
+        .str(" dknee=").fix(ctrl_.kneeCommand() - ctrl_.legPose().knee_offset_rad, 4, true)
+        .str(" wbb=").fix(ctrl_.wbDebug().bias, 4, true)
+        .str(" sus=").fix(ctrl_.suspensionOffset() * 1000.0F, 1, true)
+        .str(" vz=").fix(ctrl_.bodyVerticalSpeed(), 3, true)
+        .str(" roll=").fix(ctrl_.rollEstimate(), 4, true)
+        .str(" rdh=").fix(ctrl_.rollSideHeight() * 1000.0F, 1, true);
+    out_.println(line);
+    prof(3, nowUs() - p5);
   }
 }
 
@@ -963,12 +1143,12 @@ void AppV3::stopRecording(bool aborted) noexcept {
   rec_cmd_ = 0.0F;
   ctrl_.setKneeExcitation(0.0F);
   if (recStand()) legs_.setResendPeriod(LegLock::Config{}.resend_period_us);
-  Serial.printf("RC BEGIN kind=%s n=%u rate_hz=250 amp=%.3f centre=%+.3f resend_us=%lu "
+  out_.printf("RC BEGIN kind=%s n=%u rate_hz=250 amp=%.3f centre=%+.3f resend_us=%lu "
                 "aborted=%d cols=%s scales=", recName(static_cast<int>(rec_kind_)),
                 static_cast<unsigned>(rec_n_), rec_amp_, rec_centre_,
                 static_cast<unsigned long>(rec_resend_us_), aborted ? 1 : 0, kRecColumns);
   for (std::size_t i = 0; i < kRecChannels; ++i) {
-    Serial.printf(i + 1U < kRecChannels ? "%g," : "%g\n", kRecScale[i]);
+    out_.printf(i + 1U < kRecChannels ? "%g," : "%g\n", kRecScale[i]);
   }
 }
 
@@ -1003,28 +1183,48 @@ void AppV3::recordSample(std::uint64_t now_us, float hip_cmd, float knee_cmd,
 }
 
 void AppV3::dumpRecording() noexcept {
-  // A few lines per tick, only while the TX buffer is mostly empty: the
-  // TR/SENS printf calls block when it is full, which stalled the loop and
-  // let the wheel feedback go stale (fault) during the first HIPTEST dump.
-  char text[160];
-  for (int lines = 0; lines < 2 && Serial.availableForWrite() > 2048; ++lines) {
-    if (rec_dump_i_ >= rec_n_) {
-      Serial.println("RC END");
-      rec_dumping_ = false;
-      // Stand tests held the wheels off: engage afresh.
-      if (recStand()) ctrl_.returnToReady();
-      rec_kind_ = RecKind::None;
-      return;
-    }
-    const auto& sample = g_rec[rec_dump_i_++];
-    int len = std::snprintf(text, sizeof(text), "RC %.1f", sample.t_us * 1.0e-3F);
-    for (std::size_t i = 0; i < kRecChannels && len > 0 && len < static_cast<int>(sizeof(text));
-         ++i) {
-      len += std::snprintf(text + len, sizeof(text) - static_cast<std::size_t>(len), " %d",
-                           sample.v[i]);
-    }
-    Serial.println(text);
+  // A line per tick, only while the TX buffer is mostly empty: the TR/SENS
+  // printf calls block when it is full, which stalled the loop and let the
+  // wheel feedback go stale (fault) during the first HIPTEST dump. Digits by
+  // hand: snprintf for 19 fields cost ~0.6 ms a line and two lines a tick
+  // ran the loop at ~3.4 ms during a dump (2026-10-01) - the floor tests
+  // dump while balancing.
+  if (out_.availableForWrite() <= 2048) return;
+  if (rec_dump_i_ >= rec_n_) {
+    out_.println("RC END");
+    rec_dumping_ = false;
+    // Stand tests held the wheels off: engage afresh.
+    if (recStand()) ctrl_.returnToReady();
+    rec_kind_ = RecKind::None;
+    return;
   }
+  const auto& sample = g_rec[rec_dump_i_++];
+  char text[160];
+  std::size_t n = 0;
+  auto put_uint = [&](std::uint32_t v) {
+    char digits[10];
+    std::size_t k = 0;
+    do {
+      digits[k++] = static_cast<char>('0' + v % 10U);
+      v /= 10U;
+    } while (v != 0U && k < sizeof(digits));
+    while (k > 0U) text[n++] = digits[--k];
+  };
+  text[n++] = 'R';
+  text[n++] = 'C';
+  text[n++] = ' ';
+  // Time in ms with one decimal, as before.
+  put_uint(sample.t_us / 1000U);
+  text[n++] = '.';
+  text[n++] = static_cast<char>('0' + (sample.t_us % 1000U) / 100U);
+  for (std::size_t i = 0; i < kRecChannels; ++i) {
+    text[n++] = ' ';
+    const std::int32_t v = sample.v[i];
+    if (v < 0) text[n++] = '-';
+    put_uint(static_cast<std::uint32_t>(v < 0 ? -v : v));
+  }
+  text[n] = '\0';
+  out_.println(text);
 }
 
 void AppV3::driveWheels(bool enabled, const std::array<float, 2>& cmd_rad_s,
@@ -1068,35 +1268,48 @@ void AppV3::report(std::uint64_t now_us) noexcept {
   last_report_us_ = now_us;
   const long imu_age = last_imu_us_ == 0U ? -1L
       : static_cast<long>((now_us - last_imu_us_) / 1000U);
-  // Same leading fields as the v1 SENS line, so the GUI status parser works.
-  Serial.printf(
-      "SENS imu_age=%ldms seed=%d can_legs=%d uart_wheels=%d homed=%d "
-      "joint_q=[%.3f %.3f %.3f %.3f %.3f %.3f] pitch=%+.3f pitch_rate=%+.3f "
-      "yaw_rate=%+.3f acc=[%+.2f %+.2f %+.2f] chip_acc=[%+.2f %+.2f %+.2f] "
-      "gyro_bias=%+.4f vbus_min=%.2f state=%s axis=[%u %u %u %u] axis_err=[%lx %lx %lx %lx] "
-      "pitch_avg=%+.4f spread=%.4f balance=%+.4f%s tick_max_us=%lu imu_us=%lu ctrl_us=%lu "
-      "late=%lu serial_us=%lu ble_us=%lu bus_us=%lu hipv_rms=%.3f\n",
-      imu_age, imu_.seeded, legsFresh(now_us), feedback_.allWheelsFresh(now_us),
-      legs_.engaged() ? 1 : 0, legJointRad(0), legJointRad(1), state_.joints.position_rad[2],
-      legJointRad(2), legJointRad(3), state_.joints.position_rad[5], imu_.pitch_rad,
-      imu_.raw_pitch_rate_rad_s, imu_.yaw_rate_rad_s, body_.accel_m_s2[0],
-      body_.accel_m_s2[1], body_.accel_m_s2[2], chip_.accel_m_s2[0], chip_.accel_m_s2[1],
-      chip_.accel_m_s2[2], imu_.gyro_bias_rad_s, feedback_.takeMinBusVoltage(),
-      tap_fw::v3::toString(ctrl_.state()),
-      static_cast<unsigned>(feedback_.legAxis(0).state),
-      static_cast<unsigned>(feedback_.legAxis(1).state),
-      static_cast<unsigned>(feedback_.legAxis(3).state),
-      static_cast<unsigned>(feedback_.legAxis(4).state),
-      static_cast<unsigned long>(feedback_.legAxis(0).error),
-      static_cast<unsigned long>(feedback_.legAxis(1).error),
-      static_cast<unsigned long>(feedback_.legAxis(3).error),
-      static_cast<unsigned long>(feedback_.legAxis(4).error), pitch_avg_, pitch_spread_,
-      ctrl_.balanceAngle(), ctrl_.balanceAngleSet() ? "" : "(unset)",
-      static_cast<unsigned long>(tick_exec_max_us_), static_cast<unsigned long>(tick_imu_max_us_),
-      static_cast<unsigned long>(tick_ctrl_max_us_), static_cast<unsigned long>(tick_late_),
-      static_cast<unsigned long>(pre_serial_max_us_), static_cast<unsigned long>(pre_ble_max_us_),
-      static_cast<unsigned long>(pre_bus_max_us_),
-      hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F);
+  // Same leading fields as the v1 SENS line, so the GUI status parser works
+  // (FastFormat: same text as the former printf, without its float cost).
+  static char line[900];
+  tap_fw::LineBuf b(line, sizeof line);
+  b.str("SENS imu_age=").i32(static_cast<std::int32_t>(imu_age)).str("ms seed=").i32(imu_.seeded ? 1 : 0)
+      .str(" can_legs=").i32(legsFresh(now_us) ? 1 : 0).str(" uart_wheels=").i32(feedback_.allWheelsFresh(now_us) ? 1 : 0)
+      .str(" homed=").i32(legs_.engaged() ? 1 : 0)
+      .str(" joint_q=[").fix(legJointRad(0), 3).chr(' ').fix(legJointRad(1), 3).chr(' ')
+      .fix(state_.joints.position_rad[2], 3).chr(' ').fix(legJointRad(2), 3).chr(' ').fix(legJointRad(3), 3)
+      .chr(' ').fix(state_.joints.position_rad[5], 3)
+      .str("] pitch=").fix(imu_.pitch_rad, 3, true).str(" pitch_rate=").fix(imu_.raw_pitch_rate_rad_s, 3, true)
+      .str(" yaw_rate=").fix(imu_.yaw_rate_rad_s, 3, true)
+      .str(" acc=[").fix(body_.accel_m_s2[0], 2, true).chr(' ').fix(body_.accel_m_s2[1], 2, true).chr(' ')
+      .fix(body_.accel_m_s2[2], 2, true)
+      .str("] chip_acc=[").fix(chip_.accel_m_s2[0], 2, true).chr(' ').fix(chip_.accel_m_s2[1], 2, true).chr(' ')
+      .fix(chip_.accel_m_s2[2], 2, true)
+      .str("] gyro_bias=").fix(imu_.gyro_bias_rad_s, 4, true).str(" vbus_min=").fix(feedback_.takeMinBusVoltage(), 2)
+      .str(" state=").str(tap_fw::v3::toString(ctrl_.state())).str(" axis=[");
+  const std::size_t axes[4] = {0U, 1U, 3U, 4U};
+  for (int a = 0; a < 4; ++a) {
+    if (a) b.chr(' ');
+    b.u32(static_cast<std::uint32_t>(feedback_.legAxis(axes[a]).state));
+  }
+  b.str("] axis_err=[");
+  for (int a = 0; a < 4; ++a) {
+    if (a) b.chr(' ');
+    b.hex(static_cast<std::uint32_t>(feedback_.legAxis(axes[a]).error));
+  }
+  b.str("] pitch_avg=").fix(pitch_avg_, 4, true).str(" spread=").fix(pitch_spread_, 4)
+      .str(" balance=").fix(ctrl_.balanceAngle(), 4, true).str(ctrl_.balanceAngleSet() ? "" : "(unset)")
+      .str(" tick_max_us=").u32(tick_exec_max_us_).str(" imu_us=").u32(tick_imu_max_us_)
+      .str(" ctrl_us=").u32(tick_ctrl_max_us_).str(" late=").u32(tick_late_)
+      .str(" serial_us=").u32(pre_serial_max_us_).str(" ble_us=").u32(pre_ble_max_us_)
+      .str(" bus_us=").u32(pre_bus_max_us_)
+      .str(" hipv_rms=").fix(hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F, 3)
+      .str(" prof=[").u32(prof_max_[0]).chr(' ').u32(prof_max_[1]).chr(' ').u32(prof_max_[2]).chr(' ')
+      .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
+      .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
+  out_.println(line);
+  prof_max_.fill(0U);
+  prof_upd_sum_ = 0U;
+  prof_upd_n_ = 0U;
   hip_vel_sq_ = 0.0F;
   hip_vel_n_ = 0U;
   pre_serial_max_us_ = 0U;

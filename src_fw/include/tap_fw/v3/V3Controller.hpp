@@ -80,12 +80,110 @@ class V3Controller {
   };
 
   // Ready-state auto engage (IMU pitch rate / pitch only).
+  // Roll (left/right leg length difference). The planar controllers hold
+  // pitch; this keeps the body level across: on a cross slope, over a
+  // one-wheel bump, with legs arranged unevenly by hand - and leans it into
+  // turns. The roll estimate is the attitude against the APPARENT vertical
+  // (gyro + accelerometer, gravity plus the turn's centripetal pull), so
+  // holding it at 0 levels the body on a slope and leans it by
+  // atan(v w / g) in a turn, where the resultant of gravity and the
+  // centripetal force passes between the wheels. Laterally the robot stands
+  // on two wheels (no inverted pendulum), so the loop is a slow integral on
+  // the side height difference through the leg IK. Off by default (SET roll).
+  struct Roll {
+    bool enabled = false;
+    float est_tau_s = 0.5F;     // accelerometer correction of the roll estimate
+    float track_m = 0.309F;     // wheel track (2 x half_wheel_base)
+    // Integral time constant and proportional part. With the estimate on
+    // gravity (gyro-fast, the turn's lean as the target) the loop can be
+    // quick: sim, a 10 mm step under one wheel 0.030 -> 0.019 rad peak and
+    // back under 0.005 in 0.33 s (was 0.52), turn entry 0.041 -> 0.012.
+    // Hardware 2026-10-01 (rollvff on: kp 0.75 / tau 0.08): the side legs
+    // hunted +-2 mm every 40 ms with the roll estimate jittering +-0.015
+    // rad - the robot visibly rocked side to side; the sim's legs follow
+    // ideally and have no such vibration. Slow and filtered by default: the
+    // roll jobs that matter (slopes, uneven legs, the lean-in through its
+    // feed-forward) are slow anyway.
+    float tau_s = 0.40F;
+    float err_lpf_hz = 2.0F;    // low-pass on the roll error the loop acts on
+    float max_dh_m = 0.025F;    // |side height offset| (each side +-)
+    // Kept below the full height while on (the straight knee can only fold):
+    // +-reserve of roll at the top, ~3.7 deg with the 309 mm track.
+    float reserve_m = 0.012F;
+    float rate_m_s = 0.08F;     // side height offset slew
+    float turn_ff = 1.0F;       // lean-in weight (target atan(v w / g))
+    float kp = 0.2F;            // proportional part (1 = the whole tilt at once)
+    // Servo velocity feed-forward (SET rollvff): the side offsets' rate goes
+    // to the GDS68 with each target (Set_Input_Pos vel_ff), so the knee
+    // follows a ramp without its ~67 ms position-loop lag, and the loop
+    // runs faster (kp_vff / tau_vff). Sim, 10 mm under one wheel: peak
+    // 0.019 -> 0.013 rad, back under 0.005 in 0.33 -> 0.20 s; turn entry
+    // 0.012 -> 0.006. The fast gains WITHOUT the feed-forward (the driver
+    // ignoring it) are worse in turns (0.057), so both switch together.
+    bool vel_ff = false;
+    float kp_vff = 0.3F;
+    float tau_vff = 0.25F;
+    // Roll the IMU reads with the robot level (its mount): standing on the
+    // floor before engage it read -0.0405 (2026-10-01), so leveling to 0
+    // tilted the body ~2.3 deg and parked the legs at -10 of +-12 mm.
+    // SET rolltgt re-trims it.
+    float target_rad = -0.040F;
+    // Turn command slew while on [rad/s^2]: the lean needs ~0.2-0.3 s
+    // (side height slew + knee servo); a stepped yaw pulled the body
+    // sideways by the full atan(v w / g) before it could lean.
+    float yaw_accel_rad_s2 = 4.0F;
+    // Side mapping of the correction: -1 if the IMU's body +y turns out to
+    // be the robot's right (roll=+ in TR when the RIGHT side is lifted) -
+    // checked on the stand before the first floor run (SET rollsign).
+    float sign = 1.0F;
+  };
+
+  // Wheel speed predictor (Smith style). Hardware 2026-10-01: the measured
+  // wheel speed trails the command by ~75 ms, but the robot behaves as if
+  // the wheels themselves answer in ~20 ms + a 35 ms lag and the rest is
+  // the speed READING's age (driver estimate + UART read): only that split
+  // reproduces both the tiers' calm stand (pitch rate rms 0.03-0.07 rad/s)
+  // and the whole-body LQR's 2-4 Hz ringing in the sim. The balancers then
+  // act on a 55 ms old axle speed/position. The predictor runs a model of
+  // the wheel servo on the commands sent and adds what it moved over the
+  // reading's age to the reading: speed(t) = read + w_model(t) -
+  // w_model(t - meas_delay), position likewise.
+  struct WheelPredict {
+    // On with the whole-body LQR (its gains are designed for a fresh
+    // reading); opt-in for the tiers (their wheel lead was tuned on the
+    // delayed one - with the predictor too they lose margin on other wheel
+    // models in the sim).
+    bool enabled = false;          // SET wpred (tiers)
+    bool with_wb = true;           // SET wbpred
+    float act_delay_s = 0.020F;    // command -> wheel dead time
+    // Wheel speed lag of the model. Measured 0.035 s, set long on purpose:
+    // with 0.06 the WB stays calm for a true lag of 0.035..0.12 s (hard
+    // stop at 0.75 m/s, TIER_WB); matched at 0.035 it rings from 0.06 up,
+    // at 0.08 it rings at the measured lag.
+    float tau_s = 0.06F;           // SET wptau
+    float meas_delay_s = 0.055F;   // age of the speed/position reading
+  };
+
   struct Engage {
     // Engage the balance loop as soon as the legs are locked (the held/
     // lifted detection keeps it from running away on the stand). When false,
-    // Ready waits for the auto sequence below or GO.
+    // Ready waits for the auto sequence below or GO NOW. Off (SET imm): held
+    // in a moving hand the held test kept reading "free" (the hand turns the
+    // body), and for ~100 s in the air the wheels raced to 0.8 m/s, the hips
+    // swung +-0.2 rad, the knees +-8 mm and the level loop wound to 0.16 rad
+    // (hardware 2026-10-01) - the robot then met the floor in that state.
+    // Ready keeps the wheels still and the tiers off until it is held still
+    // on the floor (armed) and let go - SET imm 0 tries that; default stays
+    // on until it is tried on the robot (v3_tests assume it).
     bool immediate = true;
     bool automatic = true;
+    // Algo::WholeBody engages only through the armed sequence (immediate and
+    // GO ignored): its first hardware run (2026-10-01, 386 s) engaged at once
+    // from the stand/hand, the held test never fired (the swinging legs shook
+    // the body) and the wheels slammed +-20 rad/s at 1.5 Hz with the hips
+    // +-0.2 rad - in the sim the same start is calm only because the stand
+    // there holds the body still.
+    bool wb_armed_only = true;
     float move_rate_rad_s = 0.40F;    // carrying the robot off the stand
     float move_pitch_rad = 0.08F;
     float still_rate_rad_s = 0.08F;   // held still at the standing point
@@ -142,20 +240,31 @@ class V3Controller {
     // the CAD alone +0.054 / +0.097 (wrong sign).
     float body_com_dx_m = 0.021F;
     float lean_share = 1.0F;   // share of the lean the hips take (1 = body level)
-    // The share falls with the pendulum length as (l / l_hang)^height_exp:
-    // a crouched robot is a faster pendulum (1.25 Hz hang, 1.9 Hz at 78 mm)
-    // while the hips stay a ~3-4 Hz servo. Two-body sim: the full share
-    // rang at <= 110 mm (1 Hz body/leg wobble); 1.5 keeps 78-150 mm calm.
-    float height_exp = 1.5F;
-    // ...but only where the ringing lives: the exponent blends from
-    // height_exp_tall at pendulum ratio >= ratio_tall to height_exp at
-    // <= ratio_low. Hardware 2026-09-30 at 136 mm (ratio 0.72): the body
-    // still took ~40 % of a push (1.5 -> share 0.61); 1.5 everywhere is only
-    // needed <= 110 mm (ratio 0.58), and 1.0 everywhere rang at 78 mm.
-    float height_exp_tall = 0.5F;
+    // The share may fall with the pendulum length as (l / l_hang)^exponent,
+    // the exponent blending from height_exp_tall at pendulum ratio >=
+    // ratio_tall to height_exp at <= ratio_low. Both 0 now: the hips take
+    // the whole lean at every height.
+    //
+    // History: 1.5 crouched / 0.5 tall was chosen on the earlier wheel model
+    // (50 ms + 0.09 s lag, fresh reading - wrong, 2026-10-01 logs): there a
+    // full share rang at <= 110 mm, and on the robot at 84 mm (share 0.30)
+    // the body took ~90 % of a push. On the measured wheel (TIER_EXP) the
+    // ringing is the lean-rate lead's, not the share's: with a fixed 0.06 s
+    // lead a full share rings at 78-84 mm (rest hip rate 0.47-0.64 rad/s),
+    // with the lead scaled to the pendulum (lead_exp) it stays calm. Push at
+    // 84 mm, 8 plant variants: body share 0.73 -> 0.19, worst body 0.135 ->
+    // 0.034 rad; 189 mm unchanged.
+    float height_exp = 0.0F;
+    float height_exp_tall = 0.0F;
     float ratio_tall = 0.80F;
     float ratio_low = 0.55F;
-    float lead_s = 0.06F;      // lean-rate lead against the hip servo lag
+    // Lean-rate lead against the hip servo lag, scaled by the pendulum
+    // ratio as ratio^lead_exp: 0.5 keeps it a fixed fraction of the
+    // pendulum's time constant sqrt(l / g) (0.06 s at the hang pose, ~0.04
+    // at 84 mm). Fixed 0.06 rang crouched; fixed 0.03 is calm crouched but
+    // gives up ~25 % of the tall push body (TIER_EXP, 78-189 mm).
+    float lead_s = 0.06F;
+    float lead_exp = 0.5F;
     // The hips take the lean's changes; a lean held longer than about this
     // [s] (a balance-trim error while it still learns, a slope) goes back to
     // the body, as in v3.2. Without it the body copied every trim error
@@ -252,9 +361,51 @@ class V3Controller {
     // 70 ms wheel dead time 0.60 still fell. 0.55 (= the BLE full stick)
     // held every plant variant (75/75, v3_tier_tests V15).
     float plan_vmax_m_s = 0.55F;
+    // Motion envelope from the pendulum at the current height (SET tenv):
+    // crouched is how the robot is driven fast. Catching a lean theta needs
+    // about theta * sqrt(g l) of wheel speed beyond the cruise (capture
+    // point), so the planned speed cap is the wheel cap minus
+    // env_catch_rad * sqrt(g l) - 0.55 m/s at the hang pose (the validated
+    // plan_vmax above), ~0.63 at 84 mm. A lower CoM is also a faster
+    // pendulum (omega = sqrt(g / l)), so the plan's jerk scales with
+    // omega / omega_hang; its acceleration (a lean of atan(a/g)) does not
+    // depend on the height. Off: plan_vmax / plan_jerk as fixed numbers.
+    // Sim (TIER_SPEED, crouched 0.75 m/s command + 3 N push mid-cruise):
+    // Algo::WholeBody held every slow-wheel variant (cruise 0.70 at 84 mm,
+    // body <= 0.045 rad); the tiers fell with a 0.12 s lag or 70 ms dead
+    // time - so it is on with WB (envelope_wb) and opt-in for the tiers.
+    bool envelope = false;
+    bool envelope_wb = true;
+    // With the whole-body LQR the legs take the planned lean and pin the
+    // body, so the planned acceleration is the lean budget given to them:
+    // g * tan(env_lean_rad) (0.10 -> ~1 m/s^2, 3x plan_accel). Sim: body
+    // <= 0.039 rad at 84-189 mm with the slow-wheel variants, CoM lean up to
+    // 0.17 (the legs swing, the body stays).
+    float env_lean_rad = 0.10F;
+    // Knee keeps the hip-axle height while the hip swings (exact leg IK,
+    // SET khold): the pose puts the axle straight under the hip, so a hip
+    // swing dq moves the wheel fore/aft at first order but drops the body by
+    // ~r (1 - cos dq) - a linear controller (the WB LQR included) cannot
+    // see that. The knee folds/extends by the IK solution for the hip it is
+    // being sent. At the full height the knee is already straight and can
+    // only fold: there the drop stays. On for both (the tiers since the
+    // hips take the whole lean crouched, up to ~0.16 rad: TIER_ACCEL at
+    // 84 mm, body height change while driving 1.3 -> 1.0 mm, body pitch and
+    // the random episodes unchanged). SET khold / wbkhold 0: off.
+    bool knee_hold = true;
+    bool knee_hold_wb = true;
+    float env_catch_rad = 0.20F;
     // Tier 2 takes the planned lean from the plan this much ahead of the
     // tracked reference (the GDS68 hip servo lags ~60-90 ms).
     float hip_advance_s = 0.08F;
+    // The planned lean (the plan's atan(a/g), a commanded speed-up or
+    // braking) goes to the legs in full at every height; the height share
+    // above cuts only the feedback on the residual lean (pushes, errors).
+    // The share exists because that feedback loop rings with a crouched,
+    // faster pendulum; the planned lean is open loop - it cannot ring - and
+    // cut by the share the body took (1 - share) of every commanded
+    // acceleration (70 % at 84 mm). SET tplanfull 0: scaled by the share.
+    bool plan_full = true;
     // Low-pass on the lean rate feeding the tier-2 lead [Hz, 0 = off]: the
     // lead's derivative gain was the main source of body translational jerk
     // (two-body sim, drive 0.55 m/s: jerk rms 0.9 without tier 2, 3.8 with
@@ -305,6 +456,8 @@ class V3Controller {
   struct Config {
     Algo algo = Algo::Pid;
     Tier tier{};
+    Roll roll;
+    WheelPredict wheel_pred;
     Height height{};
     Engage engage{};
     Pid pid{};
@@ -321,12 +474,33 @@ class V3Controller {
     // dead time + ~75 ms lag (fitted on the 2026-09-29/30 logs); with that
     // delay the PID's 0.12 s lead rang at ~4 Hz, 0 fell - 0.08 is the sim
     // optimum (see input_cost_scale in defaultV3Config).
-    float lqr_lead_s = 0.08F;
+    // 2026-10-01: that fit took the speed READING's 55 ms age for wheel lag.
+    // On the wheel as measured (20 ms + 0.035 s, reading 55 ms old) 0.08
+    // fell on the +20 ms / slower-lag variants (sim) - and the robot fell
+    // twice that day from a growing ~1.2 Hz wheel oscillation; 0.03 held
+    // every variant (worst rest pitch rate 0.06 rad/s), 0.02 fell again
+    // (TIER_LEADSWEEP). SET lqrlead restores the old value.
+    float lqr_lead_s = 0.03F;
     // LQR position-error trim integral [rad per m*s] (half the PID kix).
     float lqr_trim_gain = 0.01F;
     // Algo::WholeBody: rate [rad per m s] at which the position error teaches
     // the measured natural body pitch (IMU mount + CoM model error).
     float wb_bias_gain = 0.10F;
+    // Algo::WholeBody limit-cycle guard: 4 cap-to-cap reversals of the wheel
+    // command within this window fault (see wbUpdate). A push saturates one
+    // way; the 2026-10-01 ringing flipped every ~0.33 s.
+    std::uint64_t wb_ring_window_us = 2'000'000U;
+    // Algo::WholeBody: above this fraction of the wheel speed cap the
+    // position anchor gives way toward the robot and the integral holds
+    // (balance before position) - SET wbgive (1 = off).
+    float wb_give_from = 0.7F;
+    // Sign of the leg-Jacobian axle speed taken off in the WB held test.
+    float wb_held_leg_sign = 1.0F;
+    // Algo::WholeBody stiff/soft blend (see wbUpdate): starts at this
+    // fraction of the wheel speed cap, full 0.15 + below the cap; returns
+    // over wb_soft_return_s - SET wbsoft (1 = stiff table only).
+    float wb_soft_from = 0.5F;
+    float wb_soft_return_s = 1.0F;
     // Algo::WholeBody: the hips take the planned lean atan(a/g) (body stays at
     // its target) - SET wbff 0/1.
     bool wb_lean_ff = true;
@@ -387,6 +561,8 @@ class V3Controller {
     float pitch_rad = 0.0F;
     float pitch_rate_rad_s = 0.0F;
     float yaw_rate_rad_s = 0.0F;
+    float roll_rate_rad_s = 0.0F;  // body x (forward) axis, + = left side up
+    float accel_y_m_s2 = 0.0F;     // body y (left) specific force
     // Body-frame accelerometer specific force (x forward, z up) [m/s^2]:
     // tells a free robot (body accelerates with the wheels) from a held one.
     float accel_x_m_s2 = 0.0F;
@@ -428,6 +604,14 @@ class V3Controller {
     // v3.1: hip/knee offsets for both legs (core rad, from their zero).
     float leg_hip_offset_rad = 0.0F;
     float leg_knee_offset_rad = 0.0F;
+    // Roll (Config::Roll): per-side joint offsets added to the common ones
+    // above, [left, right]; opposite heights, so the mean is unchanged.
+    std::array<float, 2> leg_roll_hip_rad{};
+    std::array<float, 2> leg_roll_knee_rad{};
+    // ...and their rates for the servo velocity feed-forward (0 unless
+    // Roll::vel_ff) [rad/s].
+    std::array<float, 2> leg_roll_hip_rate{};
+    std::array<float, 2> leg_roll_knee_rate{};
     bool legs_moving = false;
     const char* fault = nullptr;  // set on the tick a fault is raised
   };
@@ -498,6 +682,11 @@ class V3Controller {
   [[nodiscard]] float suspensionOffset() const noexcept { return sus_dz_; }
   [[nodiscard]] float bodyVerticalSpeed() const noexcept { return sus_vz_; }
   // Static level loop's share of trunkHip() (Tier::level).
+  [[nodiscard]] float wbLevelHip() const noexcept { return wb_bias_; }
+  [[nodiscard]] float rollEstimate() const noexcept { return roll_est_; }  // vs gravity
+  [[nodiscard]] float rollTarget() const noexcept { return roll_target_; }
+  [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
+  [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
   // Hip offset to send to the legs (height pose + tier 2), every state.
   [[nodiscard]] float hipCommand() const noexcept { return pose_.hip_offset_rad + dhip_; }
@@ -507,7 +696,12 @@ class V3Controller {
   // Gain table in use (default: the generated WholeBodyGains.hpp); tests and
   // the weight search swap in their own designs.
   using WbTable = std::array<wb::Point, wb::kHeights>;
-  void setWholeBodyTable(const WbTable* table) noexcept { wb_table_ = table ? table : &wb::kTable; }
+  void setWholeBodyTable(const WbTable* table, const WbTable* soft = nullptr) noexcept {
+    wb_table_ = table ? table : &wb::kTable;
+    wb_table_soft_ = soft ? soft : (table ? table : &wb::kTableSoft);
+  }
+  [[nodiscard]] float wbSoftBlend() const noexcept { return wb_soft_; }
+  [[nodiscard]] const std::array<float, 10>& wbTerms() const noexcept { return wb_dbg_terms_; }
   struct WbDebug { float x_ref, xi, theta_ref, v_ref, bias; bool driving; };
   [[nodiscard]] WbDebug wbDebug() const noexcept {
     return {wb_x_ref_, wb_xi_, wb_theta_ref_, plan_v_, wb_bias_, pid_driving_};
@@ -595,6 +789,34 @@ class V3Controller {
   // v3.3 maneuver preview: jerk-limited speed plan and its history.
   struct PlanSample { float v, a; };
   void updatePlan(float target_v, float dt, bool reset);
+  [[nodiscard]] float planCap(float vmax) const noexcept;
+  // Knee offset from the pose that keeps the pose's hip-axle height with the
+  // hip at pose + dhip (Tier::knee_hold), 0 when off.
+  [[nodiscard]] float kneeHold(float dhip) noexcept;
+  [[nodiscard]] bool kneeHoldOn() const noexcept {
+    return config_.tier.knee_hold || (wholeBody() && config_.tier.knee_hold_wb);
+  }
+  float knee_hold_ = 0.0F;  // last solution (warm start)
+  // Wheel predictor (Config::WheelPredict).
+  void predictWheels(const Input& raw, float* rate, float* pos) noexcept;
+  static constexpr std::size_t kWpBuf = 128U;  // 0.25 s at 500 Hz
+  std::array<float, kWpBuf> wp_cmd_{}, wp_w_{}, wp_p_{};
+  std::size_t wp_head_ = 0U;
+  float wp_w_model_ = 0.0F, wp_p_model_ = 0.0F, wp_last_cmd_ = 0.0F;
+  // Roll (Config::Roll).
+  void updateRoll(const Input& in, bool active);
+  float roll_est_ = 0.0F;      // vs the apparent vertical, + = left side up
+  float roll_bias_ = 0.0F;     // learned roll gyro bias [rad/s]
+  bool roll_init_ = false;
+  float roll_dh_ = 0.0F;       // side height offset: left +roll_dh_, right -roll_dh_ [m]
+  float roll_v_lp_ = 0.0F, roll_w_lp_ = 0.0F, roll_i_ = 0.0F, roll_e_lp_ = 0.0F;
+  float yaw_cmd_ = 0.0F;  // the turn command as used (slewed with roll on)
+  float roll_target_ = 0.0F;
+  float roll_dk_dh_ = 0.0F, roll_dq_dk_ = 0.0F, roll_deriv_key_ = 1.0F;
+  std::array<float, 2> roll_hip_{}, roll_knee_{}, roll_hip_rate_{}, roll_knee_rate_{};
+  [[nodiscard]] bool envelopeOn() const noexcept {
+    return config_.tier.envelope || (wholeBody() && config_.tier.envelope_wb);
+  }
   [[nodiscard]] PlanSample planDelayed() const noexcept;
   [[nodiscard]] PlanSample planAt(float delay_s) const noexcept;  // plan delay_s ago
   float lean_rate_f_ = 0.0F;  // filtered lean rate for the tier-2 lead
@@ -694,20 +916,36 @@ class V3Controller {
   void wbReset(const Input& in);
   float dknee_ = 0.0F;
   const WbTable* wb_table_ = &wb::kTable;
+  const WbTable* wb_table_soft_ = &wb::kTableSoft;
+  float wb_soft_ = 0.0F;  // blend toward the soft table near the wheel cap (0..1)
   float wb_x_ref_ = 0.0F;
   float wb_xi_ = 0.0F;
   float wb_theta_ref_ = 0.0F;   // body pitch reference (tracks the hand while held)
   float wb_theta_rate_ = 0.0F;  // its walk back to the table equilibrium after release [rad/s]
   float wb_cmd_v_ = 0.0F;       // last wheel command as ground speed (held test)
+  float wb_cmd_f_ = 0.0F;       // ...as the wheels follow it (0.09 s lag)
+  float wb_drive_ex0_ = 0.0F;   // position error kept through a drive
+  std::array<float, 10> wb_dbg_terms_{};  // diagnostics: wheel-row K*X terms
+  float wb_held_v_ = 0.0F;      // ...minus the legs' own axle speed (held test)
   // Measured-minus-model natural body pitch (IMU mount + CoM model error),
   // learned from the position error like the tiers' balance trim; kept
   // across re-zeroes.
   float wb_bias_ = 0.0F;
+  // Algo::WholeBody with Tier::level: equilibrium lean measured from the
+  // IMU pitch + the CoM line of the measured legs while standing still.
+  float wb_lean_lp_ = 0.0F;
+  bool wb_lean_init_ = false;
   std::array<float, wb::kWheelDelay> wb_wheel_hist_{};
   std::array<float, wb::kJointDelay> wb_hip_hist_{};
   std::array<float, wb::kJointDelay> wb_knee_hist_{};
+  int wb_sat_sign_ = 0;                         // wheel command at a cap: +1/-1, 0 none yet
+  std::array<std::uint64_t, 4> wb_sat_flips_{};  // times of the last cap reversals
+  std::size_t wb_sat_head_ = 0U;
+  bool wb_ring_fault_ = false;
   struct WbGain { float theta0; const std::array<std::array<float, wb::kStates>, 3>* lo;
-                  const std::array<std::array<float, wb::kStates>, 3>* hi; float a; };
+                  const std::array<std::array<float, wb::kStates>, 3>* hi; float a;
+                  const std::array<std::array<float, wb::kStates>, 3>* soft_lo;
+                  const std::array<std::array<float, wb::kStates>, 3>* soft_hi; };
   [[nodiscard]] WbGain wbGain() const noexcept;
 };
 

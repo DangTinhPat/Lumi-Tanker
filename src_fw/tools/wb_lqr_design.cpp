@@ -31,7 +31,24 @@ std::vector<WbPoint> designAll(const WbDesign& d) {
   return pts;
 }
 
-void writeHeader(const char* path, const WbDesign& d, const std::vector<WbPoint>& pts) {
+void writeTable(FILE* f, const char* name, const std::vector<WbPoint>& pts) {
+  std::fprintf(f, "inline constexpr std::array<Point, kHeights> %s{{\n", name);
+  for (const auto& p : pts) {
+    std::fprintf(f, "    {%.6fF, %.6fF, %.6fF, %.6fF,\n     {{", p.height_m, p.theta0, p.q0, p.k0);
+    for (int r = 0; r < 3; ++r) {
+      std::fprintf(f, "%s{", r ? ",\n       " : "");
+      for (int c = 0; c < p.K.cols(); ++c) {
+        std::fprintf(f, "%s%.7gF", c ? ", " : "", p.K(r, c));
+      }
+      std::fprintf(f, "}");
+    }
+    std::fprintf(f, "}}},\n");
+  }
+  std::fprintf(f, "}};\n\n");
+}
+
+void writeHeader(const char* path, const WbDesign& d, const std::vector<WbPoint>& pts,
+                 const std::vector<WbPoint>& soft) {
   FILE* f = std::fopen(path, "w");
   if (!f) {
     std::perror(path);
@@ -60,22 +77,14 @@ void writeHeader(const char* path, const WbDesign& d, const std::vector<WbPoint>
                "  float height_m, theta0, q0, k0;\n"
                "  std::array<std::array<float, kStates>, 3> K;\n"
                "};\n\n"
-               "inline constexpr std::array<Point, kHeights> kTable{{\n",
+               "// kTable: the stiff body hold; kTableSoft: the looser set the\n"
+               "// controller blends toward near the wheel cap (WbDesign softWeights).\n",
                a.dt, a.wheel_tau, a.wheel_delay_ticks, a.joint_delay_ticks, a.hip_kp, a.hip_kv,
                a.knee_kp, a.knee_kv, a.body_dx, kHeights, a.wheel_delay_ticks,
                a.joint_delay_ticks, d.n(), a.dt);
-  for (const auto& p : pts) {
-    std::fprintf(f, "    {%.6fF, %.6fF, %.6fF, %.6fF,\n     {{", p.height_m, p.theta0, p.q0, p.k0);
-    for (int r = 0; r < 3; ++r) {
-      std::fprintf(f, "%s{", r ? ",\n       " : "");
-      for (int c = 0; c < p.K.cols(); ++c) {
-        std::fprintf(f, "%s%.7gF", c ? ", " : "", p.K(r, c));
-      }
-      std::fprintf(f, "}");
-    }
-    std::fprintf(f, "}}},\n");
-  }
-  std::fprintf(f, "}};\n\n}  // namespace tap_fw::v3::wb\n");
+  writeTable(f, "kTable", pts);
+  writeTable(f, "kTableSoft", soft);
+  std::fprintf(f, "}  // namespace tap_fw::v3::wb\n");
   std::fclose(f);
   std::printf("wrote %s\n", path);
 }
@@ -89,6 +98,8 @@ int main(int argc, char** argv) {
   }
   const WbDesign d(WbActuators{}, WbWeights{});
   const auto pts = designAll(d);
+  const WbDesign ds(WbActuators{}, tap_fw::sim::softWeights());
+  const auto soft = designAll(ds);
   std::printf("states %d (8 + integral + %d wheel + 2 x %d joint delay)\n", d.n(),
               d.actuators().wheel_delay_ticks, d.actuators().joint_delay_ticks);
   for (const auto& p : pts) {
@@ -98,6 +109,6 @@ int main(int argc, char** argv) {
                 p.K(0, 1), p.K(0, 2), p.K(0, 3), p.K(1, 0), p.K(1, 1), p.K(1, 2), p.K(1, 3),
                 p.K(2, 0), p.K(2, 1), p.K(2, 2), p.K(2, 3));
   }
-  if (out) writeHeader(out, d, pts);
+  if (out) writeHeader(out, d, pts, soft);
   return 0;
 }

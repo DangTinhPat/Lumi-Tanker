@@ -60,6 +60,21 @@ class LegLock {
     hip_offset_rad_ = hip_core_rad;
     knee_offset_rad_ = knee_core_rad;
   }
+  // Roll (V3Controller::Config::Roll): per-side offsets [left, right]
+  // added to the common ones above.
+  // Optional rates [core rad/s] go out as the position target's velocity
+  // feed-forward (POS mode, Set_Input_Pos vel_ff).
+  void setSideOffsets(const std::array<float, 2>& hip_core_rad,
+                      const std::array<float, 2>& knee_core_rad,
+                      const std::array<float, 2>& hip_rate = {},
+                      const std::array<float, 2>& knee_rate = {}) noexcept {
+    side_hip_rad_ = hip_core_rad;
+    side_knee_rad_ = knee_core_rad;
+    side_hip_rate_ = hip_rate;
+    side_knee_rate_ = knee_rate;
+  }
+  // Velocity feed-forward this leg's target carries [driver turns/s].
+  [[nodiscard]] float velFfTurns(std::size_t leg) const noexcept;
   void setResendPeriod(std::uint32_t period_us) noexcept {
     config_.resend_period_us = period_us;
   }
@@ -71,6 +86,10 @@ class LegLock {
  private:
   float hip_offset_rad_ = 0.0F;
   float knee_offset_rad_ = 0.0F;
+  std::array<float, 2> side_hip_rad_{};
+  std::array<float, 2> side_knee_rad_{};
+  std::array<float, 2> side_hip_rate_{};
+  std::array<float, 2> side_knee_rate_{};
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};

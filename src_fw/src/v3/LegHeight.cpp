@@ -62,19 +62,38 @@ float LegHeight::hangHipCad() noexcept {
   return ref.hip_cad;
 }
 
-float LegHeight::maxHeight() noexcept { return forKnee(0.0F).axle_below_hip_m; }
-float LegHeight::minHeight() noexcept { return forKnee(kKneeMinRad).axle_below_hip_m; }
+// Constant for the model: computed once (they were a full forKnee each call,
+// several times per control tick).
+float LegHeight::maxHeight() noexcept {
+  static const float h = forKnee(0.0F).axle_below_hip_m;
+  return h;
+}
+float LegHeight::minHeight() noexcept {
+  static const float h = forKnee(kKneeMinRad).axle_below_hip_m;
+  return h;
+}
 
 LegPose LegHeight::forHeight(float axle_below_hip_m) noexcept {
   if (!std::isfinite(axle_below_hip_m)) return LegPose{};
   const float target = std::clamp(axle_below_hip_m, minHeight(), maxHeight());
-  // Height falls monotonically as the knee folds: bisect on the knee.
+  // Height falls monotonically as the knee folds: safeguarded secant on the
+  // knee (bracket kept), ~5 forKnee calls instead of the 41 of a bisection
+  // (forHeight runs every tick while the operator holds HMOVE).
   float lo = kKneeMinRad, hi = 0.0F;
-  for (int i = 0; i < 40; ++i) {
-    const float mid = 0.5F * (lo + hi);
-    if (forKnee(mid).axle_below_hip_m > target) hi = mid; else lo = mid;
+  float h_lo = minHeight() - target, h_hi = maxHeight() - target;
+  float k = lo + (hi - lo) * (-h_lo) / std::max(h_hi - h_lo, 1.0e-6F);
+  LegPose p{};
+  for (int i = 0; i < 30; ++i) {
+    p = forKnee(k);
+    const float f = p.axle_below_hip_m - target;
+    if (std::abs(f) < 1.0e-6F) break;
+    if (f > 0.0F) { hi = k; h_hi = f; } else { lo = k; h_lo = f; }
+    float next = k - f * (hi - lo) / std::max(h_hi - h_lo, 1.0e-9F);
+    if (!(next > lo && next < hi)) next = 0.5F * (lo + hi);
+    if (std::abs(next - k) < 1.0e-6F) break;
+    k = next;
   }
-  return forKnee(0.5F * (lo + hi));
+  return p;
 }
 
 }  // namespace tap_fw::v3

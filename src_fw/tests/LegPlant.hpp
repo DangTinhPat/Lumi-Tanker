@@ -41,7 +41,7 @@ class LegPlant {
   // leg; legs identical), the axle and the IMU.
   struct Points {
     std::array<Pt, 4> com;
-    Pt axle, imu;
+    Pt axle, imu, knee;
   };
   static constexpr int kImu = 4;
   static constexpr int kAxle = 5;
@@ -59,6 +59,10 @@ class LegPlant {
 
   // Ground height [m] under axle position x (default flat).
   std::function<double(double)> ground;
+  // External force on a body-frame point (hip origin) [N, world x/z]: a
+  // hand pressing on the front or the back of the body.
+  struct ExtForce { Pt local{0.0, 0.0}; double fx = 0.0, fz = 0.0; };
+  ExtForce ext;
 
   Points points(double q, double k) const {
     Points p{};
@@ -71,7 +75,15 @@ class LegPlant {
     p.axle = add(knee_pt, rot({geo::origins[2].x, geo::origins[2].z}, lower));
     p.com[3] = add(p.axle, rot({geo::parts[3].x, geo::parts[3].z}, lower));
     p.imu = {geo::imu_offset_x_m, geo::imu_offset_z_m};
+    p.knee = knee_pt;
     return p;
+  }
+  // World position of a body-frame point (hip origin) at state s.
+  Pt worldOf(const Vec& s, Pt local) const {
+    const Points p = points(s[2], s[3]);
+    const Pt w = rot(sub(local, p.axle), s[1]);
+    const double z0 = geo::wheel_radius_m + (ground ? ground(s[0]) : 0.0);
+    return {s[0] + w.x, z0 + w.z};
   }
   // World position of point k (0..3 CoMs, kImu, kAxle) at state s.
   Pt world(const Vec& s, int k) const {
@@ -114,6 +126,16 @@ class LegPlant {
         for (int b = 0; b < kDof; ++b) M[a][b] += m_[k] * (J[a].x * J[b].x + J[a].z * J[b].z);
         Q[a] += m_[k] * (J[a].x * (gx - jd.x) + J[a].z * (gz - jd.z));
         if (k == 0) Q[a] += J[a].x * fx;
+      }
+    }
+    if (ext.fx != 0.0 || ext.fz != 0.0) {
+      const double e = 1.0e-6;
+      for (int j = 0; j < kDof; ++j) {
+        Vec a = s, b = s;
+        a[j] += e;
+        b[j] -= e;
+        const Pt pa = worldOf(a, ext.local), pb = worldOf(b, ext.local);
+        Q[j] += (pa.x - pb.x) / (2 * e) * ext.fx + (pa.z - pb.z) / (2 * e) * ext.fz;
       }
     }
     const double R = geo::wheel_radius_m;
