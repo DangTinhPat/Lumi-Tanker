@@ -319,7 +319,10 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
         Serial.println("V3 SET algo: only while Idle/Fault");
         return;
       }
-      ctrl_.config().algo = v >= 0.5F ? V3Controller::Algo::Pid : V3Controller::Algo::Lqr;
+      // 0 = LQR + tiers (default), 1 = PID, 2 = whole-body LQR (wheel + hip + knee).
+      ctrl_.config().algo = v >= 1.5F ? V3Controller::Algo::WholeBody
+                          : v >= 0.5F ? V3Controller::Algo::Pid
+                                      : V3Controller::Algo::Lqr;
     }
     // v3.3 tiers (V3Controller::Tier). vpitch changes the balancer's state,
     // so it only switches outside Balancing; trunk ramps in and out anytime.
@@ -360,6 +363,14 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tltau")) ctrl_.config().tier.level_tau_s = std::clamp(v, 0.2F, 10.0F);
     else if (!std::strcmp(key, "tlvmax")) ctrl_.config().tier.level_max_rad = std::clamp(v, 0.0F, 0.25F);
     else if (!std::strcmp(key, "hcap")) ctrl_.config().held_wheel_cap_m_s = std::clamp(v, 0.0F, 0.8F);
+    // Knee suspension (needs vpitch).
+    else if (!std::strcmp(key, "tsus")) ctrl_.config().tier.suspension = v >= 0.5F;
+    else if (!std::strcmp(key, "tsusg")) ctrl_.config().tier.sus_gain = std::clamp(v, 0.0F, 5.0F);
+    else if (!std::strcmp(key, "tsusmax")) ctrl_.config().tier.sus_max_m = std::clamp(v * 0.001F, 0.0F, 0.015F);
+    // Whole-body LQR (SET algo 2).
+    else if (!std::strcmp(key, "wbff")) ctrl_.config().wb_lean_ff = v >= 0.5F;
+    else if (!std::strcmp(key, "wbslack")) ctrl_.config().wb_drive_slack_m = std::clamp(v, 0.0F, 0.1F);
+    else if (!std::strcmp(key, "wbbg")) ctrl_.config().wb_bias_gain = std::clamp(v, 0.0F, 0.3F);
     else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else {
@@ -448,10 +459,13 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
 void AppV3::printTunables() noexcept {
   const auto& c = ctrl_.balancer().config();
   const auto& pid = ctrl_.config().pid;
-  Serial.printf("V3 TUNE algo=%s (SET algo 1=PID 0=LQR) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
+  Serial.printf("V3 TUNE algo=%s (SET algo 0=LQR 1=PID 2=WB) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
                 "kix=%.3f amax=%.1f lead=%.2f dbc=%.2f dbe=%.2f auto=%d balance=%s%+.4f "
                 "height %.0f-%.0f mm hrate=%.0f mm/s\n",
-                ctrl_.config().algo == V3Controller::Algo::Pid ? "PID" : "LQR", pid.kp, pid.kd,
+                ctrl_.config().algo == V3Controller::Algo::Pid       ? "PID"
+                : ctrl_.config().algo == V3Controller::Algo::WholeBody ? "WB"
+                                                                       : "LQR",
+                pid.kp, pid.kd,
                 pid.kv, pid.kx, pid.kix, pid.accel_max_m_s2, pid.lead_s, pid.deadband_comp_rad_s,
                 pid.deadband_eps_rad_s,
                 ctrl_.config().engage.automatic ? 1 : 0,
@@ -468,6 +482,8 @@ void AppV3::printTunables() noexcept {
   Serial.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
                 "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
                 tier.plan_vmax_m_s, tier.preview_s);
+  Serial.printf("V3 TUNE suspension: tsus=%d (needs vpitch) tsusg=%.1f tsusmax=%.0f mm\n",
+                tier.suspension ? 1 : 0, tier.sus_gain, tier.sus_max_m * 1000.0F);
   Serial.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "
                 "hcap=%.2f m/s learned_trim=%s%+.4f\n", tier.level ? 1 : 0, tier.level_pitch_rad,
                 tier.level_tau_s, tier.level_max_rad, ctrl_.config().held_wheel_cap_m_s,
@@ -840,7 +856,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     // v3.3: the height pose plus the tier-2 hip offset (0 unless trunk is
     // on and balancing); the stand tests drive the bare pose.
     hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
-    knee_cmd = ctrl_.legPose().knee_offset_rad;
+    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
     if (stand && rec_kind_ == RecKind::KneeStand) {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
@@ -901,7 +917,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   "wmeas=[%+.2f %+.2f] axle_v=%+.3f axle_x=%+.3f trim=%+.4f "
                   "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d "
                   "h=%.1f htgt=%.1f knee=%+.3f tv=%+.4f dhip=%+.4f ta=%.2f me=%+.3f "
-                  "lvl=%+.4f ho=%d lt=%+.4f/%d\n",
+                  "lvl=%+.4f ho=%d lt=%+.4f/%d dknee=%+.4f wbb=%+.4f sus=%+.1f vz=%+.3f\n",
                   static_cast<unsigned long>((now_us - state_since_us_) / 1000U),
                   tap_fw::v3::toString(out.state), imu_.pitch_rad, imu_.pitch_rate_rad_s,
                   last_wheel_cmd_[0], last_wheel_cmd_[1], in.wheel_rad_s[0], in.wheel_rad_s[1],
@@ -912,7 +928,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad,
                   ctrl_.virtualPitch(), ctrl_.trunkHip(), ctrl_.trunkAuthority(),
                   ctrl_.legModelError(), ctrl_.levelHip(), ctrl_.heldOuterOff() ? 1 : 0,
-                  ctrl_.learnedTrim(), ctrl_.learnedTrimValid() ? 1 : 0);
+                  ctrl_.learnedTrim(), ctrl_.learnedTrimValid() ? 1 : 0,
+                  ctrl_.kneeCommand() - ctrl_.legPose().knee_offset_rad, ctrl_.wbDebug().bias,
+                  ctrl_.suspensionOffset() * 1000.0F, ctrl_.bodyVerticalSpeed());
   }
 }
 

@@ -67,10 +67,11 @@ v3.3 (điều khiển phân tầng, chỉ LQR, mặc định bật; xem `docs/V3
 (dự báo thao tác, cần vpitch), `SET tpacc|tpjerk|tpvmax|tpt v` (gia tốc/giật/trần tốc độ/
 tầm dự báo của quỹ đạo), `SET tlvl 0|1` (giữ thân ngang, cần trunk), `SET tlevel <rad>`
 (pitch thân mục tiêu, mặc định 0), `SET tltau|tlvmax v`, `SET hcap <m/s>` (trần tốc độ bánh
-khi đang bị giữ/nhấc). TR thêm
+khi đang bị giữ/nhấc), `SET tsus 0|1` (gối nhún giữ độ cao thân, cần vpitch), `SET tsusg v`
+(độ lợi), `SET tsusmax <mm>`; `SET algo 2` (LQR toàn thân, thử nghiệm), `SET wbff|wbslack|wbbg v`. TR thêm
 `tv` (θv), `dhip` (hông tầng 2), `ta` (quyền 0..1), `me` (sai lệch mô hình chân), `lvl`
 (phần hông giữ thân ngang), `ho` (1 = đang bị giữ, bánh bị giới hạn), `lt` (trim đã học/hợp
-lệ); SENS thêm `hipv_rms` (nhiễu vận tốc hông).
+lệ), `sus` (offset nhún, mm), `vz` (vận tốc dọc thân ước lượng); SENS thêm `hipv_rms` (nhiễu vận tốc hông).
 
 ## Log
 

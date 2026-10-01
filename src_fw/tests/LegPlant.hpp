@@ -17,6 +17,7 @@
 #include <functional>
 
 #include "robot_control/GeneratedGeometry.hpp"
+#include "robot_control/WholeBodyModel.hpp"  // imu_offset_x_m / _z_m
 
 namespace tap_fw::sim {
 
@@ -96,12 +97,14 @@ class LegPlant {
     const Pt p0 = world(s, k), pa = world(a, k), pb = world(b, k);
     jdot_sd = {(pa.x - 2 * p0.x + pb.x) / (h * h), (pa.z - 2 * p0.z + pb.z) / (h * h)};
   }
-  // Accelerations for wheel torque tw (on u), hip torque th (on q), knee
-  // torque tk (on k) and a horizontal push fx at the body CoM.
-  Vec accel(const Vec& s, const Vec& sd, double tw, double th, double tk, double fx,
-            double slope) const {
-    double M[kDof][kDof] = {};
-    double Q[kDof] = {};
+  // Mass matrix and generalized forces (gravity, velocity terms, a push fx
+  // at the body CoM; no actuator torques): M(s) s'' = Q + actuator terms.
+  void generalized(const Vec& s, const Vec& sd, double fx, double slope,
+                   double (&M)[kDof][kDof], double (&Q)[kDof]) const {
+    for (int a = 0; a < kDof; ++a) {
+      Q[a] = 0.0;
+      for (int b = 0; b < kDof; ++b) M[a][b] = 0.0;
+    }
     const double gx = -kG * std::sin(slope), gz = -kG * std::cos(slope);
     for (int k = 0; k < 4; ++k) {
       Jac J;
@@ -122,6 +125,15 @@ class LegPlant {
     M[0][0] += i_wheel_ / (R * R);
     M[2][2] += 2.0 * hip_rotor_;
     M[3][3] += 2.0 * knee_rotor_;
+  }
+  // Accelerations for wheel torque tw (on u), hip torque th (on q), knee
+  // torque tk (on k) and a horizontal push fx at the body CoM.
+  Vec accel(const Vec& s, const Vec& sd, double tw, double th, double tk, double fx,
+            double slope) const {
+    double M[kDof][kDof];
+    double Q[kDof];
+    generalized(s, sd, fx, slope, M, Q);
+    const double R = geo::wheel_radius_m;
     Q[0] += tw / R; Q[1] -= tw; Q[2] -= tw; Q[3] -= tw;
     Q[2] += th;
     Q[3] += tk;

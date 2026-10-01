@@ -7,6 +7,7 @@
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
+#include "tap_fw/v3/WholeBodyGains.hpp"
 
 namespace tap_fw::v3 {
 
@@ -22,7 +23,9 @@ class V3Controller {
  public:
   enum class State { Idle, Locking, Ready, Balancing, Fault };
 
-  enum class Algo { Lqr, Pid };
+  // WholeBody (SET algo 2): one LQR for wheel + hip + knee (WholeBodyGains.hpp,
+  // src_fw/tools/wb_lqr_design.cpp); Lqr with the tiers stays the default.
+  enum class Algo { Lqr, Pid, WholeBody };
 
   // Classic two-loop balancer of hobby two-wheel robots (jjrobots B-ROBOT,
   // Balanduino, ESP32 balancing bots): a fast angle PD whose output is wheel
@@ -172,7 +175,10 @@ class V3Controller {
     bool level = true;
     float level_pitch_rad = 0.0F;  // SET tlevel: target body pitch (IMU frame)
     float level_tau_s = 1.5F;      // SET tltau: integrator time constant
-    float level_max_rad = 0.12F;   // SET tlvmax: |static hip offset| allowed
+    // SET tlvmax: |static hip offset| allowed. It also absorbs legs arranged
+    // off by hand at power-up (the encoder zero): hip 0.10 + knee 0.08 rad
+    // off needed 0.135 and left the body ~1 deg tilted at 0.12 (sim V25).
+    float level_max_rad = 0.20F;
     float level_lpf_hz = 0.5F;     // body pitch low-pass feeding the integrator
     float max_rad = 0.15F;     // |dynamic hip offset| from the static height pose
     float rate_rad_s = 3.0F;   // hip command slew
@@ -275,6 +281,25 @@ class V3Controller {
     // estimate error while driving 0.018 -> 0.004 rad, stop creep 5-15 cm ->
     // ~1-5 cm. Needs virtual_pitch (measured legs). SET timu.
     bool imu_kinematic = true;
+    // Knee suspension (SET tsus, needs vpitch): the knees keep the body's
+    // height in space instead of following every floor bump, like a
+    // skater's knees - "sky-hook" damping on the body's vertical speed from
+    // the IMU (specific force along gravity, leaky-integrated, so pitch
+    // errors only enter to second order), the height offset easing back to
+    // the pose. The hips stay the fore/aft (lean) actuator: at every height
+    // the pose's hip moves the body < 1.1 mm per 0.1 rad while the knee
+    // moves it 5-10 cm per rad (v3_tier_tests TIER_RATIO).
+    bool suspension = true;
+    float sus_gain = 3.0F;        // height rate per body vertical speed (SET tsusg)
+    float sus_return_s = 0.3F;    // offset back to the pose
+    float sus_max_m = 0.008F;     // |height offset| (SET tsusmax)
+    // Vertical speed estimate: IMU above this time constant, the legs' own
+    // height rate (encoders; equal to it on a flat floor) below - an IMU-only
+    // estimate drifted and the knees wandered 5-11 mm standing (sim).
+    float sus_leak_s = 0.3F;
+    // Soft deadband on that speed: standing, sensor noise reads ~1-3 mm/s
+    // and moved the knees 1.4-3.6 mm; a 5 mm bump at 0.3 m/s reads ~50.
+    float sus_deadband_m_s = 0.005F;
   };
 
   struct Config {
@@ -299,6 +324,17 @@ class V3Controller {
     float lqr_lead_s = 0.08F;
     // LQR position-error trim integral [rad per m*s] (half the PID kix).
     float lqr_trim_gain = 0.01F;
+    // Algo::WholeBody: rate [rad per m s] at which the position error teaches
+    // the measured natural body pitch (IMU mount + CoM model error).
+    float wb_bias_gain = 0.10F;
+    // Algo::WholeBody: the hips take the planned lean atan(a/g) (body stays at
+    // its target) - SET wbff 0/1.
+    bool wb_lean_ff = true;
+    // Algo::WholeBody: how far the position anchor may lead/lag the robot
+    // while driving [m]; 0 = speed only. Leading by up to 8 cm did not get it
+    // over an 8 mm / 4 cm bump at 0.15 m/s (stalls; the tiers climb it) and
+    // added body tilt while driving (sim TIER_WB) - SET wbslack.
+    float wb_drive_slack_m = 0.0F;
     std::uint64_t lock_settle_us = 1'200'000U;  // leg ramp + settle before wheels
     float fall_pitch_rad = 0.60F;
     // Auto-learned balance trim (theta_v-referenced, height-independent
@@ -458,10 +494,24 @@ class V3Controller {
   [[nodiscard]] float virtualPitchRate() const noexcept { return theta_v_rate_; }
   [[nodiscard]] float trunkHip() const noexcept { return dhip_; }
   [[nodiscard]] float trunkAuthority() const noexcept { return trunk_alpha_; }
+  // Knee suspension (Tier::suspension): height offset [m], vertical speed.
+  [[nodiscard]] float suspensionOffset() const noexcept { return sus_dz_; }
+  [[nodiscard]] float bodyVerticalSpeed() const noexcept { return sus_vz_; }
   // Static level loop's share of trunkHip() (Tier::level).
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
   // Hip offset to send to the legs (height pose + tier 2), every state.
   [[nodiscard]] float hipCommand() const noexcept { return pose_.hip_offset_rad + dhip_; }
+  // Knee offset to send to the legs (height pose + whole-body offset).
+  [[nodiscard]] float kneeCommand() const noexcept { return pose_.knee_offset_rad + dknee_; }
+  [[nodiscard]] bool wholeBody() const noexcept { return config_.algo == Algo::WholeBody; }
+  // Gain table in use (default: the generated WholeBodyGains.hpp); tests and
+  // the weight search swap in their own designs.
+  using WbTable = std::array<wb::Point, wb::kHeights>;
+  void setWholeBodyTable(const WbTable* table) noexcept { wb_table_ = table ? table : &wb::kTable; }
+  struct WbDebug { float x_ref, xi, theta_ref, v_ref, bias; bool driving; };
+  [[nodiscard]] WbDebug wbDebug() const noexcept {
+    return {wb_x_ref_, wb_xi_, wb_theta_ref_, plan_v_, wb_bias_, pid_driving_};
+  }
   // World-frame velocity of the IMU point for the pitch estimator's
   // specific-force compensation; valid only while balancing free (Tier::
   // imu_kinematic).
@@ -516,8 +566,12 @@ class V3Controller {
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
-  void applyKneeExcitation(const Input& in);
+  void applyPoseOffsets(const Input& in);
+  void updateSuspension(const Input& in);
   float knee_excite_rad_ = 0.0F;
+  float applied_dk_ = 0.0F, applied_base_ = 0.0F;
+  float sus_g_ = 9.80665F, sus_vz_ = 0.0F, sus_dz_ = 0.0F, sus_dk_ = 0.0F;
+  bool sus_init_ = false;
   bool excite_applied_ = false;
   // The virtual pitch already carries the balance shift with height (from
   // the measured legs), so the CAD feed-forward is off with it.
@@ -635,6 +689,26 @@ class V3Controller {
   float trim_blend_rate_ = 0.0F;  // [rad/s]
   std::array<float, 2> pidUpdate(const Input& in, const Command& cmd);
   std::array<float, 2> lqrUpdate(const Input& in, const Command& cmd);
+  // Whole-body LQR (Algo::WholeBody).
+  std::array<float, 2> wbUpdate(const Input& in, const Command& cmd);
+  void wbReset(const Input& in);
+  float dknee_ = 0.0F;
+  const WbTable* wb_table_ = &wb::kTable;
+  float wb_x_ref_ = 0.0F;
+  float wb_xi_ = 0.0F;
+  float wb_theta_ref_ = 0.0F;   // body pitch reference (tracks the hand while held)
+  float wb_theta_rate_ = 0.0F;  // its walk back to the table equilibrium after release [rad/s]
+  float wb_cmd_v_ = 0.0F;       // last wheel command as ground speed (held test)
+  // Measured-minus-model natural body pitch (IMU mount + CoM model error),
+  // learned from the position error like the tiers' balance trim; kept
+  // across re-zeroes.
+  float wb_bias_ = 0.0F;
+  std::array<float, wb::kWheelDelay> wb_wheel_hist_{};
+  std::array<float, wb::kJointDelay> wb_hip_hist_{};
+  std::array<float, wb::kJointDelay> wb_knee_hist_{};
+  struct WbGain { float theta0; const std::array<std::array<float, wb::kStates>, 3>* lo;
+                  const std::array<std::array<float, wb::kStates>, 3>* hi; float a; };
+  [[nodiscard]] WbGain wbGain() const noexcept;
 };
 
 [[nodiscard]] const char* toString(V3Controller::State state) noexcept;
