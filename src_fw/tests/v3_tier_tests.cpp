@@ -46,6 +46,7 @@ struct Case {
   V3Controller::Algo algo = V3Controller::Algo::Lqr;
   bool vpitch = false, trunk = false;
   double lean_share = -1.0, tier_lead = -1.0, tier_max = -1.0, tier_hpf = -1.0;
+  double tier_exp = -1.0;         // < 0: firmware default (Tier::height_exp)
   int imu_kin = -1;              // -1: firmware default
   int preview = -1;              // -1: firmware default (Tier::preview)
   double plan_accel = -1.0, plan_jerk = -1.0, preview_s = -1.0, lead_lpf = -1.0;
@@ -83,6 +84,21 @@ struct Case {
   // Grabbed mid-balance: body held still in the air from grab_s for
   // grab_len_s (wheels spin free, legs dangle), then put back down.
   double grab_s = -1.0, grab_len_s = 3.0;
+  // Release-placement bias [rad]: the "put back down" pose after a grab is
+  // offset from the true resting angle by this much, simulating the
+  // operator placing the robot at an arbitrary pitch. Default 0.02 matches
+  // the old behaviour (a small, incidental offset); a deliberately large
+  // value tests the learned-trim fix.
+  double grab_release_bias_rad = 0.02;
+  double learn_hold = -1.0;  // < 0: firmware default (Config::learn_hold_s)
+  double held_cap = -1.0;    // < 0: firmware default (Config::held_wheel_cap_m_s)
+  bool no_rezero = false;    // diagnostics: held and runaway re-zeroes disabled
+  // Static level loop (Tier::level): -1 firmware default. The target is
+  // the true resting body pitch at the hang pose (as the IMU reads it) plus
+  // level_rel, so level_rel = 0 leaves the regression cases' posture as it
+  // was; the body deviation metrics are taken from that target.
+  int level = -1;
+  double level_rel = 0.0;
 };
 
 struct Result {
@@ -105,6 +121,14 @@ struct Result {
   double grab_detect_s = -1.0;     // grab start -> first held re-zero
   double grab_max_dhip_end = 0.0;  // |tier-2 hip| over the last second of the grab
   double grab_max_wheel = 0.0;     // wheel speed while grabbed [rad/s]
+  double putdown_wheel = 0.0;      // wheel speed (rel. to shin) at the grab's put-down [rad/s]
+  double putdown_cmd = 0.0;        // wheel command at put-down
+  double level_hip_end = 0.0;      // static level loop's hip offset at the end [rad]
+  double push_body = 0.0, push_lean = 0.0, push_hip = 0.0;  // peak change in the 2 s after push start
+  bool learned_valid = false;      // Config::learn_hold_s trim learned by the end
+  double level_settle_s = -1.0;    // last time |body - target| was above 0.015 rad (after 2 s)
+  double post_release_dev = 0.0;   // max |body pitch - rest| in the 2 s after put-down
+  double settled_dev = 0.0;        // |body pitch - rest| ~8 s after put-down (has it gone home?)
   // Body as a stabilised platform (drive/push event window, see simulate):
   // horizontal acceleration and jerk of the BODY CoM, and the speed bumps
   // of a balancing robot - the body speeding up before it brakes, or
@@ -296,12 +320,20 @@ Result simulate(const Case& c) {
   if (c.tier_lead >= 0) cfg.tier.lead_s = static_cast<float>(c.tier_lead);
   if (c.tier_max >= 0) cfg.tier.max_rad = static_cast<float>(c.tier_max);
   if (c.tier_hpf >= 0) cfg.tier.hpf_s = static_cast<float>(c.tier_hpf);
+  if (c.tier_exp >= 0) cfg.tier.height_exp = cfg.tier.height_exp_tall = static_cast<float>(c.tier_exp);
+  if (const char* v = std::getenv("TIER_EXP_TALL")) cfg.tier.height_exp_tall = static_cast<float>(std::atof(v));
   if (c.imu_kin >= 0) cfg.tier.imu_kinematic = c.imu_kin != 0;
   if (c.preview >= 0) cfg.tier.preview = c.preview != 0;
   if (c.plan_accel > 0) cfg.tier.plan_accel_m_s2 = static_cast<float>(c.plan_accel);
   if (c.plan_jerk > 0) cfg.tier.plan_jerk_m_s3 = static_cast<float>(c.plan_jerk);
   if (c.preview_s >= 0) cfg.tier.preview_s = static_cast<float>(c.preview_s);
   if (c.lead_lpf >= 0) cfg.tier.lead_lpf_hz = static_cast<float>(c.lead_lpf);
+  if (c.learn_hold >= 0) cfg.learn_hold_s = static_cast<float>(c.learn_hold);
+  if (c.held_cap >= 0) cfg.held_wheel_cap_m_s = static_cast<float>(c.held_cap);
+  if (c.no_rezero) { cfg.pid.held_dv_m_s = 1.0e9F; cfg.runaway_us = 1'000'000'000U; }
+  if (c.level >= 0) cfg.tier.level = c.level != 0;
+  cfg.tier.level_pitch_rad = static_cast<float>(theta_rest0 + c.imu_mount + c.level_rel);
+  const bool level_active = c.vpitch && c.trunk && cfg.tier.level;
   if (const char* v = std::getenv("TIER_PVMAX")) cfg.tier.plan_vmax_m_s = static_cast<float>(std::atof(v));
   if (c.joint_rate_gain >= 0) cfg.tier.joint_rate_gain = static_cast<float>(c.joint_rate_gain);
   V3Controller ctrl(cfg);
@@ -381,7 +413,10 @@ Result simulate(const Case& c) {
   double ab_f = 0.0, ev_acc_sq = 0.0, ev_jerk_sq = 0.0, v_release = 0.0, v_start = 0.0;
   int ev_n = 0;
   int est_n = 0, held_before_grab = 0;
-  bool put_down = false;
+  bool put_down = false, grab_biased = false;
+  double grab_from = 0.0, grab_to = 0.0;
+  double push_b0 = 0.0, push_l0 = 0.0, push_q0 = 0.0;
+  double put_down_t = 0.0;
   int rate_n = 0, body_n = 0;
   for (int k = 0; k < static_cast<int>(c.duration_s / dt_c); ++k) {
     const double t = k * dt_c;
@@ -442,7 +477,27 @@ Result simulate(const Case& c) {
     const double fx = (t >= c.push_start_s && t < c.push_end_s) ? c.push_n : 0.0;
     const bool grabbed = c.grab_s >= 0.0 && t >= c.grab_s && t < c.grab_s + c.grab_len_s;
     if (grabbed) {
-      // Held in the air: body still, wheels free (servo lag only), legs dangle.
+      // Held in the air at an arbitrary pitch (operator's hand), body still,
+      // wheels free (servo lag only), legs dangle. The hold angle is set
+      // ONCE at grab onset and held fixed for the whole grab - as it would
+      // be in a hand, not corrected tick by tick - so whatever the
+      // controller records as its seed while held genuinely reflects that
+      // (possibly wrong) angle, not the angle before the grab.
+      // Tilted there by hand over 0.3 s, which the gyro sees: a one-tick
+      // jump with a zero gyro rate put 0.08 rad of error into the
+      // gyro-dominant estimate (and a wrong gyro bias after it) that no
+      // real grab has.
+      if (!grab_biased) {
+        grab_biased = true;
+        grab_from = s[1];
+        auto target = s;
+        for (int i = 0; i < 40; ++i) target[1] -= plant.leanAngle(target) - c.grab_release_bias_rad;
+        grab_to = target[1];
+      }
+      const double tilt_s = 0.3;
+      const double tilt_a = std::min((t - c.grab_s) / tilt_s, 1.0);
+      s[1] = grab_from + tilt_a * (grab_to - grab_from);
+      const double tilt_rate = tilt_a < 1.0 ? (grab_to - grab_from) / tilt_s : 0.0;
       if (r.grab_detect_s < 0.0 && ctrl.heldResets() > held_before_grab) {
         r.grab_detect_s = t - c.grab_s;
       }
@@ -453,6 +508,12 @@ Result simulate(const Case& c) {
       ud += (wheel_applied - ud) * dt_c / c.wheel_tau;
       u += ud * dt_c;
       r.grab_max_wheel = std::max(r.grab_max_wheel, std::abs(ud));
+      if (c.trace && k % 10 == 0) {
+        std::printf("GRB t=%.2f ud=%+.2f wcmd=%+.2f held=%d outer_off=%d quiet=%d ref=%+.4f tv=%+.4f\n",
+                    t, ud, 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]), ctrl.heldResets(),
+                    ctrl.heldOuterOff(), ctrl.heldQuiet(), double(ctrl.balanceRef()),
+                    double(ctrl.virtualPitch()));
+      }
       for (int n = 0; n < sub; ++n) {
         const double acc = c.hip_vel_bw * (c.hip_kp * (hip_applied - s[2]) - sd[2]);
         sd[2] += acc * dt;
@@ -460,15 +521,24 @@ Result simulate(const Case& c) {
       }
       for (double& a : s_acc) a = 0.0;
       const double th = s[1] + c.imu_mount;
-      feed(-kG * std::sin(th), kG * std::cos(th), 0.0);
+      feed(-kG * std::sin(th), kG * std::cos(th), tilt_rate);
       continue;
     }
     if (c.grab_s >= 0.0 && t < c.grab_s) held_before_grab = ctrl.heldResets();
     if (c.grab_s >= 0.0 && !put_down && t >= c.grab_s + c.grab_len_s) {
-      // Put back down near the balance point, at rest.
+      // Let go, physically, at whatever angle it was being held (set at
+      // grab onset above) - no further correction here.
       put_down = true;
+      put_down_t = t;
+      r.putdown_wheel = ud;
+      r.putdown_cmd = 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]);
       sd = {0.0, 0.0, 0.0};
-      for (int i = 0; i < 40; ++i) s[1] -= plant.leanAngle(s) - 0.02;
+    }
+    if (put_down && t >= put_down_t && t < put_down_t + 2.0) {
+      r.post_release_dev = std::max(r.post_release_dev, std::abs(s[1] - theta_rest0));
+    }
+    if (put_down && t >= put_down_t + 7.0 && t < put_down_t + 8.0) {
+      r.settled_dev = std::max(r.settled_dev, std::abs(s[1] - theta_rest0));
     }
     for (int n = 0; n < sub; ++n) {
       // Wheel speed servo (whole rpm, deadband) -> desired u''.
@@ -560,9 +630,18 @@ Result simulate(const Case& c) {
     if (std::abs(lean) > 0.6 || std::abs(s[1]) > 0.8) { r.fell = true; r.fault = "plant"; break; }
     // Body pitch at rest for the current height pose (CoM over the axle,
     // hips at the height pose), relative to which the body deviation counts.
-    const double rest = theta_rest0;
+    const double rest = theta_rest0 + (level_active ? c.level_rel : 0.0);
     const double dev = s[1] - rest;
+    if (c.push_n != 0.0) {
+      if (t < c.push_start_s) { push_b0 = s[1]; push_l0 = lean; push_q0 = s[2]; }
+      else if (t < c.push_start_s + 2.0) {
+        r.push_body = std::max(r.push_body, std::abs(s[1] - push_b0));
+        r.push_lean = std::max(r.push_lean, std::abs(lean - push_l0));
+        r.push_hip = std::max(r.push_hip, std::abs(s[2] - push_q0));
+      }
+    }
     if (t > 2.0) {
+      if (std::abs(dev) > 0.015) r.level_settle_s = t;
       r.body_dev_all = std::max(r.body_dev_all, std::abs(dev));
       r.lean_max = std::max(r.lean_max, std::abs(lean));
       r.max_hip_rate = std::max(r.max_hip_rate, std::abs(sd[2]));
@@ -579,17 +658,22 @@ Result simulate(const Case& c) {
       rest_hip_sq += sd[2] * sd[2];
       ++body_n;
     }
-    if (c.trace && k % 25 == 0) {
+    const int trace_every = std::getenv("TR_FINE") ? 1 : 25;
+    if (c.trace && k % trace_every == 0) {
       std::printf("TRC t=%.2f x=%+.3f v=%+.3f body=%+.4f lean=%+.4f q=%+.4f qcmd=%+.4f tv=%+.4f "
-                  "ref=%+.4f wcmd=%+.2f ta=%.2f\n", t, s[0], sd[0], dev, lean, s[2],
-                  double(ctrl.hipCommand()), double(ctrl.virtualPitch()),
+                  "ref=%+.4f wcmd=%+.2f ta=%.2f lvl=%+.4f learn=%d/%+.4f est=%+.4f\n", t, s[0], sd[0], dev,
+                  lean, s[2], double(ctrl.hipCommand()), double(ctrl.virtualPitch()),
                   double(ctrl.balanceRef()), 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]),
-                  double(ctrl.trunkAuthority()));
+                  double(ctrl.trunkAuthority()), double(ctrl.levelHip()), ctrl.learnedTrimValid(),
+                  double(ctrl.learnedTrim()),
+                  double(imu.pitch_rad) - (s[1] + c.imu_mount) - est_bias0);
     }
     r.max_speed = std::max(r.max_speed, std::abs(sd[0]));
     r.max_x = std::max(r.max_x, std::abs(s[0]));
     if (k == static_cast<int>((c.drive_end_s + 3.0) / dt_c)) x_stop = s[0];
   }
+  r.level_hip_end = ctrl.levelHip();
+  r.learned_valid = ctrl.learnedTrimValid();
   r.x_end = s[0];
   r.x_stop_travel = s[0] - x_stop;
   r.rate_rms_drive = rate_n ? std::sqrt(rate_sq / rate_n) : 0.0;
@@ -734,11 +818,154 @@ int main() {
     if (const char* v = std::getenv("TR_LPF")) c.lead_lpf = std::atof(v);
     if (const char* v = std::getenv("TR_TAU")) c.wheel_tau = std::atof(v);
     if (const char* v = std::getenv("TR_PUSH")) c.push_n = std::atof(v);
+    if (const char* v = std::getenv("TR_IMUMOUNT")) c.imu_mount = std::atof(v);
+    if (const char* v = std::getenv("TR_BODYDX")) c.body_dx = std::atof(v);
+    if (const char* v = std::getenv("TR_GRAB")) { c.grab_s = std::atof(v); c.duration_s = c.grab_s + 8.0; }
+    if (const char* v = std::getenv("TR_BIAS")) c.grab_release_bias_rad = std::atof(v);
+    if (const char* v = std::getenv("TR_LEVEL")) c.level_rel = std::atof(v);
+    if (const char* v = std::getenv("TR_HVN")) c.hip_vel_noise = std::atof(v);
+    if (const char* v = std::getenv("TR_LEARN")) c.learn_hold = std::atof(v);
+    if (const char* v = std::getenv("TR_LVL")) c.level = std::atoi(v);
+    if (const char* v = std::getenv("TR_DUR")) c.duration_s = std::atof(v);
+    if (const char* v = std::getenv("TR_SEED")) c.seed_error = std::atof(v);
     if (const char* h = std::getenv("TR_H")) {
       c.height_low_m = std::atof(h); c.height_low_s = 5; c.height_up_s = 17; c.duration_s = 30;
     }
     c.name = "trace";
     run(c);
+    return 0;
+  }
+  if (std::getenv("TIER_RATIO") != nullptr) {
+    const double hang = LegHeight::forHeight(LegHeight::maxHeight()).com_above_axle_m;
+    for (double h : {0.189, 0.170, 0.150, 0.136, 0.120, 0.110, 0.095, 0.078}) {
+      const auto p = LegHeight::forHeight(static_cast<float>(h));
+      const double r = p.com_above_axle_m / hang;
+      std::printf("h %3.0f mm: com %.1f mm ratio %.3f  share^1.5 %.2f  ^1.0 %.2f  ^0.5 %.2f\n", h * 1000,
+                  p.com_above_axle_m * 1000, r, std::pow(r, 1.5), r, std::sqrt(r));
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_PUSHSWEEP") != nullptr) {
+    // Hard pushes (wheels saturated, hardware 2026-09-30 182 s: 1.1 m/s, held
+    // re-zero mid-catch) and hand pushes (force held on for up to 1 s).
+    const double cap = std::getenv("PS_CAP") ? std::atof(std::getenv("PS_CAP")) : -1.0;
+    const bool norz = std::getenv("PS_NOREZERO") != nullptr;
+    for (double h : {0.0, 0.136}) {
+      for (int mode : {0, 2}) {
+        for (double len : {0.3, 0.6, 1.0}) {
+          std::printf("h %s %-13s %.1f s:", h > 0 ? "136" : "189", modeName(mode), len);
+          for (double f : {4.0, 6.0, 8.0, 10.0, 12.0, 14.0}) {
+            Case c = withMode(Case{}, mode);
+            c.held_cap = cap;
+            c.no_rezero = norz;
+            if (h > 0) { c.height_low_m = h; c.height_low_s = 3.0; c.height_up_s = 60.0; }
+            c.push_n = f; c.push_start_s = 12.0; c.push_end_s = 12.0 + len; c.duration_s = 22.0;
+            const Result r = simulate(c);
+            std::printf("  %2.0fN:%s h%d v%.2f", f, r.fell ? "FALL" : "ok  ", r.held_resets, r.max_speed);
+          }
+          std::printf("\n");
+        }
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_EXP") != nullptr) {
+    // Tier-2 share vs height (Tier::height_exp): pushed at a crouch height.
+    for (double h : {0.136, 0.110, 0.078}) {
+      for (double e : {-1.0, 1.5}) {
+        int bad = 0; double wb = 0, wr = 0, wh = 0, sumb = 0, suml = 0, sumq = 0; int n = 0;
+        for (int vi = 0; vi < 8; ++vi) {
+          for (double f : {4.0, -4.0}) {
+            Case c = withMode(Case{}, 2);
+            if (vi > 0) kVariants[vi].apply(c);
+            c.tier_exp = e;
+            c.height_low_m = h; c.height_low_s = 3.0; c.height_up_s = 60.0;
+            c.push_n = f; c.push_start_s = 12.0; c.push_end_s = 12.3; c.duration_s = 20.0;
+            const Result r = simulate(c);
+            if (r.fell || r.held_resets) ++bad;
+            wr = std::max(wr, r.rest_rate_rms); wh = std::max(wh, r.rest_hip_rms);
+            wb = std::max(wb, r.push_body);
+            if (vi == 0) { sumb += r.push_body; suml += r.push_lean; sumq += r.push_hip; ++n; }
+          }
+        }
+        std::printf("h %3.0f mm exp %.2f: nominal push body %.3f lean %.3f hip %.3f (body share %.2f) | "
+                    "8 variants x2: bad %d, worst push body %.3f, rest rate %.2f, rest hip %.2f\n",
+                    h * 1000, e, sumb / n, suml / n, sumq / n, sumb / suml, bad, wb, wr, wh);
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_GRAB") != nullptr) {
+    // Held tilted in the air for 3 s after the trim was learned, then let go
+    // at that angle; learned (default) vs never learned.
+    for (int mode = 1; mode < 3; ++mode) {
+      for (double bias : {-0.10, -0.08, -0.05, 0.05, 0.08, 0.10}) {
+        for (int learn = 0; learn < 2; ++learn) {
+          Case c = withMode(Case{}, mode);
+          c.grab_s = 30.0;
+          c.duration_s = 42.0;
+          c.grab_release_bias_rad = bias;
+          if (!learn) c.learn_hold = 1000.0;
+          if (std::getenv("TL_REL")) c.level_rel = std::atof(std::getenv("TL_REL"));
+          const Result r = simulate(c);
+          std::printf("grab %-13s bias %+.2f %-9s fell=%d%s held=%d post_peak=%.3f settled=%.4f "
+                      "end_rms=%.4f x_end=%+.3f wheel_grab=%.1f putdown_w=%+.1f cmd=%+.1f\n", modeName(mode), bias,
+                      learn ? "learned" : "unlearned", r.fell, r.fell ? r.fault : "", r.held_resets,
+                      r.post_release_dev, r.settled_dev, r.body_rms_end, r.x_end, r.grab_max_wheel,
+                      r.putdown_wheel, r.putdown_cmd);
+        }
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_LEVEL") != nullptr) {
+    const bool robust_only = std::getenv("TL_ROBUST") != nullptr;
+    // Static level loop sweep: target offset from the natural resting pitch
+    // (hardware: natural -0.085 rad, target 0 -> +0.085) x scenario.
+    for (double rel : {-0.10, -0.05, 0.05, 0.085, 0.12, 0.16}) {
+      if (robust_only) break;
+      for (int sc = 0; sc < 11; ++sc) {
+        Case c = withMode(Case{}, 2);
+        c.level_rel = rel;
+        const char* sn = "stand";
+        if (sc == 1) { c.seed_error = 0.06; sn = "seed .06"; }
+        if (sc == 2) { c.seed_error = -0.06; sn = "seed -.06"; }
+        if (sc == 3) { c.drive_m_s = 0.55; sn = "drive +.55"; }
+        if (sc == 4) { c.drive_m_s = -0.55; sn = "drive -.55"; }
+        if (sc == 5) { c.push_n = 4.0; sn = "push +4"; }
+        if (sc == 6) { c.push_n = -4.0; sn = "push -4"; }
+        if (sc == 7) { c.height_low_m = 0.110; c.duration_s = 30; c.height_up_s = 40; sn = "110 mm"; }
+        if (sc == 8) { c.height_low_m = 0.078; c.duration_s = 30; c.height_up_s = 40; sn = "78 mm"; }
+        if (sc == 9) { c.wheel_tau = 0.12; c.drive_m_s = 0.75; sn = "hard stop .75"; }
+        if (sc == 10) { c.held_s = 8.0; sn = "stand flow 8 s"; }
+        const Result r = simulate(c);
+        std::printf("level %+.3f %-15s fell=%d%s held=%d body_all=%.3f end_rms=%.4f settle=%.1f "
+                    "lvl_hip=%+.3f dhip=%.3f x_end=%+.3f wcmd=%.1f\n", rel, sn, r.fell,
+                    r.fell ? r.fault : "", r.held_resets, r.body_dev_all, r.body_rms_end,
+                    r.level_settle_s, r.level_hip_end, r.max_dhip, r.x_end, r.max_wheel_cmd);
+      }
+    }
+    int n = 0, bad = 0;
+    double worst = 0.0;
+    for (const auto& v : kVariants) {
+      for (int sc = 0; sc < 3; ++sc) {
+        Case c = withMode(Case{}, 2);
+        v.apply(c);
+        c.level_rel = std::getenv("TL_REL") ? std::atof(std::getenv("TL_REL")) : 0.085;
+        if (const char* lv = std::getenv("TL_LVL")) c.level = std::atoi(lv);
+        if (sc == 1) c.drive_m_s = 0.55;
+        if (sc == 2) c.push_n = 4.0;
+        const Result r = simulate(c);
+        ++n;
+        if (r.fell || r.held_resets != 0 || r.max_wheel_cmd >= 25.0 || r.body_rms_end > 0.01) {
+          ++bad;
+          std::printf("  variant %-22s sc=%d fell=%d%s held=%d end_rms=%.4f wcmd=%.1f\n", v.name, sc,
+                      r.fell, r.fell ? r.fault : "", r.held_resets, r.body_rms_end, r.max_wheel_cmd);
+        }
+        worst = std::max(worst, r.body_rms_end);
+      }
+    }
+    std::printf("level +0.085 robustness: %d runs, %d bad, worst end rms %.4f\n", n, bad, worst);
     return 0;
   }
   if (std::getenv("TIER_NOISE") != nullptr) {
@@ -1155,6 +1382,103 @@ int main() {
     std::printf("V13 pitch estimate error driving: max %.4f rad without, %.4f with kinematics\n",
                 r[0].est_err_max, r[1].est_err_max);
     assert(!r[1].fell && r[1].est_err_max < 0.5 * r[0].est_err_max);
+  }
+  // V16: the auto-learned balance trim (Config::learn_hold_s) becomes valid
+  // standing, however badly the first engage was seeded, and the body ends
+  // level (the level loop holds it from ~3 s after release).
+  {
+    Case c = withMode(Case{}, 2);
+    c.seed_error = 0.06;  // a deliberately bad first-engage placement
+    c.duration_s = 34.0;  // past the ~27 s it takes with tier 2's hip noise
+    c.name = "V16 learned trim, seed 0.06";
+    const Result r = run(c);
+    std::printf("V16 learned trim: settled body rms (last 4 s) %.4f rad, worst %.4f\n",
+                r.body_rms_end, r.body_dev_all);
+    assert(!r.fell && r.held_resets == 0 && r.learned_valid);
+    assert(r.body_rms_end < 0.006 && r.body_dev_all < 0.03);
+  }
+  // V17: static level loop (Tier::level). The hardware body rests at -0.085
+  // rad with the legs at the pose and the target is 0, so the loop holds
+  // ~0.085 rad of hip for good; targets both ways of the natural pose must
+  // be reached (end rms), cost nothing in robustness (no fall, no held
+  // re-zero, wheel headroom), and a target past level_max_rad must clamp
+  // cleanly instead of winding up.
+  {
+    for (double rel : {-0.10, 0.085}) {
+      for (int sc = 0; sc < 5; ++sc) {
+        Case c = withMode(Case{}, 2);
+        c.level_rel = rel;
+        const char* sn = "stand";
+        if (sc == 1) { c.drive_m_s = 0.55; sn = "drive 0.55"; }
+        if (sc == 2) { c.push_n = -4.0; sn = "push 4 N"; }
+        if (sc == 3) { c.height_low_m = 0.110; c.duration_s = 30; c.height_up_s = 40; sn = "110 mm"; }
+        if (sc == 4) { c.wheel_tau = 0.12; c.drive_m_s = 0.75; sn = "hard stop 0.75"; }
+        static char name[64];
+        std::snprintf(name, sizeof name, "V17 level %+.3f %s", rel, sn);
+        c.name = name;
+        const Result r = run(c);
+        std::printf("   level: hip %+.3f, body at target after %.1f s, end rms %.4f\n",
+                    r.level_hip_end, r.level_settle_s, r.body_rms_end);
+        assert(!r.fell && r.held_resets == 0 && r.max_wheel_cmd < 25.0);
+        assert(r.body_rms_end < 0.008);
+        if (sc == 0) assert(r.level_settle_s < 4.0);  // release + settle_s + ramp_s
+      }
+    }
+    Case c = withMode(Case{}, 2);
+    c.level_rel = 0.16;
+    c.push_n = 4.0;
+    c.name = "V17 level +0.160 (past the limit)";
+    const Result r = run(c);
+    assert(!r.fell && std::abs(r.level_hip_end) <= 0.1201);
+  }
+  // V18: lifted and set down again (the operator's stand -> floor move):
+  // held in the air for 3 s tilted by hand, let go on the floor at that
+  // angle. Before 2026-10-01 the wheels raced in the air (balancer speed
+  // feedback is positive feedback there, and the held state ended within
+  // 0.24 s on a drifting pitch estimate), and the robot was set down with
+  // them at -10..-20 rad/s: fell at 0.05 rad in every mode. Now: wheels
+  // capped while held, held exit on raw accel_x, capture-point seed on the
+  // first release, learned trim after that.
+  {
+    for (int mode = 1; mode < 3; ++mode) {
+      for (double bias : {-0.08, 0.08}) {
+        for (int learn = 0; learn < 2; ++learn) {
+          Case c = withMode(Case{}, mode);
+          c.grab_s = 30.0;
+          c.duration_s = 42.0;
+          c.grab_release_bias_rad = bias;
+          if (!learn) c.learn_hold = 1000.0;
+          static char name[80];
+          std::snprintf(name, sizeof name, "V18 %s set down %+.2f %s", modeName(mode), bias,
+                        learn ? "learned" : "first");
+          c.name = name;
+          const Result r = run(c);
+          std::printf("   set down: wheels %+.2f rad/s, travel %+.3f m, end rms %.4f\n",
+                      r.putdown_wheel, r.x_end, r.body_rms_end);
+          assert(!r.fell && r.held_resets == 1 && std::abs(r.putdown_wheel) < 1.0);
+          assert(r.body_rms_end < 0.006);
+          assert(std::abs(r.x_end) < (learn ? 0.12 : 0.7));
+        }
+      }
+    }
+  }
+  // V19: pushes the robot can take (wheel speed stays under its cap), short
+  // and held on like a hand, must never look held/lifted: a re-zero turns
+  // tier 2 off for settle_s + ramp_s. Hardware 2026-09-30: 31 of 33 re-zeros
+  // were in the air (stand, hands), none in a recoverable floor push.
+  {
+    for (double h : {0.0, 0.136}) {
+      for (double len : {0.3, 0.6, 1.0}) {
+        Case c = withMode(Case{}, 2);
+        if (h > 0) { c.height_low_m = h; c.height_low_s = 3.0; c.height_up_s = 60.0; }
+        c.push_n = 4.0; c.push_start_s = 12.0; c.push_end_s = 12.0 + len; c.duration_s = 20.0;
+        static char name[64];
+        std::snprintf(name, sizeof name, "V19 push 4 N x %.1f s at %s", len, h > 0 ? "136" : "189");
+        c.name = name;
+        const Result r = run(c);
+        assert(!r.fell && r.held_resets == 0);
+      }
+    }
   }
   std::puts("v3_tier_tests: all checks passed");
   return 0;

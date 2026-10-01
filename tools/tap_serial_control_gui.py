@@ -545,10 +545,19 @@ class TapSerialControlApp:
             tv = re.search(r"\btv=([-+0-9.]+)", line)
             dhip = re.search(r"\bdhip=([-+0-9.]+)", line)
             ta = re.search(r"\bta=([0-9.]+)", line)
+            pitch = re.search(r"\bpitch=([-+0-9.]+)", line)
+            lvl = re.search(r"\blvl=([-+0-9.]+)", line)
+            held = re.search(r"\bho=([01])", line)
             if tv and dhip and ta:
-                self.tier_var.set(f"Con lắc ảo θv: {float(tv.group(1)):+.3f} rad   "
-                                  f"Hông tầng 2: {float(dhip.group(1)):+.3f} rad   "
-                                  f"quyền: {float(ta.group(1)):.2f}")
+                text = (f"Con lắc ảo θv: {float(tv.group(1)):+.3f} rad   "
+                        f"Hông tầng 2: {float(dhip.group(1)):+.3f} rad   "
+                        f"quyền: {float(ta.group(1)):.2f}")
+                if pitch and lvl:
+                    text += (f"\nThân pitch: {float(pitch.group(1)):+.3f} rad   "
+                             f"Hông cân thân (tĩnh): {float(lvl.group(1)):+.3f} rad")
+                if held and held.group(1) == "1":
+                    text += "   [đang bị giữ/nhấc: bánh giới hạn]"
+                self.tier_var.set(text)
         if match := MODE_RE.search(line):
             self.mode_var.set(match.group(1))
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")

@@ -143,13 +143,37 @@ class V3Controller {
     // while the hips stay a ~3-4 Hz servo. Two-body sim: the full share
     // rang at <= 110 mm (1 Hz body/leg wobble); 1.5 keeps 78-150 mm calm.
     float height_exp = 1.5F;
+    // ...but only where the ringing lives: the exponent blends from
+    // height_exp_tall at pendulum ratio >= ratio_tall to height_exp at
+    // <= ratio_low. Hardware 2026-09-30 at 136 mm (ratio 0.72): the body
+    // still took ~40 % of a push (1.5 -> share 0.61); 1.5 everywhere is only
+    // needed <= 110 mm (ratio 0.58), and 1.0 everywhere rang at 78 mm.
+    float height_exp_tall = 0.5F;
+    float ratio_tall = 0.80F;
+    float ratio_low = 0.55F;
     float lead_s = 0.06F;      // lean-rate lead against the hip servo lag
     // The hips take the lean's changes; a lean held longer than about this
     // [s] (a balance-trim error while it still learns, a slope) goes back to
     // the body, as in v3.2. Without it the body copied every trim error
     // (seed 0.08 rad off: body 0.08 off for > 10 s) and spent hip range on it.
+    // The static body attitude is the level loop's job (below), which
+    // measures the body itself instead of trusting the trim.
     float hpf_s = 3.0F;
-    float max_rad = 0.15F;     // |hip offset| from the static height pose
+    // Static "gimbal" (SET tlvl, needs trunk): a slow integrator on the IMU
+    // body pitch adds its own hip offset until the body sits at
+    // level_pitch_rad, whatever the release angle, trim quality, height pose,
+    // hand-arranged leg zero or CoM model error. Tier 1 keeps the CoM over
+    // the axle through theta_v, so turning the hip only re-orients the body
+    // against the legs; it does not unbalance the robot. The high-passed
+    // dynamic law above stays the fast part. Hardware 2026-09-30 logs: the
+    // free-standing body sat at -0.085 rad with the legs at the pose (one
+    // session +0.022), so level 0 costs ~0.085 rad of hip at J ~= 1.
+    bool level = true;
+    float level_pitch_rad = 0.0F;  // SET tlevel: target body pitch (IMU frame)
+    float level_tau_s = 1.5F;      // SET tltau: integrator time constant
+    float level_max_rad = 0.12F;   // SET tlvmax: |static hip offset| allowed
+    float level_lpf_hz = 0.5F;     // body pitch low-pass feeding the integrator
+    float max_rad = 0.15F;     // |dynamic hip offset| from the static height pose
     float rate_rad_s = 3.0F;   // hip command slew
     float ramp_s = 1.0F;       // tier-2 authority ramp 0 <-> 1
     // Tier 2 waits this long after the balance loop engages: the release
@@ -276,6 +300,40 @@ class V3Controller {
     float lqr_trim_gain = 0.01F;
     std::uint64_t lock_settle_us = 1'200'000U;  // leg ramp + settle before wheels
     float fall_pitch_rad = 0.60F;
+    // Auto-learned balance trim (theta_v-referenced, height-independent
+    // while virtual_pitch is on). Once the robot has held its ground
+    // position within learn_position_tol_m and rotated less than
+    // learn_rate_tol_rad_s for learn_hold_s, the current trim is
+    // remembered. Every later release this power-up (held/lifted -> free)
+    // then walks the trim from the hold angle to the learned one over
+    // learn_release_s, instead of balancing around whatever angle the
+    // operator happened to put it down at and creeping back on the slow
+    // position integral for 15-20 s (hardware 2026-10-01: nose-down or
+    // nose-up before settling, depending on the release angle). While
+    // still held the trim keeps tracking the hold angle: a learned trim
+    // there made the wheels fight the hand and wind up (two-body sim: fell
+    // after a 3 s hold at >= 0.075 rad). Needs virtual_pitch; inert
+    // otherwise.
+    float learn_position_tol_m = 0.03F;
+    // Ordinary standing has continuous small pitch-rate noise (LQR/wheel
+    // deadband micro-corrections, seen up to ~0.1-0.2 rad/s even while
+    // genuinely calm) - too tight a tolerance here means the hold timer
+    // resets before ever accumulating learn_hold_s.
+    float learn_rate_tol_rad_s = 0.20F;
+    float learn_hold_s = 2.5F;
+    float learn_tau_s = 4.0F;  // slow re-tracking once learned (adapts, no jumps)
+    float learn_release_s = 0.3F;
+    // Wheel ground-speed cap while held/lifted (after a held re-zero, until
+    // the body turns on its own again). In the air a balancer's own speed
+    // feedback is positive feedback (it accelerates towards its motion to
+    // lean back), so the wheels raced to the 0.8 m/s cap and re-zeroed every
+    // 0.6-1 s on the stand (hardware 2026-09-30: axle_v +-0.6-0.9 m/s at
+    // every re-zero) - and the robot was put on the floor with its wheels
+    // spinning at whatever phase that cycle was in (two-body sim: fell
+    // after a 3 s hold put down at 0.05 rad with the wheels at -10..-20
+    // rad/s). A free robot on the floor lifts the cap within ~0.1 s: it
+    // tips, and the body rate leaves the held state.
+    float held_wheel_cap_m_s = 0.10F;
     // Below the 0.8 m/s ground-speed cap (20 rad/s): a lifted or held robot
     // saturates the wheels at the cap and must still trip this guard.
     float runaway_wheel_rad_s = 15.0F;
@@ -367,12 +425,18 @@ class V3Controller {
   [[nodiscard]] float balanceRef() const noexcept {
     return config_.algo == Algo::Pid ? pid_theta_b_ : lqr_.balanceTrim();
   }
+  // Auto-learned balance trim (see Config::learn_hold_s); for GET/telemetry.
+  [[nodiscard]] bool learnedTrimValid() const noexcept { return learned_trim_valid_; }
+  [[nodiscard]] float learnedTrim() const noexcept { return learned_trim_rad_; }
   [[nodiscard]] float pitchRef() const noexcept { return pid_ref_; }
   [[nodiscard]] float positionError() const noexcept { return pid_x_ - pid_x_target_; }
   // Ready sub-phase for the log: 0 wait move, 1 wait still, 2 armed.
   [[nodiscard]] int readyPhase() const noexcept { return ready_phase_; }
   // Number of held/lifted re-zeroes since the balance loop engaged.
   [[nodiscard]] int heldResets() const noexcept { return held_resets_; }
+  // Held/lifted state: outer loop off (wheels capped), and still quiet.
+  [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
+  [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
   [[nodiscard]] float heightSpeed() const noexcept { return height_speed_m_s_; }
   [[nodiscard]] bool legsHeld() const noexcept { return legs_held_; }
@@ -387,6 +451,8 @@ class V3Controller {
   [[nodiscard]] float virtualPitchRate() const noexcept { return theta_v_rate_; }
   [[nodiscard]] float trunkHip() const noexcept { return dhip_; }
   [[nodiscard]] float trunkAuthority() const noexcept { return trunk_alpha_; }
+  // Static level loop's share of trunkHip() (Tier::level).
+  [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
   // Hip offset to send to the legs (height pose + tier 2), every state.
   [[nodiscard]] float hipCommand() const noexcept { return pose_.hip_offset_rad + dhip_; }
   // World-frame velocity of the IMU point for the pitch estimator's
@@ -485,6 +551,12 @@ class V3Controller {
   float dhip_ = 0.0F;
   float trunk_alpha_ = 0.0F;
   float lean_lp_ = 0.0F;  // slow part of the lean (tier-2 high-pass)
+  // Static level loop (Tier::level): integrated hip offset, its authority,
+  // the filtered body pitch it integrates, and whether it has been started.
+  float level_i_ = 0.0F;
+  float level_beta_ = 0.0F;
+  float body_lp_ = 0.0F;
+  bool level_init_ = false;
   float com_hang_m_ = 0.0F;  // CoM above the axle at the hang pose
   float chain_rate_meas_ = 0.0F;
   float body_pitch_ = 0.0F;  // IMU body pitch (the input pitch may be theta_v)
@@ -521,7 +593,9 @@ class V3Controller {
   float held_max_rate_ = 0.0F;
   float held_accel_sum_ = 0.0F;
   int held_accel_n_ = 0;
-  float body_accel_f_ = 0.0F;  // filtered horizontal body acceleration
+  float body_accel_f_ = 0.0F;
+  float ax_f_ = 0.0F;         // 5 Hz body-frame accel_x
+  float held_ax_ref_ = 0.0F;  // ax_f_ at the last held re-zero  // filtered horizontal body acceleration
   int held_free_ticks_ = 0;
   int held_resets_ = 0;
   // After a held re-zero: command 0 until the wheels have stopped (or the
@@ -542,6 +616,13 @@ class V3Controller {
 
   void engageBalance(const Input& in, float seed);
   void heldRezero(const Input& in);
+  [[nodiscard]] float releaseBalance(const Input& in) const;
+  void updateLearnedTrim(const Input& in, float ex, float current_trim_rad);
+  float learned_trim_rad_ = 0.0F;
+  bool learned_trim_valid_ = false;
+  std::uint64_t learn_since_us_ = 0U;
+  bool trim_blend_ = false;       // walking the trim to the learned one after a release
+  float trim_blend_rate_ = 0.0F;  // [rad/s]
   std::array<float, 2> pidUpdate(const Input& in, const Command& cmd);
   std::array<float, 2> lqrUpdate(const Input& in, const Command& cmd);
 };

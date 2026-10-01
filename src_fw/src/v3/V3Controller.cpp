@@ -53,6 +53,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
   // release test ("moves on its own again") stays on the body rate: a held
   // body does not turn whatever the hips do.
   body_rate_ = raw.pitch_rate_rad_s;
+  ax_f_ += std::clamp(2.0F * 3.14159265F * 5.0F * raw.dt_s, 0.0F, 1.0F) *
+      (raw.accel_x_m_s2 - ax_f_);
   // Axle motion of a rolling wheel on a rigid (locked) leg: R*(wheel + pitch).
   const float mean_rate = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
   const float mean_pos = 0.5F * (raw.wheel_pos_rad[0] + raw.wheel_pos_rad[1]);
@@ -87,7 +89,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
   Output out{};
   if (cmd.disable) {
     legs_held_ = false;
-    dhip_ = trunk_alpha_ = 0.0F;  // legs released: no tier-2 offset left over
+    dhip_ = trunk_alpha_ = level_beta_ = 0.0F;  // legs released: no tier-2 offset left over
     state_ = State::Idle;
     out.state = state_;
     return out;
@@ -168,6 +170,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
         // the floor > a stored BALANCE measurement > the pitch right now.
         engageBalance(in, ready_phase_ == 2 ? armed_pitch_
                           : balance_set_    ? balance_rad_
+                          : learned_trim_valid_ ? learned_trim_rad_
                                             : armed_seed);
       } else {
         out.state = state_;
@@ -246,6 +249,34 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd) 
   return out;
 }
 
+void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_trim_rad) {
+  // Only while genuinely free, calm and standing (not driving): that is
+  // exactly when the current trim IS the true balance angle, not just a
+  // transient guess. tierVirtual() gate: without the virtual pendulum the
+  // trim is not height-normalized, so a value learned at one height would
+  // be wrong at another.
+  const bool ready = tierVirtual() && state_ == State::Balancing && !held_outer_off_ &&
+      !held_quiet_ && !pid_driving_ &&
+      std::abs(ex) < config_.learn_position_tol_m &&
+      std::abs(in.pitch_rate_rad_s) < config_.learn_rate_tol_rad_s;
+  if (!ready) {
+    learn_since_us_ = 0U;
+    return;
+  }
+  if (learn_since_us_ == 0U) learn_since_us_ = in.now_us;
+  if (in.now_us - learn_since_us_ <
+      static_cast<std::uint64_t>(std::max(config_.learn_hold_s, 0.0F) * 1.0e6F)) {
+    return;
+  }
+  if (!learned_trim_valid_) {
+    learned_trim_rad_ = current_trim_rad;
+    learned_trim_valid_ = true;
+  } else {
+    const float a = std::clamp(in.dt_s / std::max(config_.learn_tau_s, 0.1F), 0.0F, 1.0F);
+    learned_trim_rad_ += a * (current_trim_rad - learned_trim_rad_);
+  }
+}
+
 void V3Controller::engageBalance(const Input& in, float seed) {
   state_ = State::Balancing;
   state_since_us_ = in.now_us;
@@ -269,10 +300,25 @@ void V3Controller::engageBalance(const Input& in, float seed) {
   held_resets_ = 0;
   held_quiet_ = false;
   held_outer_off_ = false;
+  trim_blend_ = false;
+}
+
+float V3Controller::releaseBalance(const Input& in) const {
+  // Let go on the floor, the robot tips away from its balance point on the
+  // pendulum's divergent mode, theta - theta_eq = rate / omega (capture
+  // point). The held state ends only once it has tipped (rate or accel
+  // test), ~0.02 rad past where it was put down: seeding the trim from the
+  // pitch at that moment balanced around that tipped angle and rolled
+  // 0.6 m before the position integral brought it back (physics-sim T8).
+  const float omega = std::sqrt(9.80665F / std::max(pose_.com_above_axle_m, 0.05F));
+  return in.pitch_rad - std::clamp(in.pitch_rate_rad_s / omega, -0.1F, 0.1F);
 }
 
 void V3Controller::heldRezero(const Input& in) {
   ++held_resets_;
+  trim_blend_ = false;
+  held_ax_ref_ = ax_f_;
+  held_free_ticks_ = 0;
   pid_cmd_m_s_ = 0.0F;
   pid_v_filt_ = 0.0F;
   pid_x0_ = ground_x_;
@@ -343,9 +389,16 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   // The body moves on its own again (released on the floor): outer loop on.
   // Robot accelerometer noise: std 0.065 m/s^2 still, 0.18 with the wheels
   // spinning in the air (2026-09-27 log), hence 5 Hz and 50 ms sustained.
-  held_free_ticks_ = std::abs(body_accel_f_) > 0.15F ? held_free_ticks_ + 1 : 0;
+  // Measured as the change of the raw body-frame accel_x since the held
+  // re-zero, not the horizontal force through the pitch estimate: a still
+  // body keeps its accel_x, while the gyro-dominant estimate drifts while
+  // held and g * 0.015 rad of drift already read as "free" (two-body sim:
+  // left the held state in the air 0.24 s after every re-zero, wheels
+  // raced again).
+  held_free_ticks_ = std::abs(ax_f_ - held_ax_ref_) > 0.15F ? held_free_ticks_ + 1 : 0;
   if (held_outer_off_ && (std::abs(body_rate_) > 0.15F || held_free_ticks_ >= 25)) {
     held_outer_off_ = false;
+    pid_seed_ = pid_theta_b_ = releaseBalance(in) - ffPitch();
   }
   if (held_outer_off_) {
     // Held (stand, hands): nothing to balance, so the balance angle tracks
@@ -358,6 +411,7 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
     pid_x_ = pid_x_target_ = 0.0F;
   }
   const float ex = pid_x_ - pid_x_target_;
+  updateLearnedTrim(in, ex, pid_theta_b_ + ffPitch());
   // Outer loop: speed and position error -> lean correction. Too far forward
   // needs a backward (negative) lean, which the inner loop gets by
   // accelerating. theta_b integrates the position error slowly: it is the
@@ -421,8 +475,13 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
       std::clamp(cmd.yaw_rad_s, -config_.lqr.max_yaw_rate_rad_s, config_.lqr.max_yaw_rate_rad_s);
   const float sign = config_.lqr.left_wheel_sign;
   auto comp = [&](float w) {
-    // Held: no deadband push, so a near-zero command leaves the wheels still.
-    if (p.deadband_comp_rad_s <= 0.0F || held_outer_off_) return w;
+    // Held: no deadband push, so a near-zero command leaves the wheels
+    // still, and no race in the air (Config::held_wheel_cap_m_s).
+    if (held_outer_off_) {
+      const float cap = std::max(config_.held_wheel_cap_m_s, 0.0F) / radius;
+      return std::clamp(w, -cap, cap);
+    }
+    if (p.deadband_comp_rad_s <= 0.0F) return w;
     return w + p.deadband_comp_rad_s * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
   };
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
@@ -474,15 +533,36 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
       in.accel_z_m_s2 * std::sin(body_pitch_);
   body_accel_f_ += std::clamp(2.0F * 3.14159265F * 5.0F * in.dt_s, 0.0F, 1.0F) *
       (a_h - body_accel_f_);
-  held_free_ticks_ = std::abs(body_accel_f_) > 0.15F ? held_free_ticks_ + 1 : 0;
+  held_free_ticks_ = std::abs(ax_f_ - held_ax_ref_) > 0.15F ? held_free_ticks_ + 1 : 0;
   if (held_outer_off_ && (std::abs(body_rate_) > 0.15F || held_free_ticks_ >= 25)) {
     held_outer_off_ = false;
+    lqr_.setBalanceTrim(releaseBalance(in) - ffPitch());
+    // Free again: walk the trim from the hold angle to the learned balance
+    // angle (Config::learn_release_s) instead of balancing around wherever
+    // the operator happened to put it down.
+    trim_blend_ = learned_trim_valid_ && tierVirtual();
+    if (trim_blend_) {
+      trim_blend_rate_ = std::max(
+          std::abs(learned_trim_rad_ - ffPitch() - lqr_.balanceTrim()) /
+              std::max(config_.learn_release_s, 0.01F),
+          0.01F);
+    }
   }
   if (held_outer_off_) {
     // Held (stand, hands): the balance angle tracks the body and the anchor
     // stays here, so nothing is spent balancing a body that isn't falling.
     lqr_.setBalanceTrim(in.pitch_rad - ffPitch());
     lqr_x_target_m_ = ground_x_;
+  } else if (trim_blend_) {
+    const float goal = learned_trim_rad_ - ffPitch();
+    const float d = goal - lqr_.balanceTrim();
+    const float step = trim_blend_rate_ * in.dt_s;
+    if (std::abs(d) <= step) {
+      lqr_.setBalanceTrim(goal);
+      trim_blend_ = false;
+    } else {
+      lqr_.setBalanceTrim(lqr_.balanceTrim() + std::copysign(step, d));
+    }
   } else if (!pid_driving_ &&
              std::abs(in.pitch_rad - (lqr_.balanceTrim() + ffPitch())) < p.corr_max_rad) {
     // Slow integral of the ground-position error into the balance trim -
@@ -497,6 +577,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     // the trim up during that fight overshot and fell (physics-sim T15).
     const float ex = ground_x_ - lqr_x_target_m_;
     lqr_.setBalanceTrim(lqr_.balanceTrim() - config_.lqr_trim_gain * ex * in.dt_s);
+    updateLearnedTrim(in, ex, lqr_.balanceTrim() + ffPitch());
   }
   lqr_.reanchorPosition(lqr_x_target_m_);
 
@@ -624,7 +705,11 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   // lives (see input_cost_scale in defaultV3Config).
   const float dbc = config_.lqr_deadband_comp_rad_s;
   auto comp = [&](float w) {
-    if (dbc <= 0.0F || held_outer_off_) return w;
+    if (held_outer_off_) {
+      const float cap = std::max(config_.held_wheel_cap_m_s, 0.0F) / radius;
+      return std::clamp(w, -cap, cap);
+    }
+    if (dbc <= 0.0F) return w;
     return w + dbc * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
   };
   return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel),
@@ -727,10 +812,13 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   // how far alpha has already faded (see Tier::sat_margin).
   const float ratio = std::clamp(pose_.com_above_axle_m / std::max(com_hang_m_, 0.01F),
                                  0.1F, 1.0F);
-  const float share = t.lean_share * std::pow(ratio, std::max(t.height_exp, 0.0F));
+  const float span = std::max(t.ratio_tall - t.ratio_low, 1.0e-3F);
+  const float low_w = std::clamp((t.ratio_tall - ratio) / span, 0.0F, 1.0F);
+  const float exponent = t.height_exp_tall + low_w * (t.height_exp - t.height_exp_tall);
+  const float share = t.lean_share * std::pow(ratio, std::max(exponent, 0.0F));
+  const float jh = std::max(j_hip_, 0.2F);
   const float full_want = share *
-      (lean_plan_ahead + residual - lean_lp_ + t.lead_s * lean_rate_f_) /
-      std::max(j_hip_, 0.2F);
+      (lean_plan_ahead + residual - lean_lp_ + t.lead_s * lean_rate_f_) / jh;
   const float max_rad = std::max(t.max_rad, 1.0e-3F);
   const float margin = std::clamp(t.sat_margin, 0.0F, 0.99F);
   const float mag_ratio = std::abs(full_want) / max_rad;
@@ -750,7 +838,33 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   const float down = t.sat_fade_s > 1.0e-3F ? in.dt_s / t.sat_fade_s : 1.0F;
   const float diff = target - trunk_alpha_;
   trunk_alpha_ = std::clamp(trunk_alpha_ + std::clamp(diff, -down, up), 0.0F, 1.0F);
-  const float want = std::clamp(trunk_alpha_ * full_want, -max_rad, max_rad);
+  const float dyn = std::clamp(trunk_alpha_ * full_want, -max_rad, max_rad);
+
+  // Static level loop (Tier::level). body = theta_v - com_line terms, and
+  // tier 1 holds theta_v at the balance point, so a hip offset of
+  // (body - target) / J re-orients the body by exactly that much: the
+  // integrator's closed loop is first order with level_tau_s at any height
+  // (J cancels). Started once from the measured error (the first
+  // release of a power-up levels over ramp_s instead of 3 * tau), then only
+  // integrates with the dynamic part at full authority and the wheels
+  // clear of their cap: a faded or saturated tier 2 hands lean back to the
+  // body, which is not a posture error.
+  const float lp = std::clamp(2.0F * 3.14159265F * t.level_lpf_hz * in.dt_s, 0.0F, 1.0F);
+  body_lp_ += lp * (body_pitch_ - body_lp_);
+  const bool level_on = on && t.level;
+  const float lmax = std::max(t.level_max_rad, 0.0F);
+  if (level_on && !level_init_) {
+    level_i_ = std::clamp((body_lp_ - t.level_pitch_rad) / jh, -lmax, lmax);
+    level_init_ = true;
+  } else if (level_on && level_beta_ >= 1.0F && trunk_alpha_ >= 1.0F && !wheel_saturating) {
+    level_i_ = std::clamp(level_i_ + in.dt_s / std::max(t.level_tau_s, 0.05F) *
+                                         (body_lp_ - t.level_pitch_rad) / jh,
+                          -lmax, lmax);
+  }
+  const float level_diff = (level_on ? 1.0F : 0.0F) - level_beta_;
+  level_beta_ = std::clamp(level_beta_ + std::clamp(level_diff, -down, up), 0.0F, 1.0F);
+
+  const float want = dyn + level_beta_ * level_i_;
   const float step = std::max(t.rate_rad_s, 0.0F) * in.dt_s;
   dhip_ += std::clamp(want - dhip_, -step, step);
 }

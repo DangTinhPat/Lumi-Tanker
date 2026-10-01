@@ -313,6 +313,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "trate")) ctrl_.config().tier.rate_rad_s = std::clamp(v, 0.1F, 6.0F);
     else if (!std::strcmp(key, "thpf")) ctrl_.config().tier.hpf_s = std::clamp(v, 0.0F, 30.0F);
     else if (!std::strcmp(key, "texp")) ctrl_.config().tier.height_exp = std::clamp(v, 0.0F, 4.0F);
+    else if (!std::strcmp(key, "texpt")) ctrl_.config().tier.height_exp_tall = std::clamp(v, 0.0F, 4.0F);
     else if (!std::strcmp(key, "cdx")) ctrl_.config().tier.body_com_dx_m = std::clamp(v * 0.001F, -0.06F, 0.06F);
     else if (!std::strcmp(key, "timu")) ctrl_.config().tier.imu_kinematic = v >= 0.5F;
     else if (!std::strcmp(key, "tvg")) ctrl_.config().tier.joint_rate_gain = std::clamp(v, 0.0F, 1.0F);
@@ -322,6 +323,12 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
     else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 0.8F);
     else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
+    // Static level loop (needs trunk): body pitch target and its limits.
+    else if (!std::strcmp(key, "tlvl")) ctrl_.config().tier.level = v >= 0.5F;
+    else if (!std::strcmp(key, "tlevel")) ctrl_.config().tier.level_pitch_rad = std::clamp(v, -0.30F, 0.30F);
+    else if (!std::strcmp(key, "tltau")) ctrl_.config().tier.level_tau_s = std::clamp(v, 0.2F, 10.0F);
+    else if (!std::strcmp(key, "tlvmax")) ctrl_.config().tier.level_max_rad = std::clamp(v, 0.0F, 0.25F);
+    else if (!std::strcmp(key, "hcap")) ctrl_.config().held_wheel_cap_m_s = std::clamp(v, 0.0F, 0.8F);
     else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else {
@@ -388,13 +395,17 @@ void AppV3::printTunables() noexcept {
                 ctrl_.config().height.rate_m_s * 1000.0F);
   const auto& tier = ctrl_.config().tier;
   Serial.printf("V3 TUNE tiers: vpitch=%d trunk=%d (LQR only) tshare=%.2f tlead=%.3f tmax=%.3f "
-                "trate=%.1f thpf=%.1f texp=%.2f cdx=%.1f mm timu=%d tvg=%.2f\n",
+                "trate=%.1f thpf=%.1f texp=%.2f texpt=%.2f cdx=%.1f mm timu=%d tvg=%.2f\n",
                 tier.virtual_pitch ? 1 : 0, tier.trunk ? 1 : 0, tier.lean_share, tier.lead_s,
-                tier.max_rad, tier.rate_rad_s, tier.hpf_s, tier.height_exp,
+                tier.max_rad, tier.rate_rad_s, tier.hpf_s, tier.height_exp, tier.height_exp_tall,
                 tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain);
   Serial.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
                 "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
                 tier.plan_vmax_m_s, tier.preview_s);
+  Serial.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "
+                "hcap=%.2f m/s learned_trim=%s%+.4f\n", tier.level ? 1 : 0, tier.level_pitch_rad,
+                tier.level_tau_s, tier.level_max_rad, ctrl_.config().held_wheel_cap_m_s,
+                ctrl_.learnedTrimValid() ? "" : "(none) ", ctrl_.learnedTrim());
   Serial.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
                 tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
@@ -809,7 +820,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     Serial.printf("TR t=%lu mode=%s pitch=%+.3f rate=%+.2f wcmd=[%+.2f %+.2f] "
                   "wmeas=[%+.2f %+.2f] axle_v=%+.3f axle_x=%+.3f trim=%+.4f "
                   "legs=[%+.3f %+.3f %+.3f %+.3f] ref=%+.4f ex=%+.3f ready=%d held=%d "
-                  "h=%.1f htgt=%.1f knee=%+.3f tv=%+.4f dhip=%+.4f ta=%.2f me=%+.3f\n",
+                  "h=%.1f htgt=%.1f knee=%+.3f tv=%+.4f dhip=%+.4f ta=%.2f me=%+.3f "
+                  "lvl=%+.4f ho=%d lt=%+.4f/%d\n",
                   static_cast<unsigned long>((now_us - state_since_us_) / 1000U),
                   tap_fw::v3::toString(out.state), imu_.pitch_rad, imu_.pitch_rate_rad_s,
                   last_wheel_cmd_[0], last_wheel_cmd_[1], in.wheel_rad_s[0], in.wheel_rad_s[1],
@@ -819,7 +831,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   ctrl_.heldResets(), ctrl_.legPose().axle_below_hip_m * 1000.0F,
                   ctrl_.heightTarget() * 1000.0F, ctrl_.legPose().knee_offset_rad,
                   ctrl_.virtualPitch(), ctrl_.trunkHip(), ctrl_.trunkAuthority(),
-                  ctrl_.legModelError());
+                  ctrl_.legModelError(), ctrl_.levelHip(), ctrl_.heldOuterOff() ? 1 : 0,
+                  ctrl_.learnedTrim(), ctrl_.learnedTrimValid() ? 1 : 0);
   }
 }
 
