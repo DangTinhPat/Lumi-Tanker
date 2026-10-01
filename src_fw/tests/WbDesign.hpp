@@ -57,12 +57,15 @@ struct WbWeights {
   // episodes disjoint from the TIER_GENERAL check (WB_GEN) - a pass on the
   // fixed scenarios alone overfit (push body 0.008 rad, but 3 falls / 12
   // false holds in 48 random episodes) - with the body steadiness weighted
-  // 2x (WB_BODYW). The comments give the weight as 1/size^2 of an
-  // acceptable value.
-  double pitch = 312.5;           // 0.057 rad
+  // 2x (WB_BODYW). Re-searched on the measured wheel (20 ms + 0.035 s,
+  // reading 55 ms old, predictor tau 0.06) with the wheel at its cap on
+  // the wheel variants too (WB_SAT: hard stop, 6 N push, 84 mm cruise):
+  // falls in the score 4 -> 1. The comments give the weight as 1/size^2
+  // of an acceptable value.
+  double pitch = 1250.0;          // 0.028 rad
   double pitch_rate = 0.125;      // 2.8 rad/s
   double lean = 6.25;             // 0.4 rad
-  double pos = 1.5625;            // 0.8 m
+  double pos = 6.25;              // 0.4 m
   double vel = 2.7778;            // 0.6 m/s
   double pos_int = 2.7778;        // 0.6
   double hip = 2.7778;            // 0.6 rad
@@ -72,10 +75,10 @@ struct WbWeights {
   double wheel_cmd = 0.0011111;   // 30 rad/s
   double hip_cmd = 12.5;          // 0.28 rad
   double knee_cmd = 11377.8;      // 0.0094 rad
-  double wheel_step = 4.0;        // 0.5 rad/s
-  double hip_step = 312.5;        // 0.057 rad
-  double knee_step = 10000.0;     // 0.01 rad
-  double body_vacc = 0.027778;    // 6 m/s^2: body CoM vertical acceleration
+  double wheel_step = 16.0;       // 0.25 rad/s
+  double hip_step = 78.125;       // 0.11 rad
+  double knee_step = 40000.0;     // 0.005 rad
+  double body_vacc = 0.0069445;   // 12 m/s^2: body CoM vertical acceleration
   double body_hacc = 0.0;                // body CoM horizontal acceleration
   double body_z = 0.0;                   // body CoM height off the pose [m] (knee holds it)
 };
