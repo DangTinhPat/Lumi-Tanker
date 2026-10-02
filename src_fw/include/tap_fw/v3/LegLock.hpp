@@ -18,6 +18,9 @@ namespace motor_transport = robot_control::motor_transport;
 // position/velocity/integrator loop holds Set_Input_Pos. The target ramps
 // smoothly from wherever the leg is at engage to 0, then stays at 0.
 // MIT mode is a fallback: position 0 with a fixed Kp/Kd spring.
+// Knee MIT (Config::knee_mit, the controller's knee VMC): the knees alone run
+// the MIT law with per-side gains and feed-forwards (setKneeImpedance); the
+// hips keep `mode`.
 class LegLock {
  public:
   enum class Mode { Position, Mit };
@@ -33,6 +36,13 @@ class LegLock {
     float mit_kp_nm_per_rad = 15.0F;
     float mit_kd_nm_s_per_rad = 0.5F;
     float gear_ratio = 8.0F;               // rotor turns per joint turn
+    bool knee_mit = false;                 // knees on MIT (set before engage)
+  };
+  // Knee MIT gains and feed-forwards, core frame (V3Controller::Output).
+  struct KneeMit {
+    float kp = 40.0F, kd = 1.0F;           // stiff until the controller says otherwise
+    float tff_nm = 0.0F;
+    float vel_rad_s = 0.0F;
   };
 
   static constexpr std::size_t kLegs = 4U;  // board::MotorIds{}.leg_can order
@@ -78,6 +88,11 @@ class LegLock {
   void setResendPeriod(std::uint32_t period_us) noexcept {
     config_.resend_period_us = period_us;
   }
+  void setKneeMit(bool on) noexcept { config_.knee_mit = on; }
+  // [left, right]; held until the next call.
+  void setKneeImpedance(const std::array<KneeMit, 2>& knees) noexcept { knee_mit_ = knees; }
+  [[nodiscard]] const std::array<KneeMit, 2>& kneeImpedance() const noexcept { return knee_mit_; }
+  void resetKneeImpedance() noexcept { knee_mit_ = {}; }
   void setMitGains(float kp, float kd) noexcept {
     config_.mit_kp_nm_per_rad = kp;
     config_.mit_kd_nm_s_per_rad = kd;
@@ -90,6 +105,8 @@ class LegLock {
   std::array<float, 2> side_knee_rad_{};
   std::array<float, 2> side_hip_rate_{};
   std::array<float, 2> side_knee_rate_{};
+  std::array<KneeMit, 2> knee_mit_{};
+  [[nodiscard]] bool jointMit(std::size_t leg) const noexcept;
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};

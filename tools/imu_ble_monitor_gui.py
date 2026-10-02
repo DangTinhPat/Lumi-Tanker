@@ -34,6 +34,14 @@ IMU_RE = re.compile(
 )
 WHO_RE = re.compile(r"WHO_AM_I=0x([0-9a-fA-F]+)\s+\((PASS|FAIL)\)")
 CTRL_RE = re.compile(r"CTRL\s+mode=(?P<mode>[A-Za-z]+)\s+enable=(?P<enable>[01])")
+CONTROL_RE = re.compile(
+    r"CONTROL\s+mode=(?P<mode>[A-Za-z]+)\s+enable=(?P<enable>[01])"
+)
+SENS_RE = re.compile(
+    r"SENS\s+imu_age=(?P<age>-?\d+)ms\s+seed=(?P<seed>[01])\s+"
+    r"can_legs=(?P<legs>[01])\s+uart_wheels=(?P<wheels>[01])\s+"
+    r"joint_q=\[(?P<joints>[^]]+)\]\s+pitch=(?P<pitch>[+-]?\d+(?:\.\d+)?)"
+)
 GAMEPAD_RE = re.compile(
     r"GAMEPAD\s+" +
     r"\s+".join(f"{name}=(?P<{name}>[01])" for name in (
@@ -72,6 +80,7 @@ class MonitorGui:
             "gamepad_events": 0,
             "first_sample_s": 0.0,
             "last_sample_s": 0.0,
+            "latest_age_ms": None,
         }
         self.history = deque(maxlen=300)
         self.charts: dict[str, tuple[tk.Canvas, float, float, str, str]] = {}
@@ -168,7 +177,14 @@ class MonitorGui:
     def connect(self) -> None:
         self.disconnect()
         try:
-            self.serial_port = serial.Serial(self.port_var.get(), self.baud, timeout=0.2)
+            # CP2102's DTR/RTS lines can reset the ESP32-S3 when a monitor opens.
+            # Keep them inactive so starting this read-only GUI does not reset it.
+            port = serial.Serial(port=None, baudrate=self.baud, timeout=0.2)
+            port.port = self.port_var.get()
+            port.dtr = False
+            port.rts = False
+            port.open()
+            self.serial_port = port
             self.connection_label.configure(text="connected")
             self._append_log(f"connected to {self.port_var.get()} @ {self.baud}")
             threading.Thread(target=self._reader, daemon=True).start()
@@ -214,7 +230,7 @@ class MonitorGui:
         elif "BLE disconnected" in line:
             self.status["ble"].set("disconnected")
             self.stats["ble_events"] += 1
-        if match := CTRL_RE.search(line):
+        if match := CONTROL_RE.search(line) or CTRL_RE.search(line):
             state = "enable" if match.group("enable") == "1" else "safe"
             self.status["controller"].set(f"{match.group('mode')} / {state}")
         if match := IMU_RE.search(line):
@@ -248,6 +264,33 @@ class MonitorGui:
             self.performance.set(
                 f"samples={count} | log rate={rate:.1f} Hz | valid={valid_ratio:.1f}% "
                 f"| trust={trust_mean:.2f} | BLE events={self.stats['ble_events']} "
+                f"| GamePad events={self.stats['gamepad_events']}"
+            )
+        elif match := SENS_RE.search(line):
+            now = time.monotonic()
+            self.stats["samples"] += 1
+            self.stats["last_sample_s"] = now
+            if self.stats["first_sample_s"] == 0.0:
+                self.stats["first_sample_s"] = now
+            self.stats["latest_age_ms"] = int(match.group("age"))
+            self.status["imu"].set(
+                "fresh" if self.stats["latest_age_ms"] >= 0 else "stale"
+            )
+            self.status["seed"].set("yes" if match.group("seed") == "1" else "no")
+            self.status["pitch"].set(match.group("pitch") + " rad")
+            # This firmware build only reports estimated pitch in SENS lines;
+            # do not present unavailable raw gyro/accel values as measurements.
+            self.status["rate"].set("not logged")
+            self.status["accel"].set("not logged")
+            self.status["trust"].set("not logged")
+            self.history.append((float(match.group("pitch")), math.nan, math.nan, math.nan))
+            count = self.stats["samples"]
+            elapsed = self.stats["last_sample_s"] - self.stats["first_sample_s"]
+            rate = (count - 1) / elapsed if elapsed > 0.0 and count > 1 else 0.0
+            self.performance.set(
+                f"SENS reports={count} | log rate={rate:.1f} Hz "
+                f"| IMU age={self.stats['latest_age_ms']} ms "
+                f"| joints CAN={match.group('legs')} UART={match.group('wheels')} "
                 f"| GamePad events={self.stats['gamepad_events']}"
             )
         if match := GAMEPAD_RE.search(line):
@@ -287,6 +330,8 @@ class MonitorGui:
                 points = []
                 denominator = max(len(samples) - 1, 1)
                 for index, sample in enumerate(samples):
+                    if not math.isfinite(sample[values[key]]):
+                        continue
                     value = max(lower, min(upper, sample[values[key]]))
                     x = left + index * plot_width / denominator
                     y = top + (upper - value) / (upper - lower) * plot_height

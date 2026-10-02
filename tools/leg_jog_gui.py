@@ -59,7 +59,7 @@ KNEE_HINT = ("− gập", "+ duỗi")
 FIELDS_PER_JOINT = 8
 WHEELS = ("LW", "RW")  # Firmware order: UART1, UART2.
 WHEEL_TEXT = {"LW": "Trái (UART1)", "RW": "Phải (UART2)"}
-WHEEL_STATE_TEXT = {0: "thả lỏng", 1: "đang chạy", 2: "LỖI · nhả nút"}
+WHEEL_STATE_TEXT = {0: "thả lỏng", 1: "đang chạy", 2: "LỖI · nhả nút", 3: "GIỮ CỨNG (MAX)"}
 FIELDS_PER_WHEEL = 6
 WHEEL_RAW_MAX = 400
 WHEEL_BTN_BG = "#3a2a10"
@@ -258,6 +258,8 @@ class LegJogApp:
         self.travel_var = tk.DoubleVar(value=1.2)
         self.wheel_speed_var = tk.IntVar(value=60)
         self.wheel_continuous_var = tk.BooleanVar(value=False)
+        self.wheel_hold_var = tk.BooleanVar(value=False)  # WHOLD: giữ cứng 2 bánh, max
+        self.wheel_hold_button = None
         self.port_var = tk.StringVar()
 
         self._build()
@@ -467,6 +469,10 @@ class LegJogApp:
             self._bind_wheel_hold(b, dirs)
         self._button(group, "⏹ Dừng bánh", self._stop_wheels, "#3d1414", RED,
                      width=11).pack(side="left", padx=(12, 2))
+        self.wheel_hold_button = self._button(
+            group, "🔒 Giữ cứng 2 bánh (MAX)", self._toggle_wheel_hold,
+            WHEEL_BTN_BG, CYAN, width=22)
+        self.wheel_hold_button.pack(side="left", padx=(12, 2))
 
         speed_row = tk.Frame(card, bg=CARD)
         speed_row.pack(fill="x", padx=14, pady=(4, 12))
@@ -521,6 +527,9 @@ class LegJogApp:
         """Drop every press-and-hold (legs and wheels); keep a wheel latch."""
         self.holds.clear()
         self.wheel_holds.clear()
+        if self.wheel_hold_var.get():
+            self.wheel_hold_var.set(False)
+            self._set_wheel_hold_look(False)
 
     def _release_all(self):
         self._release_holds()
@@ -535,6 +544,11 @@ class LegJogApp:
             self._log("info", "Bánh không chạy khi chưa kết nối hoặc đang FAULT/ESTOP "
                               "(bấm CLEAR).")
             return
+        if self.wheel_hold_var.get():
+            # A nonzero WHEEL command releases the firmware's hold by itself;
+            # keep the GUI's toggle in sync (no WHOLD 0 needed).
+            self.wheel_hold_var.set(False)
+            self._set_wheel_hold_look(False)
         if not self.wheel_continuous_var.get():
             self.wheel_holds[button] = dirs
             return
@@ -569,6 +583,32 @@ class LegJogApp:
     def _stop_wheels(self):
         self._release_wheels()
         self._log("info", "Dừng bánh.")
+
+    def _toggle_wheel_hold(self):
+        if not self.last_status or self.last_status["mode"] in ("FAULT", "ESTOP"):
+            self._log("info", "Không giữ được khi chưa kết nối hoặc đang FAULT/ESTOP "
+                              "(bấm CLEAR).")
+            return
+        turning_on = not self.wheel_hold_var.get()
+        if turning_on:
+            # A jog command (nonzero WHEEL) would cancel the hold on the
+            # firmware side, so drop any running jog/latch first.
+            self._release_wheels()
+        self.wheel_hold_var.set(turning_on)
+        self.command(f"WHOLD {1 if turning_on else 0}")
+        self._set_wheel_hold_look(turning_on)
+        self._log("info", "Giữ cứng 2 bánh: torque bật, tốc độ 0, MAX (active brake)."
+                   if turning_on else "Đã thả giữ cứng 2 bánh.")
+
+    def _set_wheel_hold_look(self, on):
+        if self.wheel_hold_button is None:
+            return
+        if on:
+            self.wheel_hold_button.config(bg=CYAN, fg="#08202a",
+                                          activebackground=CYAN, activeforeground="#08202a")
+        else:
+            self.wheel_hold_button.config(bg=WHEEL_BTN_BG, fg=CYAN,
+                                          activebackground=WHEEL_BTN_BG, activeforeground=CYAN)
 
     def _on_continuous_toggle(self):
         self._release_wheels()
@@ -725,11 +765,13 @@ class LegJogApp:
             if j["bad_echo"]:
                 axis += f" echo!{j['bad_echo']}"
             c["axis"].config(text=axis, fg=RED if (j["axis_error"] or j["bad_echo"]) else CYAN)
+        any_holding = False
         for name in WHEELS:
             w = status["wheels"][name]
             c = self.wheel_cells[name]
             c["state"].config(text=WHEEL_STATE_TEXT.get(w["state"], str(w["state"])),
-                              fg={0: TEXT_DIM, 1: GREEN, 2: RED}.get(w["state"], TEXT))
+                              fg={0: TEXT_DIM, 1: GREEN, 2: RED, 3: CYAN}.get(w["state"], TEXT))
+            any_holding = any_holding or w["state"] == 3
             c["target"].config(text=f"{w['target']:+d}")
             c["speed"].config(text=f"{w['speed']:+d}")
             rpm = self._measured_rpm(name, w["pos_raw"])
@@ -738,6 +780,11 @@ class LegJogApp:
             age_ok = 0 <= w["age_ms"] <= 50
             c["age"].config(text=str(w["age_ms"]), fg=CYAN if age_ok else RED)
             c["err"].config(text=f"0x{w['err']:02X}", fg=RED if w["err"] else CYAN)
+        # The firmware drops the hold on its own (fault/DISABLE/ESTOP/nonzero
+        # WHEEL); mirror that in the button so it never lies about the state.
+        if self.wheel_hold_var.get() != any_holding:
+            self.wheel_hold_var.set(any_holding)
+            self._set_wheel_hold_look(any_holding)
             if w["state"] == 2 and self.wheel_latch_button is not None:
                 self._stop_wheel_latch()
                 self._log("err", f"{name} mất feedback: đã dừng quay liên tục.")

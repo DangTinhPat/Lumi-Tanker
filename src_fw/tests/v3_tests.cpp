@@ -190,6 +190,48 @@ int main() {
     }
   }
 
+  // Knee MIT (knee VMC): knees engage in MIT input mode and send MIT frames
+  // with their side's gains, torque and rate in the driver frame; the hips
+  // stay Set_Input_Pos passthrough.
+  {
+    FakeTransport bus;
+    LegLock::Config cfg{};
+    cfg.ramp_s = 0.0F;
+    cfg.knee_mit = true;
+    LegLock lock(cfg);
+    lock.setOffsets(0.1F, -0.5F);
+    assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const auto& mode = bus.can[i];  // Set_Controller_Mode frames first
+      assert(cmdOf(mode) == robot_control::motor_frame::kSetControllerModeCmdId);
+      const std::int32_t input = static_cast<std::int32_t>(mode.data[4] | (mode.data[5] << 8) |
+                                                           (mode.data[6] << 16) | (mode.data[7] << 24));
+      assert(input == (knee ? robot_control::motor_frame::kInputModeMit
+                            : robot_control::motor_frame::kInputModePassthrough));
+    }
+    lock.setKneeImpedance({LegLock::KneeMit{12.0F, 0.4F, 1.5F, 0.2F}, LegLock::KneeMit{8.0F, 0.3F, 2.0F, -0.1F}});
+    bus.can.clear();
+    assert(lock.update(1'000'000U, bus) && bus.can.size() == 4U);
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const bool left = legs[i].joint_index < 3U;
+      if (!knee) {
+        assert(cmdOf(bus.can[i]) == robot_control::motor_frame::kSetInputPosCmdId);
+        continue;
+      }
+      assert(cmdOf(bus.can[i]) == robot_control::motor_frame::kMitControlCmdId);
+      const auto m = robot_control::motor_frame::unpackMitCommand(bus.can[i].data);
+      const LegLock::KneeMit want = left ? LegLock::KneeMit{12.0F, 0.4F, 1.5F, 0.2F}
+                                         : LegLock::KneeMit{8.0F, 0.3F, 2.0F, -0.1F};
+      assert(near(m.kp, want.kp, 0.15F) && near(m.kd, want.kd, 0.01F));
+      assert(near(m.tff_nm, legs[i].driver_sign * want.tff_nm, 0.03F));
+      assert(near(m.vel_rad_s, legs[i].driver_sign * want.vel_rad_s, 0.04F));
+      assert(near(m.pos_rad, -0.5F * legs[i].driver_sign, 1.0e-3F));
+    }
+  }
+
   // FastFormat matches printf's "%+.Nf" / "%.Nf" on telemetry-sized values.
   {
     const float vals[] = {0.0F, -0.0F, 1.0F, -1.0F, 0.12345F, -0.12345F, 0.0005F, -0.0004F, 0.00049F,

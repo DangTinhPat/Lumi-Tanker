@@ -62,7 +62,7 @@ trim > 0.08 rad), `REC [s]` (chỉ ghi, mặc định 6 s: đẩy, qua gờ, ôm
 
 v3.3 (điều khiển phân tầng, chỉ LQR, mặc định bật; xem `docs/V3.3_HANDOFF.md` mục 5):
 `SET vpitch 0|1` (con lắc ảo, chỉ khi không Balancing), `SET trunk 0|1` (hông giữ thân),
-`SET tshare|tlead|tmax|trate|thpf|texp|texpt v` (`texpt`: số mũ phần hông gánh ở độ cao lớn, `texp`: ở độ cao thấp; mặc định 0/0 = hông gánh toàn bộ), `SET tleadexp v` (lead tầng 2 = `tlead`·ratio^v, mặc định 0.5), `SET tplanfull 0|1` (nghiêng theo kế hoạch đủ 100 %, mặc định 1), `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`
+`SET tshare|tlead|tmax|trate|thpf|texp|texpt v` (`texpt`: số mũ phần hông gánh ở độ cao lớn, `texp`: ở độ cao thấp; mặc định 0/0 = hông gánh toàn bộ), `SET tleadexp v` (lead tầng 2 = `tlead`·ratio^v, mặc định 0.5), `SET tplanfull 0|1` (nghiêng theo kế hoạch đủ 100 %, mặc định 1), `SET vmc 0|1` (VMC gối: gối chạy MIT lò xo–giảm chấn + bù trọng lực + sky-hook; chỉ khi DISABLE; mặc định 0), `SET vfreq|vzeta|vsky|vki|vgrav|vstiff|vtmax v` (tham số VMC, xem HANDOFF 5.17), `SET vadapt|vprog 0|1`, `SET vrlo|vrhi` (mm/s), `SET vplo|vphi` (mm), `SET vpratio` (thích ứng thử nghiệm, tắt mặc định, HANDOFF 5.18), `SET leash <m>` (mốc vị trí khi chạy cách robot tối đa, 0.10), `SET cdx <mm>` (lệch CoM thân), `SET timu 0|1`
 (bù động học IMU), `SET tvg <0..1>` (trọng số vận tốc khớp trong θv_rate), `SET tprev 0|1`
 (dự báo thao tác, cần vpitch), `SET tpacc|tpjerk|tpvmax|tpt v` (gia tốc/giật/trần tốc độ/
 tầm dự báo của quỹ đạo), `SET tlvl 0|1` (giữ thân ngang, cần trunk), `SET tlevel <rad>`

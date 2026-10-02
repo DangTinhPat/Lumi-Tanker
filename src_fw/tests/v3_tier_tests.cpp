@@ -90,7 +90,16 @@ struct Case {
   // Ground: a step of bump_h [m] at x = bump_x0, smoothed over bump_ramp; with
   // bump_width > 0 it comes back down that far on (a bump, not a step).
   double bump_h = 0.0, bump_x0 = 0.3, bump_ramp = 0.02, bump_width = 0.0;
+  // Rough road (roughRoad): random small bumps, dips and gentle ramps from
+  // x = 0.3 m over rough_len_m, seeded (0 = flat). Edges no steeper than
+  // ~15 deg (the wheel climbs ~20-25 deg). rough_scale scales the heights.
+  int rough_seed = 0;
+  double rough_len_m = 4.0, rough_scale = 1.0;
+  // Dense: a bump or dip (-6..+8 mm) every 4-10 cm, overlapping, on top of
+  // long gentle waves (~15 mm, 0.8-1.5 m) - a continuously rough surface.
+  bool rough_dense = false;
   int suspension = -1;          // Tier::suspension (-1: firmware default)
+  int vmc = -1;                 // Config::Vmc::enabled (-1: firmware default)
   // Legs arranged by hand before power-up: the encoder zero (the pose the
   // controller calls hip/knee 0) is this far [rad] from the intended hang
   // pose. The body then balances tilted until something corrects it.
@@ -182,6 +191,7 @@ struct Result {
   double body_vacc_peak = 0.0;     // |vertical body CoM acceleration| peak after 2 s (20 Hz)
   double body_vacc_rms = 0.0;      // its rms after 2 s
   double body_z_range = 0.0;       // body CoM height max - min after 2 s [m]
+  double body_z_range_late = 0.0;  // ...after 11 s (crouch done in the sweeps that lower at 1 s)
   double held_max_dhip = 0.0, held_max_wheel = 0.0;  // while on the stand
   double est_err_max = 0.0, est_err_rms = 0.0;  // IMU pitch estimate - truth (after 2 s)
   double grab_detect_s = -1.0;     // grab start -> first held re-zero
@@ -198,6 +208,9 @@ struct Result {
   double push_height = 0.0;        // hip-to-axle height at the push [m]
   double body_rms_all = 0.0, lean_rms_all = 0.0;  // dynamic rms after 2 s (share = body / lean)
   double drive_dz = 0.0;           // body CoM height change from the drive start, drive + 1 s [m]
+  double drive_vacc_rms = 0.0, drive_vacc_peak = 0.0;  // body vertical accel while driving (+1 s)
+  double drive_pitch_rms = 0.0;    // body pitch off rest while driving (+1 s)
+  double vmc_rough_max = 0.0, vmc_rough_mean = 0.0, vmc_adapt_mean = 0.0;  // after 11 s
   double body_mean_end = 0.0;      // mean body pitch - target over the last 4 s (static tilt left)
   double roll_app_max = 0.0;       // max |roll vs the apparent vertical| after 2 s [rad]
   double roll_app_end = 0.0;       // its mean over the last 4 s
@@ -233,6 +246,7 @@ Result simulate(const Case& c) {
   const double dt = dt_c / sub;
   const double R = geo::wheel_radius_m;
   LegPlant plant(c.body_dx, c.mass_scale, c.hip_rotor, c.knee_rotor, LegHeight::hangHipCad());
+  std::function<double(double)> c_rough_surface;  // rough road: the floor (plant.ground is the axle path)
   auto bump_profile = [c](double x) {
     auto edge = [&](double x0) {
       const double a = std::clamp((x - x0) / std::max(c.bump_ramp, 1e-4), 0.0, 1.0);
@@ -242,7 +256,118 @@ Result simulate(const Case& c) {
     if (c.bump_width > 0.0) h -= c.bump_h * edge(c.bump_x0 + c.bump_ramp + c.bump_width);
     return h;
   };
-  if (c.bump_h != 0.0 && c.bump_left_only) {
+  if (c.rough_seed > 0 && c.rough_dense) {
+    struct Hump { double xc, w, h; };
+    std::vector<Hump> humps;
+    std::mt19937 rg(static_cast<unsigned>(c.rough_seed));
+    auto U = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rg); };
+    const double tan15 = std::tan(15.0 * kPi / 180.0);
+    for (double x = 0.3; x < 0.3 + c.rough_len_m; x += U(0.04, 0.10)) {
+      const double h = U(-0.006, 0.008) * c.rough_scale;
+      const double w = std::max(U(0.04, 0.12), std::abs(h) * kPi / tan15);  // raised cosine, edge <= 15 deg
+      humps.push_back({x + 0.5 * w, w, h});
+    }
+    const double x0 = 0.3, x1 = 0.3 + c.rough_len_m;
+    const double a1 = 0.008 * c.rough_scale, l1 = U(0.8, 1.5), p1 = U(0.0, 2.0 * kPi);
+    const double a2 = 0.006 * c.rough_scale, l2 = U(0.4, 0.7), p2 = U(0.0, 2.0 * kPi);
+    plant.ground = [humps, x0, x1, a1, l1, p1, a2, l2, p2](double x) {
+      double h = 0.0;
+      for (const auto& b : humps) {
+        const double u = (x - b.xc) / b.w;
+        if (std::abs(u) < 0.5) h += b.h * 0.5 * (1.0 + std::cos(2.0 * kPi * u));
+      }
+      // Long waves, faded in and out over 0.3 m at the ends of the stretch.
+      const double fade = std::clamp(std::min(x - x0, x1 - x) / 0.3, 0.0, 1.0);
+      const double ww = a1 * std::sin(2.0 * kPi * (x - x0) / l1 + p1) - a1 * std::sin(p1) +
+                        a2 * std::sin(2.0 * kPi * (x - x0) / l2 + p2) - a2 * std::sin(p2);
+      return h + fade * ww;
+    };
+  } else if (c.rough_seed > 0) {
+    struct Feat { double x0, ramp, width, h; };
+    std::vector<Feat> feats;
+    std::mt19937 rg(static_cast<unsigned>(c.rough_seed));
+    auto U = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rg); };
+    const double tan15 = std::tan(15.0 * kPi / 180.0);
+    for (double x = 0.3; x < 0.3 + c.rough_len_m;) {
+      const double kind = U(0.0, 1.0);
+      Feat f{};
+      if (kind < 0.45) {         // bump 3-8 mm
+        f.h = U(0.003, 0.008) * c.rough_scale;
+        f.width = U(0.02, 0.10);
+      } else if (kind < 0.70) {  // dip 3-6 mm
+        f.h = -U(0.003, 0.006) * c.rough_scale;
+        f.width = U(0.03, 0.12);
+      } else {                   // gentle ramp up or down 1-3 cm over 0.3-0.6 m, held a while
+        f.h = (U(0.0, 1.0) < 0.5 ? 1.0 : -1.0) * U(0.010, 0.030) * c.rough_scale;
+        f.width = U(0.20, 0.50);
+      }
+      const double min_ramp = std::abs(f.h) * kPi / (2.0 * tan15);
+      f.ramp = kind < 0.70 ? std::max(U(0.03, 0.06), min_ramp) : std::max(U(0.30, 0.60), min_ramp);
+      f.x0 = x;
+      feats.push_back(f);
+      x += 2.0 * f.ramp + f.width + U(0.10, 0.40);
+    }
+    plant.ground = [feats](double x) {
+      double h = 0.0;
+      for (const auto& f : feats) {
+        auto edge = [&](double x0) {
+          const double a = std::clamp((x - x0) / f.ramp, 0.0, 1.0);
+          return 0.5 * (1.0 - std::cos(kPi * a));
+        };
+        h += f.h * (edge(f.x0) - edge(f.x0 + f.ramp + f.width));
+      }
+      return h;
+    };
+  }
+  if (c.rough_seed > 0 && plant.ground) {
+    // A rigid wheel of radius R rolls over the surface: its axle path is the
+    // surface's envelope under a circle, axle(x) = max_u [h(x+u) + sqrt(R^2 -
+    // u^2)] - R, not the surface under the axle - short steep features meet
+    // the rim ahead of the axle and are far gentler on the axle than on the
+    // floor (an unfiltered dense road had 28 deg walls the wheel "stalled"
+    // on). Tabulated at 1 mm.
+    const auto surf = plant.ground;
+    const double xa = -0.5, xb = 0.3 + c.rough_len_m + 1.0, step = 0.001;
+    const int n = static_cast<int>((xb - xa) / step) + 1;
+    std::vector<double> hs(n), axle(n);
+    for (int i = 0; i < n; ++i) hs[i] = surf(xa + i * step);
+    const int ru = static_cast<int>(R / step);
+    for (int i = 0; i < n; ++i) {
+      double best = -1e9;
+      for (int j = -ru; j <= ru; ++j) {
+        const int k = std::clamp(i + j, 0, n - 1);
+        const double u = j * step;
+        best = std::max(best, hs[k] + std::sqrt(std::max(R * R - u * u, 0.0)) - R);
+      }
+      axle[i] = best;
+    }
+    // Smoothed over the rubber tyre's contact patch (three 9 mm box passes,
+    // ~1 cm wide in all) - the rim-contact corners of a rigid wheel are
+    // instant impacts the tyre spreads - and read back with C1 cubic
+    // (Catmull-Rom) interpolation: the plant takes the path's curvature by
+    // finite differences, and a piecewise-linear table turned every 1 mm
+    // node into a spurious jolt.
+    for (int pass = 0; pass < 3; ++pass) {
+      std::vector<double> sm(n);
+      for (int i = 0; i < n; ++i) {
+        double acc = 0.0;
+        for (int j = -4; j <= 4; ++j) acc += axle[std::clamp(i + j, 0, n - 1)];
+        sm[i] = acc / 9.0;
+      }
+      axle.swap(sm);
+    }
+    c_rough_surface = surf;  // the floor itself, for the viewer
+    plant.ground = [axle, xa, step, n](double x) {
+      const double f = std::clamp((x - xa) / step, 1.0, double(n - 3) - 1e-9);
+      const int i = static_cast<int>(f);
+      const double t = f - i;
+      const double p0 = axle[i - 1], p1 = axle[i], p2 = axle[i + 1], p3 = axle[i + 2];
+      return p1 + 0.5 * t * (p2 - p0 + t * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + t * (3.0 * (p1 - p2) + p3 - p0)));
+    };
+  }
+  if (c.rough_seed > 0) {
+    // (rough road set above)
+  } else if (c.bump_h != 0.0 && c.bump_left_only) {
     plant.ground = [bump_profile](double x) { return 0.5 * bump_profile(x); };  // the axle midpoint
   } else if (c.bump_h != 0.0) {
     plant.ground = [c](double x) {
@@ -266,6 +391,15 @@ Result simulate(const Case& c) {
   const double theta_rest0 = s[1];
   std::FILE* anim = nullptr;
   if (const char* ap = std::getenv("TR_ANIM")) {
+    if (plant.ground) {  // the floor profile for tools/tier_sim_view.py
+      const std::string gp = std::string(ap) + ".ground";
+      if (std::FILE* gf = std::fopen(gp.c_str(), "w")) {
+        std::fprintf(gf, "x,h\n");
+        const auto& floor_h = c_rough_surface ? c_rough_surface : plant.ground;
+        for (double x = -1.0; x < 8.0; x += 0.002) std::fprintf(gf, "%.3f,%.5f\n", x, floor_h(x));
+        std::fclose(gf);
+      }
+    }
     anim = std::fopen(ap, "w");
     if (anim) std::fprintf(anim, "t,hip_x,hip_z,knee_x,knee_z,axle_x,axle_z,com_x,com_z,v,body,"
                                  "b0x,b0z,b1x,b1z,b2x,b2z,b3x,b3z,lean,hip,knee,cmd_v,push,ground,press,press_x\n");
@@ -343,6 +477,28 @@ Result simulate(const Case& c) {
   if (const char* v = std::getenv("TR_PLANFULL")) cfg.tier.plan_full = std::atoi(v) != 0;
   if (const char* v = std::getenv("TR_KHOLD")) cfg.tier.knee_hold = cfg.tier.knee_hold_wb = std::atoi(v) != 0;
   if (c.suspension >= 0) cfg.tier.suspension = c.suspension != 0;
+  if (c.vmc >= 0) cfg.vmc.enabled = c.vmc != 0;
+  if (const char* v = std::getenv("TR_LEASH")) cfg.drive_leash_m = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VMC")) cfg.vmc.enabled = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_VFREQ")) cfg.vmc.freq_hz = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VZETA")) cfg.vmc.zeta = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VSKY")) cfg.vmc.sky_n_s_m = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VKI")) cfg.vmc.ki_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VKDMAX")) cfg.vmc.kd_max = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VKPMAX")) cfg.vmc.kp_max = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VSTIFF")) { cfg.vmc.kp_stiff = static_cast<float>(std::atof(v)); }
+  if (const char* v = std::getenv("TR_VKDSTIFF")) { cfg.vmc.kd_stiff = static_cast<float>(std::atof(v)); }
+  if (const char* v = std::getenv("TR_VVERT")) { cfg.vmc.vert_stiff = cfg.vmc.vert_soft = static_cast<float>(std::atof(v)); }
+  if (const char* v = std::getenv("TR_VPROG")) cfg.vmc.progressive = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_VPLO")) cfg.vmc.prog_lo_m = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VPHI")) cfg.vmc.prog_hi_m = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VPRATIO")) cfg.vmc.prog_ratio = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VADAPT")) cfg.vmc.adapt = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_VRLO")) cfg.vmc.rough_lo_m_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VRHI")) cfg.vmc.rough_hi_m_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VKDHARD")) cfg.vmc.kd_hard = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VKPHARD")) cfg.vmc.kp_hard = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_VGRAV")) cfg.vmc.grav_scale = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SUSG")) cfg.tier.sus_gain = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SUSR")) cfg.tier.sus_return_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SUSDB")) cfg.tier.sus_deadband_m_s = static_cast<float>(std::atof(v));
@@ -420,6 +576,11 @@ Result simulate(const Case& c) {
     for (int i = 0; i < 40; ++i) s[1] -= plant.leanAngle(s) - c.seed_error;
   }
   std::deque<double> wheel_q, hip_q, knee_q;
+  // Knee VMC (V3Controller::Config::Vmc): MIT gains / feed-forwards, sent
+  // with the knee target (250 Hz, same delay).
+  struct KneeMit { bool on = false; double kp = 0, kd = 0, tff = 0, vel = 0; };
+  std::deque<KneeMit> mit_q;
+  KneeMit mit_zoh, mit_applied;
   std::deque<std::pair<double, double>> wm_q;
   double wheel_applied = 0.0, hip_applied = 0.0, knee_applied = s[3] - c.knee_zero_err;
   // Servo targets and readings are in the encoder frame; the plant is not.
@@ -434,7 +595,10 @@ Result simulate(const Case& c) {
          kd_meas = 0.0, next_leg_fb = 0.0;
   double hip_zoh = 0.0, knee_zoh = s[3] - c.knee_zero_err, next_hip_cmd = 0.0;
   double s_acc[LegPlant::kDof] = {};
-  double abz_f = 0.0, vacc_sq = 0.0, zb_min = 1e9, zb_max = -1e9;
+  double dv_sq = 0.0, dp_sq = 0.0, vr_sum = 0.0, va_sum = 0.0;
+  int vr_n = 0;
+  int dv_n = 0;
+  double abz_f = 0.0, vacc_sq = 0.0, zb_min = 1e9, zb_max = -1e9, zl_min = 1e9, zl_max = -1e9;
   int vacc_n = 0;
   const double kv_joint = c.hip_vel_bw * (geo::leg_hip_inertia_kgm2 + c.hip_rotor);
   const double kv_knee = c.knee_vel_bw > 0.0
@@ -584,6 +748,14 @@ Result simulate(const Case& c) {
       const auto v = ctrl.imuVelocity();
       kin = {v.horizontal_m_s, v.vertical_m_s, v.valid};
     }
+    if (t > 11.0) {
+      r.vmc_rough_max = std::max(r.vmc_rough_max, double(ctrl.vmcRoughness()));
+      vr_sum += ctrl.vmcRoughness(); va_sum += ctrl.vmcAdapt(); ++vr_n;
+    }
+    if (std::getenv("RW_TRACE") && k % 50 == 0) {
+      std::printf("RW t=%.2f plant_v=%+.3f wheel_v=%+.3f imu_v=%+.3f\n", t, sd[0],
+                  double(ctrl.groundVelocity()), double(ctrl.runawayImuSpeed()));
+    }
     cmd.go = false;
     if (out.state == V3Controller::State::Fault) {
       r.fell = true;
@@ -599,7 +771,16 @@ Result simulate(const Case& c) {
       next_hip_cmd = t + 0.004;
       hip_zoh = ctrl.hipCommand();
       knee_zoh = ctrl.kneeCommand();
+      // Held over when the controller skips a tick (as LegLock does).
+      if (out.knee_mit_valid) {
+        const auto& l = out.knee_mit[0];
+        const auto& rr = out.knee_mit[1];
+        mit_zoh = {true, 0.5 * (l.kp + rr.kp), 0.5 * (l.kd + rr.kd), 0.5 * (l.tff_nm + rr.tff_nm),
+                   0.5 * (l.vel_rad_s + rr.vel_rad_s)};
+      }
     }
+    mit_q.push_back(mit_zoh);
+    if (mit_q.size() > c.hip_delay_ticks) { mit_applied = mit_q.front(); mit_q.pop_front(); }
     hip_q.push_back(hip_zoh);
     if (hip_q.size() > c.hip_delay_ticks) { hip_applied = hip_q.front(); hip_q.pop_front(); }
     knee_q.push_back(knee_zoh);
@@ -704,8 +885,17 @@ Result simulate(const Case& c) {
       // body's weight, so it may use the whole torque range.
       const double vel_err_k = c.knee_kp * (knee_applied + kz - s[3]) - sd[3];
       const double cap_k = 2.0 * c.knee_tau_max;
-      knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
-      const double tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
+      double tau_k;
+      if (mit_applied.on) {
+        // GDS68 MIT law in the driver (both knees): T = Kp (q* - q) +
+        // Kd (qd* - qd) + T_ff, at the plant's substep rate.
+        const double m = mit_applied.kp * (knee_applied + kz - s[3]) +
+                         mit_applied.kd * (mit_applied.vel - sd[3]) + mit_applied.tff;
+        tau_k = 2.0 * std::clamp(m, -c.knee_tau_max, c.knee_tau_max);
+      } else {
+        knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
+        tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
+      }
       if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
       // Wheel torque that realises udd_des (linear in the torque), capped.
       const auto a0 = plant.accel(s, sd, 0.0, tau_h, tau_k, fx, c.slope);
@@ -762,6 +952,7 @@ Result simulate(const Case& c) {
         const double zb = plant.world(s, 0).z;
         zb_min = std::min(zb_min, zb);
         zb_max = std::max(zb_max, zb);
+        if (t > 11.0) { zl_min = std::min(zl_min, zb); zl_max = std::max(zl_max, zb); }
       }
     }
     {
@@ -834,6 +1025,8 @@ Result simulate(const Case& c) {
     if (c.drive_m_s != 0.0 && t < c.drive_start_s) drive_z0 = plant.world(s, 0).z;
     if (c.drive_m_s != 0.0 && t >= c.drive_start_s && t < c.drive_end_s + 1.0) {
       r.drive_dz = std::max(r.drive_dz, std::abs(plant.world(s, 0).z - drive_z0));
+      dv_sq += abz_f * abz_f; dp_sq += dev * dev; ++dv_n;
+      r.drive_vacc_peak = std::max(r.drive_vacc_peak, std::abs(abz_f));
       r.body_dev_drive = std::max(r.body_dev_drive, std::abs(dev));
       rate_sq += sd[1] * sd[1];
       ++rate_n;
@@ -888,6 +1081,11 @@ Result simulate(const Case& c) {
   r.level_hip_end = ctrl.levelHip();
   r.body_vacc_rms = vacc_n ? std::sqrt(vacc_sq / vacc_n) : 0.0;
   r.body_z_range = zb_max > zb_min ? zb_max - zb_min : 0.0;
+  r.body_z_range_late = zl_max > zl_min ? zl_max - zl_min : 0.0;
+  r.drive_vacc_rms = dv_n ? std::sqrt(dv_sq / dv_n) : 0.0;
+  r.vmc_rough_mean = vr_n ? vr_sum / vr_n : 0.0;
+  r.vmc_adapt_mean = vr_n ? va_sum / vr_n : 0.0;
+  r.drive_pitch_rms = dv_n ? std::sqrt(dp_sq / dv_n) : 0.0;
   r.learned_valid = ctrl.learnedTrimValid();
   r.x_end = s[0];
   r.x_stop_travel = s[0] - x_stop;
@@ -1854,6 +2052,128 @@ int main() {
     }
     return 0;
   }
+  if (std::getenv("TIER_VMCSURVEY") != nullptr) {
+    // What the knee VMC's roughness index reads in each situation (VMC on,
+    // adaptation as configured): mean / max after 11 s, and the falls.
+    struct Sc { const char* name; void (*apply)(Case&); };
+    const Sc scs[] = {
+        {"stand", [](Case&) {}},
+        {"drive flat .5", [](Case& c) { c.drive_m_s = 0.5; c.drive_start_s = 12; c.drive_end_s = 18; c.duration_s = 24; }},
+        {"push 4N", [](Case& c) { c.push_n = 4.0; c.push_start_s = 12; c.push_end_s = 12.3; c.duration_s = 20; }},
+        {"press 5N", [](Case& c) { addPresses(c, 5.0, 0.5); c.duration_s = 31; }},
+        {"bump 5mm .3", [](Case& c) { c.bump_h = 0.005; c.bump_ramp = 0.015; c.bump_x0 = 0.25; c.bump_width = 0.03;
+            c.drive_m_s = 0.30; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 21; }},
+        {"sparse x1 .5", [](Case& c) { c.rough_seed = 3; c.drive_m_s = 0.5; c.drive_start_s = 12; c.drive_end_s = 21; c.duration_s = 26; }},
+        {"dense x0.5 .5", [](Case& c) { c.rough_seed = 3; c.rough_dense = true; c.rough_scale = 0.5; c.drive_m_s = 0.5;
+            c.drive_start_s = 12; c.drive_end_s = 21; c.duration_s = 26; }},
+        {"dense x1 .3", [](Case& c) { c.rough_seed = 3; c.rough_dense = true; c.drive_m_s = 0.3;
+            c.drive_start_s = 12; c.drive_end_s = 27; c.duration_s = 32; }},
+        {"dense x1 .5", [](Case& c) { c.rough_seed = 3; c.rough_dense = true; c.drive_m_s = 0.5;
+            c.drive_start_s = 12; c.drive_end_s = 21; c.duration_s = 26; }},
+        {"dense x1.5 .5", [](Case& c) { c.rough_seed = 3; c.rough_dense = true; c.rough_scale = 1.5; c.drive_m_s = 0.5;
+            c.drive_start_s = 12; c.drive_end_s = 21; c.duration_s = 26; }},
+    };
+    for (double h : {0.189, 0.120, 0.084}) {
+      for (const auto& sc : scs) {
+        Case c = withMode(Case{}, 2);
+        if (h < 0.188) c.heights.push_back({1.0, h});
+        sc.apply(c);
+        c.vmc = 1;
+        const Result r = simulate(c);
+        std::printf("SURVEY h %3.0f %-14s fell=%d rough mean %.4f max %.4f m/s | adapt %.2f | vacc rms %.2f | pitch rms %.4f\n",
+                    h * 1000, sc.name, r.fell, r.vmc_rough_mean, r.vmc_rough_max, r.vmc_adapt_mean,
+                    r.drive_vacc_rms, r.drive_pitch_rms);
+        std::fflush(stdout);
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_ROUGH") != nullptr) {
+    // Rough road at ROUGH_H (default 120 mm): seeds x speeds, knees POS vs
+    // VMC (TR_ vars apply on top), nominal plant unless ROUGH_VAR.
+    const double h = std::getenv("ROUGH_H") ? std::atof(std::getenv("ROUGH_H")) : 0.120;
+    const double scale = std::getenv("ROUGH_SCALE") ? std::atof(std::getenv("ROUGH_SCALE")) : 1.0;
+    for (double v : {0.30, 0.50}) {
+      for (int vmc = 0; vmc < 2; ++vmc) {
+        int falls = 0, held = 0, n = 0;
+        double vrms = 0, vpk = 0, prms = 0, pmax = 0, tk = 0;
+        for (int seed = 1; seed <= 6; ++seed) {
+          Case c = withMode(Case{}, 2);
+          if (const char* vv = std::getenv("ROUGH_VAR")) kVariants[std::atoi(vv)].apply(c);
+          c.heights.push_back({1.0, h});
+          c.rough_seed = seed + (std::getenv("ROUGH_SEED0") ? std::atoi(std::getenv("ROUGH_SEED0")) : 0);
+          c.rough_len_m = 4.0; c.rough_scale = scale;
+          c.rough_dense = std::getenv("ROUGH_DENSE") != nullptr;
+          c.drive_m_s = v; c.drive_start_s = 12.0; c.drive_end_s = 12.0 + 4.5 / v; c.duration_s = c.drive_end_s + 5.0;
+          c.vmc = vmc;
+          const Result r = simulate(c);
+          if (r.fell) { ++falls; std::printf("  FALL seed %d v %.2f vmc %d: %s\n", seed, v, vmc, r.fault); }
+          held += r.held_resets; ++n;
+          vrms += r.drive_vacc_rms / 6; vpk = std::max(vpk, r.drive_vacc_peak);
+          prms += r.drive_pitch_rms / 6; pmax = std::max(pmax, r.body_dev_drive);
+          tk = std::max(tk, r.max_tau_knee);
+        }
+        std::printf("ROUGH h %3.0f v %.2f knees %-3s: falls %d held %d | vertical accel rms %.2f peak %.2f m/s^2 | "
+                    "body pitch rms %.4f max %.3f rad | knee tau %.2f N m\n", h * 1000, v, vmc ? "VMC" : "POS",
+                    falls, held, vrms, vpk, prms, pmax, tk);
+        std::fflush(stdout);
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_VMC") != nullptr) {
+    // Knee VMC vs the position servo (TR_VMC / TR_VFREQ / TR_VZETA /
+    // TR_VSKY from the environment): bumps, hand presses, pushes, a drive,
+    // standing, at 189 / 110 / 84 mm, nominal plant.
+    struct Sc { const char* name; void (*apply)(Case&); };
+    const Sc scs[] = {
+        {"stand", [](Case&) {}},
+        {"bump 5mm 18deg .30", [](Case& c) { c.bump_h = 0.005; c.bump_ramp = 0.015; c.bump_x0 = 0.25;
+            c.bump_width = 0.03; c.drive_m_s = 0.30; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 21; }},
+        {"bump 8mm/4cm .15", [](Case& c) { c.bump_h = 0.008; c.bump_ramp = 0.04; c.bump_x0 = 0.25;
+            c.bump_width = 0.03; c.drive_m_s = 0.15; c.drive_start_s = 12.0; c.drive_end_s = 17.0; c.duration_s = 22; }},
+        {"press 5N", [](Case& c) { addPresses(c, 5.0, 0.5); c.duration_s = 31; }},
+        {"push 4N", [](Case& c) { c.push_n = 4.0; c.push_start_s = 12.0; c.push_end_s = 12.3; c.duration_s = 20; }},
+        {"drive .55", [](Case& c) { c.drive_m_s = 0.55; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 22; }},
+    };
+    std::vector<double> hs = {0.189, 0.110, 0.084};
+    if (std::getenv("VMC_LOW")) hs = {0.110, 0.084};
+    for (double h : hs) {
+      for (const auto& sc : scs) {
+        if (std::getenv("VMC_LOW") && (std::string(sc.name) == "push 4N" || std::string(sc.name) == "drive .55")) continue;
+        Case c = withMode(Case{}, 2);
+        if (h < 0.188) c.heights.push_back({1.0, h});
+        sc.apply(c);
+        if (const char* vv = std::getenv("VMC_VAR")) kVariants[std::atoi(vv)].apply(c);
+        const Result r = simulate(c);
+        std::printf("VMC h %3.0f %-18s fell=%d%s held=%d | body %.3f | bob %.1f mm | vacc %.2f | rest %.3f/%.3f | knee tau %.2f\n",
+                    h * 1000, sc.name, r.fell, r.fell ? r.fault : "", r.held_resets, r.body_dev_all,
+                    r.body_z_range_late * 1000, r.body_vacc_peak, r.rest_rate_rms, r.rest_hip_rms, r.max_tau_knee);
+        std::fflush(stdout);
+      }
+    }
+    return 0;
+  }
+  if (std::getenv("TIER_VMCGRAV") != nullptr) {
+    // Knee VMC gravity model (bodySupportTorque + legGravityTorque, per
+    // leg) against the plant's static knee torque at the balance pose.
+    for (double kn : {0.0, -0.15, -0.3, -0.6, -0.9, -1.2, -1.35}) {
+      LegPlant plant(0.021, 1.0, 0.004, 0.004, LegHeight::hangHipCad());
+      const auto pose = LegHeight::forKnee(static_cast<float>(kn));
+      LegPlant::Vec s{0.0, 0.0, pose.hip_offset_rad, pose.knee_offset_rad};
+      for (int i = 0; i < 40; ++i) s[1] -= plant.leanAngle(s);
+      const double hip = LegHeight::hangHipCad() + pose.hip_offset_rad;
+      const auto b = robot_control::WholeBodyModel::bodySupportTorque(float(hip), pose.knee_offset_rad, 9.80665F);
+      const auto l = robot_control::WholeBodyModel::legGravityTorque(float(hip), pose.knee_offset_rad, 9.80665F);
+      const auto st = plant.staticJointTorques(s);
+      const float stance = V3Controller::stanceKneeTorque(float(hip), pose.knee_offset_rad, float(s[1]), 9.80665F);
+      const auto lh = robot_control::WholeBodyModel::legHeight(float(hip), pose.knee_offset_rad);
+      std::printf("knee %+.2f hip-axle %.0f mm theta %+.3f: stance model %+.3f (body+links %+.3f) | plant/2 %+.3f | dh/dk %.4f dx/dk %.4f\n", kn,
+                  pose.axle_below_hip_m * 1000, s[1], stance, b.knee_nm + l.knee_nm, st[1] / 2,
+                  -lh.d_height_d_knee, lh.d_x_d_knee);
+    }
+    return 0;
+  }
   if (std::getenv("TIER_ANIM") != nullptr) {
     // One scripted run for tools/tier_sim_view.py (frames to TR_ANIM):
     // crouch to ANIM_H, speed up / brake forward, a push standing, then
@@ -1872,6 +2192,15 @@ int main() {
       c.bump_h = std::atof(b); c.bump_x0 = 0.9; c.bump_width = 0.03; c.bump_ramp = 0.02;
     }
     if (const char* v2 = std::getenv("ANIM_SUS")) c.suspension = std::atoi(v2);
+    if (const char* rs = std::getenv("ANIM_ROUGH")) {  // rough road on the forward run only
+      c.rough_seed = std::atoi(rs); c.rough_len_m = 4.0;
+      c.rough_dense = std::getenv("ANIM_DENSE") != nullptr;
+      if (const char* av = std::getenv("ANIM_VAR")) kVariants[std::atoi(av)].apply(c);
+      if (const char* sc2 = std::getenv("ANIM_SCALE")) c.rough_scale = std::atof(sc2);
+      c.drives.clear(); c.pushes.clear();
+      c.drives.push_back({13.0, 13.0 + 4.5 / v, v});
+      c.duration_s = 13.0 + 4.5 / v + 4.0;
+    }
     if (const char* pf = std::getenv("ANIM_PRESS")) {
       // Hand on the body instead of driving: press the nose down 1 s, the
       // tail down 1 s, then quick pokes on the nose and on the tail.
@@ -1995,6 +2324,7 @@ int main() {
     for (int e = 0; e < n; ++e) {
       int vi = 0;
       Case c = randomEpisode(seed0 + e, name == "wb", &vi);
+      if (std::getenv("GEN_TRACE")) c.trace = true;
 #ifdef TAP_HAVE_EIGEN
       static V3Controller::WbTable gen_table;
       static bool gen_table_built = false;
@@ -3043,6 +3373,59 @@ int main() {
         std::fflush(stdout);
         assert(!r.fell && r.held_resets == 0 && r.roll_app_max < sc.app_max &&
                std::abs(r.roll_app_end) < 0.005);
+      }
+    }
+  }
+  // V30: knee VMC (Config::Vmc, knees on the GDS68 MIT law). Crouched it
+  // is a suspension - a 5 mm / 18 deg bump at 0.30 m/s shakes the body at
+  // least 30 % less than the position servo - and nothing else regresses:
+  // no fall or false hold over bumps, hand presses, a push and a drive at
+  // 189 / 110 / 84 mm, standing as calm, the knee within 70 % of its rating.
+  {
+    auto bump = [](Case& c) { c.bump_h = 0.005; c.bump_ramp = 0.015; c.bump_x0 = 0.25; c.bump_width = 0.03;
+                              c.drive_m_s = 0.30; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 21; };
+    for (double h : {0.110, 0.084}) {
+      Result r[2];
+      for (int v = 0; v < 2; ++v) {
+        Case c = withMode(Case{}, 2);
+        c.heights.push_back({1.0, h});
+        bump(c);
+        c.vmc = v;
+        static char name[64];
+        std::snprintf(name, sizeof name, "V30 %.0f mm bump 5 mm, VMC %s", h * 1000, v ? "on" : "off");
+        c.name = name;
+        r[v] = run(c);
+        assert(!r[v].fell && r[v].held_resets == 0);
+      }
+      std::printf("   body vertical accel peak %.2f -> %.2f m/s^2\n", r[0].body_vacc_peak, r[1].body_vacc_peak);
+      assert(r[1].body_vacc_peak < 0.7 * r[0].body_vacc_peak);
+    }
+    struct Sc { const char* name; void (*apply)(Case&); };
+    const Sc scs[] = {
+        {"stand", [](Case&) {}},
+        {"press 5 N", [](Case& c) { addPresses(c, 5.0, 0.5); c.duration_s = 31; }},
+        {"push 4 N", [](Case& c) { c.push_n = 4.0; c.push_start_s = 12.0; c.push_end_s = 12.3; c.duration_s = 20; }},
+        {"drive 0.55", [](Case& c) { c.drive_m_s = 0.55; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 22; }},
+        {"bump 8 mm / 4 cm", [](Case& c) { c.bump_h = 0.008; c.bump_ramp = 0.04; c.bump_x0 = 0.25; c.bump_width = 0.03;
+                                          c.drive_m_s = 0.15; c.drive_start_s = 12.0; c.drive_end_s = 17.0; c.duration_s = 22; }},
+    };
+    for (double h : {0.189, 0.110, 0.084}) {
+      for (const auto& sc : scs) {
+        Result r[2];
+        for (int v = 0; v < 2; ++v) {
+          Case c = withMode(Case{}, 2);
+          if (h < 0.188) c.heights.push_back({1.0, h});
+          sc.apply(c);
+          c.vmc = v;
+          r[v] = simulate(c);
+        }
+        std::printf("V30 %3.0f mm %-17s VMC off/on: fell %d/%d held %d/%d body %.3f/%.3f rest %.3f/%.3f knee %.2f/%.2f N m\n",
+                    h * 1000, sc.name, r[0].fell, r[1].fell, r[0].held_resets, r[1].held_resets, r[0].body_dev_all,
+                    r[1].body_dev_all, r[0].rest_rate_rms, r[1].rest_rate_rms, r[0].max_tau_knee, r[1].max_tau_knee);
+        std::fflush(stdout);
+        assert(!r[1].fell && r[1].held_resets == 0);
+        assert(r[1].rest_rate_rms < r[0].rest_rate_rms + 0.02);
+        assert(r[1].max_tau_knee < 3.5);
       }
     }
   }

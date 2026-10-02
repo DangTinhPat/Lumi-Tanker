@@ -376,6 +376,17 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     }
     legs_.setMode(line[8] == 'P' ? LegLock::Mode::Position : LegLock::Mode::Mit);
     printTunables();
+  } else if (std::strcmp(line, "SET vmc 1") == 0 || std::strcmp(line, "SET vmc 0") == 0) {
+    // Knee VMC switches the knee drivers' input mode: only with the legs free.
+    if (ctrl_.state() != V3Controller::State::Idle &&
+        ctrl_.state() != V3Controller::State::Fault) {
+      out_.println("V3 SET vmc refused: DISABLE first (knee driver mode changes at the next leg lock)");
+      return;
+    }
+    const bool on = line[8] == '1';
+    ctrl_.config().vmc.enabled = on;
+    legs_.setKneeMit(on);
+    printTunables();
   } else if (std::strncmp(line, "SET ", 4U) == 0) {
     char key[20]{};
     float v = 0.0F;
@@ -418,6 +429,22 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tenv")) ctrl_.config().tier.envelope = v >= 0.5F;
     else if (!std::strcmp(key, "khold")) ctrl_.config().tier.knee_hold = v >= 0.5F;
     else if (!std::strcmp(key, "tplanfull")) ctrl_.config().tier.plan_full = v >= 0.5F;
+    // Knee VMC tunables (live; SET vmc 0/1 above).
+    else if (!std::strcmp(key, "leash")) ctrl_.config().drive_leash_m = std::clamp(v, 0.0F, 2.0F);
+    else if (!std::strcmp(key, "vprog")) ctrl_.config().vmc.progressive = v >= 0.5F;
+    else if (!std::strcmp(key, "vplo")) ctrl_.config().vmc.prog_lo_m = std::clamp(v, 0.0F, 50.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "vphi")) ctrl_.config().vmc.prog_hi_m = std::clamp(v, 1.0F, 80.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "vpratio")) ctrl_.config().vmc.prog_ratio = std::clamp(v, 1.0F, 10.0F);
+    else if (!std::strcmp(key, "vadapt")) ctrl_.config().vmc.adapt = v >= 0.5F;
+    else if (!std::strcmp(key, "vrlo")) ctrl_.config().vmc.rough_lo_m_s = std::clamp(v, 0.0F, 500.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "vrhi")) ctrl_.config().vmc.rough_hi_m_s = std::clamp(v, 1.0F, 1000.0F) * 1.0e-3F;
+    else if (!std::strcmp(key, "vfreq")) ctrl_.config().vmc.freq_hz = std::clamp(v, 1.0F, 20.0F);
+    else if (!std::strcmp(key, "vzeta")) ctrl_.config().vmc.zeta = std::clamp(v, 0.1F, 2.0F);
+    else if (!std::strcmp(key, "vsky")) ctrl_.config().vmc.sky_n_s_m = std::clamp(v, 0.0F, 300.0F);
+    else if (!std::strcmp(key, "vki")) ctrl_.config().vmc.ki_s = std::clamp(v, 0.05F, 10.0F);
+    else if (!std::strcmp(key, "vgrav")) ctrl_.config().vmc.grav_scale = std::clamp(v, 0.0F, 1.5F);
+    else if (!std::strcmp(key, "vstiff")) ctrl_.config().vmc.kp_stiff = std::clamp(v, 5.0F, 120.0F);
+    else if (!std::strcmp(key, "vtmax")) ctrl_.config().vmc.tau_max_nm = std::clamp(v, 0.5F, 10.0F);
     else if (!std::strcmp(key, "roll")) ctrl_.config().roll.enabled = v >= 0.5F;
     else if (!std::strcmp(key, "rolltau")) ctrl_.config().roll.tau_s = std::clamp(v, 0.05F, 5.0F);
     else if (!std::strcmp(key, "rollmax")) ctrl_.config().roll.max_dh_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
@@ -627,6 +654,16 @@ void AppV3::printTunables() noexcept {
     out_.printf("V3 TUNE wheel predictor: wpred=%d wbpred=%d wpdelay=%.0f ms wptau=%.0f ms wpmeas=%.0f ms\n",
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
+  }
+  {
+    const auto& vm = ctrl_.config().vmc;
+    out_.printf("V3 TUNE knee vmc: vmc=%d (legs %s) vfreq=%.1f Hz vzeta=%.2f vsky=%.0f N s/m vki=%.2f s "
+                "vgrav=%.2f vstiff=%.0f vtmax=%.1f N m vprog=%d (%.0f-%.0f mm x%.1f) vadapt=%d (%.0f-%.0f mm/s) "
+                "rough=%.0f mm/s\n",
+                vm.enabled ? 1 : 0, legs_.config().knee_mit ? "knee MIT" : "POS", vm.freq_hz, vm.zeta,
+                vm.sky_n_s_m, vm.ki_s, vm.grav_scale, vm.kp_stiff, vm.tau_max_nm, vm.progressive ? 1 : 0,
+                vm.prog_lo_m * 1000.0F, vm.prog_hi_m * 1000.0F, vm.prog_ratio, vm.adapt ? 1 : 0,
+                vm.rough_lo_m_s * 1000.0F, vm.rough_hi_m_s * 1000.0F, ctrl_.vmcRoughness() * 1000.0F);
   }
   out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
@@ -1014,6 +1051,16 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,
                               out.leg_roll_hip_rate, out.leg_roll_knee_rate);
+    // Knee VMC: per-side MIT gains; LegLock holds the last set when the
+    // controller skips a tick (fault, held re-zero).
+    if (out.knee_mit_valid && !stand) {
+      std::array<LegLock::KneeMit, 2> km{};
+      for (std::size_t sd = 0; sd < 2U; ++sd) {
+        km[sd] = {out.knee_mit[sd].kp, out.knee_mit[sd].kd, out.knee_mit[sd].tff_nm,
+                  out.knee_mit[sd].vel_rad_s};
+      }
+      legs_.setKneeImpedance(km);
+    }
     (void)legs_.update(now_us, transport_);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
@@ -1108,7 +1155,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" sus=").fix(ctrl_.suspensionOffset() * 1000.0F, 1, true)
         .str(" vz=").fix(ctrl_.bodyVerticalSpeed(), 3, true)
         .str(" roll=").fix(ctrl_.rollEstimate(), 4, true)
-        .str(" rdh=").fix(ctrl_.rollSideHeight() * 1000.0F, 1, true);
+        .str(" rdh=").fix(ctrl_.rollSideHeight() * 1000.0F, 1, true)
+        .str(" ktq=").fix(0.5F * (feedback_.legEffort(1) + feedback_.legEffort(4)), 2, true)
+        .str(" kff=").fix(0.5F * (legs_.kneeImpedance()[0].tff_nm + legs_.kneeImpedance()[1].tff_nm), 2, true)
+        .str(" kkp=").fix(0.5F * (legs_.kneeImpedance()[0].kp + legs_.kneeImpedance()[1].kp), 1)
+        .str(" rgh=").fix(ctrl_.vmcRoughness() * 1000.0F, 1);
     out_.println(line);
     prof(3, nowUs() - p5);
   }

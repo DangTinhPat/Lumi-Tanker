@@ -19,10 +19,11 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
   engaged_ = true;
   bool ok = true;
   const auto legs = board::MotorIds{}.leg_can;
+  knee_mit_ = {};
   for (std::size_t i = 0; i < kLegs; ++i) {
     const auto node = legs[i].node_id;
-    const std::int32_t input_mode = config_.mode == Mode::Position
-        ? frame::kInputModePassthrough : frame::kInputModeMit;
+    const std::int32_t input_mode = jointMit(i) ? frame::kInputModeMit
+                                                : frame::kInputModePassthrough;
     ok = transport.sendCan(frame::canId(node, frame::kSetControllerModeCmdId),
                            frame::packSetControllerMode(frame::kControlModePosition,
                                                         input_mode)) && ok;
@@ -64,6 +65,13 @@ float LegLock::velFfTurns(std::size_t leg) const noexcept {
   return rate_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
 }
 
+bool LegLock::jointMit(std::size_t leg) const noexcept {
+  if (leg >= kLegs) return false;
+  const auto binding = board::MotorIds{}.leg_can[leg];
+  const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
+  return config_.mode == Mode::Mit || (knee && config_.knee_mit);
+}
+
 bool LegLock::atZero(std::uint64_t now_us) const noexcept {
   return engaged_ && (config_.ramp_s <= 0.0F ||
       (now_us > engage_us_ &&
@@ -77,9 +85,17 @@ bool LegLock::sendTargets(std::uint64_t now_us,
   const auto legs = board::MotorIds{}.leg_can;
   for (std::size_t i = 0; i < kLegs; ++i) {
     const float turns = targetTurns(i, now_us);
-    const auto id = frame::canId(legs[i].node_id, config_.mode == Mode::Position
-        ? frame::kSetInputPosCmdId : frame::kMitControlCmdId);
-    if (config_.mode == Mode::Position) {
+    const bool mit = jointMit(i);
+    const auto id = frame::canId(legs[i].node_id, mit ? frame::kMitControlCmdId
+                                                      : frame::kSetInputPosCmdId);
+    const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+    if (mit && knee && config_.knee_mit) {
+      // Knee VMC: per-side gains; torque and rate from the core frame.
+      const auto& m = knee_mit_[legs[i].joint_index < 3U ? 0U : 1U];
+      const float joint_rad = turns * kTwoPi / config_.gear_ratio;
+      ok = transport.sendCan(id, frame::packMitCommand(joint_rad, legs[i].driver_sign * m.vel_rad_s,
+                                                       m.kp, m.kd, legs[i].driver_sign * m.tff_nm)) && ok;
+    } else if (!mit) {
       // vel_ff in milli-turns/s (int16): only the roll side rate, 0 otherwise.
       const float vff = std::clamp(velFfTurns(i) * 1000.0F, -32767.0F, 32767.0F);
       ok = transport.sendCan(id, frame::packSetInputPos(

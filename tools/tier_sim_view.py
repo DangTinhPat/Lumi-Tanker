@@ -9,8 +9,10 @@ gets its own panel, played in sync, with a body-pitch strip chart below.
 Space: pause, R: restart, +/-: playback speed.
 """
 import argparse
+import bisect
 import csv
 import math
+import os
 import tkinter as tk
 
 SCALE = 950.0          # px per metre
@@ -71,13 +73,31 @@ class Viewer:
         color = COLORS[k % len(COLORS)]
         cam = row["axle_x"]
         c.create_rectangle(0, top, WIDTH, top + PANEL_H, fill="#fbfbf8", outline="#ddd")
-        # Floor with metre ticks every 5 cm (shows the motion).
-        gy = self.to_px(0, row["ground"], cam, top)[1]
-        c.create_line(0, gy, WIDTH, gy, fill="#555", width=2)
-        x0 = math.floor((cam - WIDTH / 2 / SCALE) / 0.05) * 0.05
-        x = x0
-        while x < cam + WIDTH / 2 / SCALE:
+        # Floor: the terrain profile when the run has one (<csv>.ground; the
+        # profile is under the axle, so draw it one wheel radius below the
+        # axle path), else flat; ticks every 5 cm show the motion.
+        terrain = run.get("terrain")
+        xl, xr = cam - WIDTH / 2 / SCALE, cam + WIDTH / 2 / SCALE
+        if terrain:
+            xs, hs = terrain
+            i0 = max(bisect.bisect_left(xs, xl) - 1, 0)
+            i1 = min(bisect.bisect_right(xs, xr) + 1, len(xs))
+            pts = []
+            for i in range(i0, i1):
+                pts.extend(self.to_px(xs[i], hs[i], cam, top))
+            if len(pts) >= 4:
+                c.create_line(pts, fill="#555", width=2)
+                bottom = top + PANEL_H
+                poly = [pts[0], bottom] + pts + [pts[-2], bottom]
+                c.create_polygon(poly, fill="#e6e1d6", outline="")
+                c.create_line(pts, fill="#555", width=2)
+        else:
+            gy = self.to_px(0, row["ground"], cam, top)[1]
+            c.create_line(0, gy, WIDTH, gy, fill="#555", width=2)
+        x = math.floor(xl / 0.05) * 0.05
+        while x < xr:
             px = self.to_px(x, 0, cam, top)[0]
+            gy = self.to_px(0, self.ground_at(run, x, row), cam, top)[1]
             c.create_line(px, gy, px - 8, gy + 8, fill="#aaa")
             x += 0.05
         # Level reference through the hip.
@@ -131,6 +151,16 @@ class Viewer:
                             f"gối {math.degrees(row['knee'] - run['knee0']):+5.1f}°"))
         c.create_text(14, top + 62, anchor="w", font=("DejaVu Sans Mono", 11), fill="#222",
                       text=f"tốc độ {row['v']:+.2f} m/s (lệnh {row['cmd_v']:+.2f})")
+
+    @staticmethod
+    def ground_at(run, x, row):
+        terrain = run.get("terrain")
+        if not terrain:
+            return row["ground"]
+        xs, hs = terrain
+        i = min(max(bisect.bisect_left(xs, x), 1), len(xs) - 1)
+        a = (x - xs[i - 1]) / max(xs[i] - xs[i - 1], 1e-9)
+        return hs[i - 1] + a * (hs[i] - hs[i - 1])
 
     def draw_plot(self, idx):
         c = self.c
@@ -201,8 +231,13 @@ def main():
                     or abs(r["push"]) > 1e-3), rows[-1])
         ref = rows[max(rows.index(ref) - 1, 0)]
         k = len(runs) % len(COLORS)
+        terrain = None
+        if os.path.exists(path + ".ground"):
+            g = load(path + ".ground")
+            # Profile under the axle -> floor surface one wheel radius lower.
+            terrain = ([r["x"] for r in g], [r["h"] for r in g])
         runs.append({"rows": rows, "label": label or path, "hip0": ref["hip"], "knee0": ref["knee"],
-                     "light": LIGHT[k]})
+                     "light": LIGHT[k], "terrain": terrain})
     root = tk.Tk()
     root.title(args.title)
     Viewer(root, runs)

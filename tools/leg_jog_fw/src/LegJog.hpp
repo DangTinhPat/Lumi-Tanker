@@ -125,6 +125,11 @@ struct Wheel {
   bool disable_sent = false;
   // Latched after lost feedback; re-armed by releasing (WHEEL 0) or CLEAR.
   bool fault = false;
+  // WHOLD 1: torque stays on and Moving Speed stays commanded at 0
+  // indefinitely (active braking, no coast-after-brake timeout) - the
+  // strongest hold this protocol offers (there is no torque-limit
+  // register). A nonzero WHEEL command, DISABLE, ESTOP or CLEAR releases it.
+  bool hold = false;
   // Latest Present Data, core frame (speed) / raw single-turn position.
   std::uint16_t pos_raw = 0U;
   std::int16_t speed_raw = 0;
@@ -322,8 +327,29 @@ class LegJog {
         const auto raw = static_cast<std::int16_t>(
             std::lround(std::clamp(v[i], -limit, limit)));
         if (raw == 0) wheels_[i].fault = false;
+        // A real (nonzero) jog command is explicit intent: release the hold.
+        // WHEEL 0 0 is also the GUI's idle heartbeat, sent continuously, so
+        // it must NOT cancel a hold.
+        if (raw != 0) wheels_[i].hold = false;
         wheels_[i].target_raw = latched || wheels_[i].fault ? 0 : raw;
       }
+      return;
+    }
+    if (std::strcmp(word, "WHOLD") == 0) {
+      float v[1]{};
+      if (!parseFloats(cursor, v, 1U)) {
+        say("EV ERR WHOLD <0|1> (1 = active-brake both wheels at max hold)");
+        return;
+      }
+      touchHost(now_us);
+      last_wheel_cmd_us_ = now_us;  // arm the lease even without a WHEEL heartbeat
+      const bool on = v[0] != 0.0F;
+      for (auto& wheel : wheels_) {
+        wheel.hold = on;
+        if (on) wheel.fault = false;
+      }
+      say(on ? "EV OK WHOLD 1: both wheels holding (torque on, speed 0)"
+             : "EV OK WHOLD 0: hold released");
       return;
     }
     if (std::strcmp(word, "ENABLE") == 0) {
@@ -585,7 +611,8 @@ class LegJog {
           ? static_cast<long>((now_us - wheel.fb_us) / 1000U) : -1L;
       used += std::snprintf(
           out + used, size - static_cast<std::size_t>(used), ",%d,%d,%d,%u,%ld,%u",
-          wheel.fault ? 2 : (wheel.torque_on ? 1 : 0), static_cast<int>(wheel.target_raw),
+          wheel.fault ? 2 : (wheel.hold ? 3 : (wheel.torque_on ? 1 : 0)),
+          static_cast<int>(wheel.target_raw),
           static_cast<int>(wheel.speed_raw), static_cast<unsigned>(wheel.pos_raw),
           age_ms, static_cast<unsigned>(wheel.err));
     }
@@ -707,6 +734,7 @@ class LegJog {
     last_idle_us_ = now_us;
     for (auto& wheel : wheels_) {
       wheel.target_raw = 0;
+      wheel.hold = false;
       if (mode == Mode::Disabled) wheel.fault = false;
       wheelTorqueOff(wheel, now_us);
     }
@@ -744,6 +772,21 @@ class LegJog {
                       "EV WHEEL %s feedback lost -> torque off (release to re-arm)",
                       wheel.name);
         pushEvent(text);
+      }
+      const bool holding = allowed && !wheel.fault && wheel.hold;
+      if (holding) {
+        // Active brake, indefinitely: torque stays on, speed stays at 0.
+        // Never falls through to the brake-timeout/coast path below.
+        if (!wheel.torque_on) {
+          (void)tx_.sendUart(wheel.bus, frame::buildTorqueEnable(wheel.id, true));
+          wheel.torque_on = true;
+          wheel.torque_on_us = now_us;
+        } else if (now_us - wheel.torque_on_us >= config_.wheel_settle_us) {
+          sendWheelSpeed(wheel, 0);
+        }
+        wheel.last_nonzero_us = now_us;  // keeps the (unused) brake window fresh
+        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        continue;
       }
       const std::int16_t target = allowed && !wheel.fault ? wheel.target_raw : 0;
       if (target != 0) {

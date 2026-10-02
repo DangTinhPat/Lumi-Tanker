@@ -148,6 +148,70 @@ class V3Controller {
   // the wheel servo on the commands sent and adds what it moved over the
   // reading's age to the reading: speed(t) = read + w_model(t) -
   // w_model(t - meas_delay), position likewise.
+  // Knee VMC (v3.4, SET vmc, default off): the knees run the GDS68 MIT law
+  // T = Kp (q* - q) + Kd (qd* - qd) + T_ff in the driver, so each leg is a
+  // vertical spring-damper the body rides on - a sharp bump or a hand on
+  // the body is taken by the driver's own PD at its rate, not after a CAN
+  // round trip. The hips stay position servos (fore/aft: the tiers).
+  //  - Kp, Kd: a body-on-knee vertical spring of freq_hz / zeta mapped to
+  //    the joint by the leg Jacobian, (dh/dk)^2 - the same feel at every
+  //    height;
+  //  - T_ff: gravity of the leg's share standing on its wheel (x grav_scale),
+  //    sky-hook -sky * v_body (replaces Tier::suspension's height offsets)
+  //    and an integral of the knee error (model error, bumpless hand-over);
+  //  - stiff (kp_stiff) until balancing on the floor, and again while held
+  //    or lifted (gravity compensation would push the legs out).
+  // q* is the knee command as before (pose, knee hold, roll).
+  // A knee turn moves the axle along (dx/dk, dh/dk): at the hang pose
+  // (-0.097, 0.053) m/rad - more fore/aft than vertical, so a soft knee
+  // there is a wobbling wheel, not a suspension - crouched (81-96 mm)
+  // (-0.05, 0.10). The softness fades in with that direction's vertical
+  // share between vert_stiff and vert_soft (TIER_VMCGRAV); a vertical
+  // spring at the tall poses needs the hips too (later).
+  struct Vmc {
+    bool enabled = false;
+    float freq_hz = 5.0F;        // SET vfreq
+    float zeta = 0.6F;           // SET vzeta
+    float sky_n_s_m = 80.0F;     // SET vsky: sky-hook per leg [N s/m]
+    float ki_s = 0.5F;           // SET vki: integral time of the knee error
+    float i_max_nm = 3.0F;
+    float grav_scale = 1.0F;     // SET vgrav
+    float kp_stiff = 40.0F;      // [N m/rad] not balancing / held
+    float kd_stiff = 1.0F;
+    float kp_min = 2.0F, kp_max = 60.0F;
+    float kd_min = 0.05F, kd_max = 3.0F;
+    float tau_max_nm = 8.0F;     // |T_ff| (GDS68 stall 11)
+    float blend_s = 0.5F;        // stiff -> soft after the release
+    float stiffen_s = 0.1F;      // soft -> stiff when held / lifted
+    float vel_lpf_hz = 20.0F;    // q* rate feed-forward
+    float vert_stiff = 0.60F;    // dh / |(dx, dh)| at or below: stiff
+    float vert_soft = 0.85F;     // at or above: the full spring
+    // Adaptive impedance, from what the knees feel (encoders only):
+    //  - progressive spring (SET vprog, default off): stiffer with the
+    //    leg's vertical give |dh/dk x (q* - q)| between prog_lo_m and
+    //    prog_hi_m, up to prog_ratio x the base spring. Off: no measurable
+    //    effect in the sim (bumps, presses, rough roads identical; the knee
+    //    hardly gives under a 5 N press - the extra tilt there is not sag)
+    //    and +0.3 N m knee torque on rough roads. For trials on the robot;
+    //  - roughness damping (SET vadapt, default off): Kd towards kd_hard as
+    //    the knees get pounded (rms of their vertical give speed between
+    //    rough_lo and rough_hi). Off: with the tyre-filtered dense rough
+    //    road (TIER_ROUGH) it cost the comfort (vertical accel rms 0.91 ->
+    //    1.51 m/s^2 at 0.5 m/s) without saving a fall - the falls on the
+    //    1.5x road are wheel traction, the stiff knee fell there too.
+    bool progressive = false;
+    float prog_lo_m = 0.003F;      // SET vplo
+    float prog_hi_m = 0.010F;      // SET vphi
+    float prog_ratio = 4.0F;       // stiffness x at prog_hi (SET vpratio)
+    bool adapt = false;
+    float rough_attack_s = 0.05F;
+    float rough_release_s = 0.8F;
+    float rough_lo_m_s = 0.02F;    // SET vrlo
+    float rough_hi_m_s = 0.06F;    // SET vrhi
+    float kp_hard = 40.0F;
+    float kd_hard = 4.5F;
+  };
+
   struct WheelPredict {
     // On with the whole-body LQR (its gains are designed for a fresh
     // reading); opt-in for the tiers (their wheel lead was tuned on the
@@ -458,6 +522,7 @@ class V3Controller {
     Tier tier{};
     Roll roll;
     WheelPredict wheel_pred;
+    Vmc vmc;
     Height height{};
     Engage engage{};
     Pid pid{};
@@ -549,6 +614,12 @@ class V3Controller {
     // saturates the wheels at the cap and must still trip this guard.
     float runaway_wheel_rad_s = 15.0F;
     std::uint64_t runaway_us = 500'000U;
+    // ...only once the wheel ground speed is this far from the speed the
+    // accelerometer integrates (leaking to the wheels over runaway_v_tau_s).
+    float runaway_dv_m_s = 0.25F;
+    // LQR drive anchor at most this far from the robot (0 = off, SET leash).
+    float drive_leash_m = 0.10F;
+    float runaway_v_tau_s = 1.5F;
     // The runaway guard stays off while the operator drives and this long
     // after the last drive command (covers LqrBalancer's stop ramp).
     std::uint64_t drive_guard_hold_us = 1'500'000U;
@@ -612,6 +683,15 @@ class V3Controller {
     // Roll::vel_ff) [rad/s].
     std::array<float, 2> leg_roll_hip_rate{};
     std::array<float, 2> leg_roll_knee_rate{};
+    // Knee VMC (Config::Vmc): MIT gains and feed-forwards per side [left,
+    // right], core frame; valid only with Vmc::enabled.
+    struct KneeMit {
+      float kp = 0.0F, kd = 0.0F;      // [N m/rad], [N m s/rad]
+      float tff_nm = 0.0F;             // torque feed-forward
+      float vel_rad_s = 0.0F;          // q* rate
+    };
+    std::array<KneeMit, 2> knee_mit{};
+    bool knee_mit_valid = false;
     bool legs_moving = false;
     const char* fault = nullptr;  // set on the tick a fault is raised
   };
@@ -620,6 +700,13 @@ class V3Controller {
   explicit V3Controller(Config config);
 
   [[nodiscard]] Output update(const Input& input, const Command& command);
+  // Knee torque holding one leg's share of the robot standing on its wheel
+  // (CAD hip angle, core knee, body pitch) - the knee VMC's gravity term.
+  [[nodiscard]] static float stanceKneeTorque(float hip, float knee, float pitch, float g) noexcept;
+  [[nodiscard]] float runawayImuSpeed() const noexcept { return runaway_v_imu_; }
+  // Knee VMC adaptation: roughness rms [m/s] and the blend to hard (0..1).
+  [[nodiscard]] float vmcRoughness() const noexcept { return std::sqrt(vmc_rough_ms_); }
+  [[nodiscard]] float vmcAdapt() const noexcept { return vmc_adapt_; }
   [[nodiscard]] State state() const noexcept { return state_; }
   [[nodiscard]] robot_control::LqrBalancer& balancer() noexcept { return lqr_; }
   [[nodiscard]] const robot_control::LqrBalancer& balancer() const noexcept { return lqr_; }
@@ -741,6 +828,7 @@ class V3Controller {
   // zeroed the command mid-fall on real hardware (2026-09-29), guaranteeing
   // the fall it should have let fall_pitch_rad catch cleanly instead.
   float runaway_start_pitch_ = 0.0F;
+  float runaway_v_imu_ = 0.0F;  // accelerometer ground speed (runaway guard)
   std::uint64_t drive_seen_us_ = 0U;  // last tick with a nonzero drive command
   const char* last_fault_ = "";
   // The legs are structure in v3: once locked they stay locked through a
@@ -765,6 +853,7 @@ class V3Controller {
   float knee_excite_rad_ = 0.0F;
   float applied_dk_ = 0.0F, applied_base_ = 0.0F;
   float sus_g_ = 9.80665F, sus_vz_ = 0.0F, sus_dz_ = 0.0F, sus_dk_ = 0.0F;
+  float sus_vz_eff_ = 0.0F;  // body vertical speed off the plan, past the deadband
   bool sus_init_ = false;
   bool excite_applied_ = false;
   // The virtual pitch already carries the balance shift with height (from
@@ -805,6 +894,10 @@ class V3Controller {
   float wp_w_model_ = 0.0F, wp_p_model_ = 0.0F, wp_last_cmd_ = 0.0F;
   // Roll (Config::Roll).
   void updateRoll(const Input& in, bool active);
+  // Knee VMC (Config::Vmc): fills out.knee_mit. soft: balancing free on
+  // the floor (else stiff).
+  void updateVmc(const Input& in, bool locked, bool soft, Output& out);
+  [[nodiscard]] bool vmcOn() const noexcept { return config_.vmc.enabled; }
   float roll_est_ = 0.0F;      // vs the apparent vertical, + = left side up
   float roll_bias_ = 0.0F;     // learned roll gyro bias [rad/s]
   bool roll_init_ = false;
@@ -814,6 +907,11 @@ class V3Controller {
   float roll_target_ = 0.0F;
   float roll_dk_dh_ = 0.0F, roll_dq_dk_ = 0.0F, roll_deriv_key_ = 1.0F;
   std::array<float, 2> roll_hip_{}, roll_knee_{}, roll_hip_rate_{}, roll_knee_rate_{};
+  // Knee VMC state per side: integral [N m], soft blend 0..1, last q*, its rate.
+  std::array<float, 2> vmc_i_{}, vmc_qprev_{}, vmc_qrate_{};
+  float vmc_beta_ = 0.0F;
+  bool vmc_init_ = false, vmc_armed_ = false;
+  float vmc_rough_ms_ = 0.0F, vmc_adapt_ = 0.0F;  // roughness (mean square), blend to hard
   [[nodiscard]] bool envelopeOn() const noexcept {
     return config_.tier.envelope || (wholeBody() && config_.tier.envelope_wb);
   }
