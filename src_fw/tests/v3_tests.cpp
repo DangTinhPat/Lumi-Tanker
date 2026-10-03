@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "robot_control/GeneratedGeometry.hpp"
+#include "robot_control/WholeBodyModel.hpp"
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "tap_fw/v3/LegLock.hpp"
 #include "tap_fw/FastFormat.hpp"
@@ -96,6 +97,84 @@ Result run(V3Controller::Algo algo, float eq, float release, float tau,
 }  // namespace
 
 int main() {
+  // Body and hips can counter-rotate while the axle-to-CoM line stays still.
+  // The stable b4b6d4a fast trunk path must not chase that internal motion.
+  // Static body leveling is disabled here to isolate the fast feedback path.
+  {
+    auto cfg = tap_fw::v3::defaultV3Config();
+    cfg.tier.settle_s = cfg.tier.ramp_s = 0.0F;
+    cfg.tier.level = cfg.tier.suspension = cfg.tier.preview = false;
+    cfg.roll.enabled = false;
+    cfg.engage.immediate = true;
+    cfg.lock_settle_us = 0U;
+    V3Controller c(cfg);
+    V3Controller::Input in{};
+    in.legs_measured = in.legs_ready = true;
+    in.accel_z_m_s2 = 9.80665F;
+    V3Controller::Command cmd{};
+    cmd.start = true;
+    (void)c.update(in, cmd);
+    cmd.start = false;
+    namespace geo = robot_control::geometry;
+    const float shift = geo::parts[0].mass * cfg.tier.body_com_dx_m / geo::total_mass_kg;
+    auto line = [&](float hip_offset) {
+      const float hip = tap_fw::v3::LegHeight::hangHipCad() + hip_offset;
+      const auto m = robot_control::WholeBodyModel{}.compute(hip, 0.0F, hip, 0.0F);
+      const auto j = robot_control::WholeBodyModel::symmetricComOffsetJacobian(hip, 0.0F);
+      const float x = m.com_offset_x_m + shift, z = m.com_above_axle_m;
+      return std::array<float, 2>{std::atan2(x, z),
+          (z * j.d_com_offset_x_d_hip - x * j.d_com_above_axle_d_hip) / (x*x + z*z)};
+    };
+    const float base = line(0.0F)[0];
+    float peak_hip = 0.0F, peak_body_rate = 0.0F;
+    for (int k = 1; k < 3000; ++k) {
+      const float time = k * 0.002F;
+      in.now_us = static_cast<std::uint64_t>(k) * 2000U;
+      // Both possible bands seen through a ~25 Hz hardware trace.
+      const float w = 2.0F * 3.14159265F * (k < 1500 ? 9.5F : 15.5F);
+      const float hip = 0.01F * std::sin(w * time), rate = 0.01F * w * std::cos(w * time);
+      const auto com = line(hip);
+      in.hip_rad = {hip, hip};
+      in.hip_rate_rad_s = {rate, rate};
+      in.pitch_rad = base - com[0];
+      in.pitch_rate_rad_s = -com[1] * rate;
+      const auto out = c.update(in, cmd);
+      assert(out.state != V3Controller::State::Fault);
+      peak_hip = std::max(peak_hip, std::abs(c.trunkHip()));
+      peak_body_rate = std::max(peak_body_rate, std::abs(in.pitch_rate_rad_s));
+      assert(std::abs(c.virtualPitchRate()) < 1.0e-4F);
+    }
+    assert(c.state() == V3Controller::State::Balancing);
+    assert(peak_body_rate > 0.5F);
+    assert(peak_hip < 1.0e-4F);
+    std::printf("internal body/hip vibration: body rate %.3f, fast trunk peak %.6f rad\n",
+                peak_body_rate, peak_hip);
+  }
+  // 3 ms CAN pacing on a 2 ms control clock: 333 Hz, all four joints in
+  // one batch, bounded 2/4 ms cadence and no catch-up burst after a stall.
+  {
+    FakeTransport bus;
+    LegLock lock;
+    assert(lock.engage({0, 0, 0, 0}, 0U, bus));
+    bus.can.clear();
+    std::uint64_t previous_send = 0;
+    int batches = 0;
+    for (std::uint64_t t = 2000; t <= 100000; t += 2000) {
+      const auto before = bus.can.size();
+      assert(lock.update(t, bus));
+      if (bus.can.size() == before) continue;
+      assert(bus.can.size() == before + 4);
+      assert(t-previous_send == 2000 || t-previous_send == 4000);
+      previous_send = t;
+      ++batches;
+    }
+    assert(batches == 33);
+    auto before = bus.can.size();
+    assert(lock.update(1000000, bus) && bus.can.size() == before+4);
+    before = bus.can.size();
+    assert(lock.update(1000000, bus) && bus.can.size() == before);
+    std::printf("paired CAN pacing: %d batches / 100 ms, no stall burst\n", batches);
+  }
   // Position-mode lock: set-point starts at the measured pose, closes the
   // loop without a jump, ramps to exactly 0 (the power-up pose).
   {
@@ -119,8 +198,8 @@ int main() {
     assert(mid < 0.8F && mid > 0.0F);
     // Resend cadence.
     bus.can.clear();
-    assert(lock.update(1'003'000U, bus) && bus.can.empty());  // resend every 4 ms
-    assert(lock.update(1'004'000U, bus) && bus.can.size() == 4U);
+    assert(lock.update(1'002'000U, bus) && bus.can.empty());
+    assert(lock.update(1'003'000U, bus) && bus.can.size() == 4U);
     assert(lock.atZero(2'000'000U));
     bus.can.clear();
     assert(lock.update(2'100'000U, bus));
@@ -210,6 +289,12 @@ int main() {
                                                            (mode.data[6] << 16) | (mode.data[7] << 24));
       assert(input == (knee ? robot_control::motor_frame::kInputModeMit
                             : robot_control::motor_frame::kInputModePassthrough));
+      if (knee) {
+        // The first lock frame must already obey the GDS68 hardware cap;
+        // waiting for VMC to arm would expose the joint to Kp=40 meanwhile.
+        const auto first = robot_control::motor_frame::unpackMitCommand(bus.can[4U + i].data);
+        assert(first.kp <= tap_fw::board::kLegMaxKpNmPerRad + 0.15F);
+      }
     }
     lock.setKneeImpedance({LegLock::KneeMit{12.0F, 0.4F, 1.5F, 0.2F}, LegLock::KneeMit{8.0F, 0.3F, 2.0F, -0.1F}});
     bus.can.clear();
@@ -229,6 +314,19 @@ int main() {
       assert(near(m.tff_nm, legs[i].driver_sign * want.tff_nm, 0.03F));
       assert(near(m.vel_rad_s, legs[i].driver_sign * want.vel_rad_s, 0.04F));
       assert(near(m.pos_rad, -0.5F * legs[i].driver_sign, 1.0e-3F));
+    }
+    lock.setKneeImpedance({LegLock::KneeMit{80.0F, 0.4F, 1.5F, 0.2F},
+                           LegLock::KneeMit{40.0F, 0.3F, 2.0F, -0.1F}});
+    bus.can.clear();
+    assert(lock.update(1'004'000U, bus));
+    for (std::size_t i = 0; i < 4U; ++i) {
+      if (legs[i].joint_index != 1U && legs[i].joint_index != 4U) continue;
+      const bool left = legs[i].joint_index < 3U;
+      const auto m = robot_control::motor_frame::unpackMitCommand(bus.can[i].data);
+      assert(near(m.kp, tap_fw::board::kLegMaxKpNmPerRad, 0.15F));
+      assert(near(m.kd, left ? 0.4F : 0.3F, 0.01F));
+      assert(near(m.tff_nm, legs[i].driver_sign * (left ? 1.5F : 2.0F), 0.03F));
+      assert(near(m.vel_rad_s, legs[i].driver_sign * (left ? 0.2F : -0.1F), 0.04F));
     }
   }
 
@@ -399,7 +497,7 @@ int main() {
     assert(o.state == V3Controller::State::Ready && c.readyPhase() == 1);
     o = step(0.09F, 0.02F, 200);        // held 0.4 s: not armed yet
     assert(c.readyPhase() == 1);
-    o = step(0.09F, 0.2F, 5);           // a wobble restarts the still timer
+    o = step(0.09F, 0.2F, 5);           // brief wobble consumes only its own time
     o = step(0.09F, 0.02F, 400);        // held 0.8 s: armed
     assert(o.state == V3Controller::State::Ready && c.readyPhase() == 2);
     o = step(0.095F, 0.05F, 5);         // small drift below the tip thresholds
@@ -407,6 +505,106 @@ int main() {
     o = step(0.12F, 0.2F, 1);           // released: tips
     assert(o.state == V3Controller::State::Balancing);
     assert(near(c.balanceRef(), 0.09F, 1.0e-3F));  // seeded at the held pitch
+  }
+
+  // The firmware's loosened handshake (AppV3, 2026-10-03): a still robot's
+  // IMU pitch jitters ~0.02 rad pp, which the default 0.015 span never
+  // armed through; armed, it engages after armed_go_s even if the operator
+  // is still steadying it (no tip).
+  {
+    auto cfg = tap_fw::v3::defaultV3Config();
+    cfg.engage.immediate = false;
+    cfg.engage.still_us = 500'000U;
+    cfg.engage.still_span_rad = 0.04F;
+    cfg.engage.armed_go_s = 0.5F;
+    V3Controller c(cfg);
+    V3Controller::Input in{};
+    in.legs_ready = true;
+    in.pitch_rad = -0.02F;
+    V3Controller::Command cmd{};
+    cmd.start = true;
+    (void)c.update(in, cmd);
+    cmd.start = false;
+    std::uint64_t t = 1'300'000U;
+    int k = 0;
+    auto step = [&](float pitch, float rate, int n, float jitter) {
+      V3Controller::Output o{};
+      for (int i = 0; i < n; ++i, ++k) {
+        t += 2000U;
+        in.now_us = t;
+        in.pitch_rad = pitch + ((k / 7) % 2 ? jitter : -jitter);
+        in.pitch_rate_rad_s = rate;
+        o = c.update(in, cmd);
+      }
+      return o;
+    };
+    auto o = step(0.1F, 0.8F, 100, 0.0F);       // carried to the floor
+    assert(c.readyPhase() == 1);
+    o = step(0.09F, 0.02F, 300, 0.011F);        // held 0.6 s, 0.022 rad pp jitter: armed
+    assert(o.state == V3Controller::State::Ready && c.readyPhase() == 2);
+    o = step(0.09F, 0.02F, 200, 0.008F);        // still steadied 0.4 s: waiting
+    assert(o.state == V3Controller::State::Ready);
+    o = step(0.09F, 0.02F, 60, 0.008F);         // past 0.5 s: balancing
+    assert(o.state == V3Controller::State::Balancing);
+  }
+
+  // Full-height v3.3 startup: velocity feedback can chatter while all four
+  // joints stay at zero. The operator's carry/still/release sequence must
+  // follow the IMU body rate, not the noisy virtual CoM-line derivative.
+  {
+    auto cfg = tap_fw::v3::defaultV3Config();
+    cfg.engage.immediate = false;
+    cfg.tier.virtual_pitch = true;
+    cfg.tier.trunk = true;
+    V3Controller c(cfg);
+    V3Controller::Input in{};
+    in.legs_ready = in.legs_measured = true;
+    V3Controller::Command cmd{};
+    cmd.start = true;
+    (void)c.update(in, cmd);
+    cmd.start = false;
+    std::uint64_t t = 1'300'000U;
+    int sample = 0;
+    auto step = [&](float pitch, float body_rate, int n) {
+      V3Controller::Output out{};
+      for (int i = 0; i < n; ++i) {
+        in.now_us = t += 2000U;
+        in.pitch_rad = pitch;
+        in.pitch_rate_rad_s = body_rate;
+        // Encoder positions remain exactly at the straight-leg power-up
+        // pose; only the driver's velocity feedback alternates.
+        const float noise = (++sample % 2 == 0) ? 0.15F : -0.15F;
+        in.hip_rate_rad_s = {noise, noise};
+        in.knee_rate_rad_s = {noise, noise};
+        out = c.update(in, cmd);
+      }
+      return out;
+    };
+    auto out = step(0.0F, 0.01F, 1000);
+    assert(out.state == V3Controller::State::Ready && c.readyPhase() == 0);
+    assert(near(c.legPose().knee_offset_rad, 0.0F));
+    assert(near(c.legPose().axle_below_hip_m, tap_fw::v3::LegHeight::maxHeight()));
+    assert(std::abs(c.virtualPitchRate()) > cfg.engage.tip_rate_rad_s);
+    out = step(0.10F, 0.8F, 10);  // actual body movement leaves the stand
+    assert(out.state == V3Controller::State::Ready && c.readyPhase() == 1);
+    (void)step(0.08F, 0.01F, 200);
+    assert(c.readyPhase() == 1);  // less than 0.7 s is insufficient
+    (void)step(0.08F, 0.2F, 5);   // tolerate a short body-rate spike
+    (void)step(0.08F, 0.01F, 100);
+    assert(c.readyPhase() == 1);
+    out = step(0.08F, 0.01F, 100);
+    assert(out.state == V3Controller::State::Ready && c.readyPhase() == 2);
+    assert(out.wheel_cmd_rad_s[0] == 0.0F && out.wheel_cmd_rad_s[1] == 0.0F);
+    out = step(0.08F, 0.01F, 100);  // encoder chatter alone cannot release
+    assert(out.state == V3Controller::State::Ready && c.readyPhase() == 2);
+    out = step(0.095F, 0.2F, 1);   // one rate spike cannot release
+    assert(out.state == V3Controller::State::Ready);
+    out = step(0.095F, 0.2F, 10);  // sustained IMU rate sees the release/tip
+    assert(out.state == V3Controller::State::Balancing);
+    assert(near(c.balanceRef(), 0.08F, 1.0e-3F));
+    cmd.disable = true;
+    out = step(0.12F, 0.3F, 1);
+    assert(out.state == V3Controller::State::Idle && !out.wheels_enabled);
   }
 
   // Default flow: engage right after the lock. Held on the stand (body

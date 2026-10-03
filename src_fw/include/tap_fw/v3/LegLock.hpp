@@ -28,11 +28,11 @@ class LegLock {
   struct Config {
     Mode mode = Mode::Position;
     float ramp_s = 1.0F;                   // current pose -> 0
-    // 250 Hz (kLegCommandPeriodUs): position-mode targets are passthrough,
-    // so every resend is a step; at 100 Hz a height move was a coarse
-    // staircase kicking the underdamped GDS68 servo (HIPTEST 2026-09-30:
-    // +17 % at 1 Hz). HIPTEST ran at 4 ms without CAN errors.
-    std::uint32_t resend_period_us = 4'000U;
+    // 333 Hz, paced on the 500 Hz control clock (alternating 2/4 ms).
+    // At 500 kbit/s, 4 command frames + 2 MIT replies each cycle and 4
+    // encoder streams at 100 Hz use ~62 % even with worst-case stuffing.
+    // Four commands at 500 Hz would use ~88 % before heartbeat/diagnostics.
+    std::uint32_t resend_period_us = 3'000U;
     float mit_kp_nm_per_rad = 15.0F;
     float mit_kd_nm_s_per_rad = 0.5F;
     float gear_ratio = 8.0F;               // rotor turns per joint turn
@@ -47,8 +47,8 @@ class LegLock {
 
   static constexpr std::size_t kLegs = 4U;  // board::MotorIds{}.leg_can order
 
-  LegLock() noexcept = default;
-  explicit LegLock(Config config) noexcept : config_(config) {}
+  LegLock() noexcept { resetKneeImpedance(); }
+  explicit LegLock(Config config) noexcept : config_(config) { resetKneeImpedance(); }
 
   // Starts the lock from the measured rotor positions (driver turns).
   bool engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
@@ -87,12 +87,17 @@ class LegLock {
   [[nodiscard]] float velFfTurns(std::size_t leg) const noexcept;
   void setResendPeriod(std::uint32_t period_us) noexcept {
     config_.resend_period_us = period_us;
+    next_send_us_ = last_send_us_ + period_us;
   }
   void setKneeMit(bool on) noexcept { config_.knee_mit = on; }
-  // [left, right]; held until the next call.
-  void setKneeImpedance(const std::array<KneeMit, 2>& knees) noexcept { knee_mit_ = knees; }
+  // VMC gains are already in joint units. Enforce the board's measured Kp
+  // ceiling at the driver boundary; retain damping and load feed-forward.
+  // Shared with the host plant so it simulates the actual outgoing gains.
+  [[nodiscard]] static KneeMit driverKneeImpedance(KneeMit knee) noexcept;
+  // [left, right]; stored as the effective driver gains until the next call.
+  void setKneeImpedance(const std::array<KneeMit, 2>& knees) noexcept;
   [[nodiscard]] const std::array<KneeMit, 2>& kneeImpedance() const noexcept { return knee_mit_; }
-  void resetKneeImpedance() noexcept { knee_mit_ = {}; }
+  void resetKneeImpedance() noexcept { setKneeImpedance({}); }
   void setMitGains(float kp, float kd) noexcept {
     config_.mit_kp_nm_per_rad = kp;
     config_.mit_kd_nm_s_per_rad = kd;
@@ -113,6 +118,7 @@ class LegLock {
   bool engaged_ = false;
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;
+  std::uint64_t next_send_us_ = 0U;
   std::array<float, kLegs> start_turns_{};
 };
 

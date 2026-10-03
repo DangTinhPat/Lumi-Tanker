@@ -43,6 +43,13 @@ V3Controller::V3Controller(Config config)
 V3Controller::Output V3Controller::fault(const char* reason, const Output& base) {
   state_ = State::Fault;
   last_fault_ = reason;
+  #ifdef TAP_SPLIT_HOST_PROTOTYPE
+  if (config_.split.enabled) {
+    split_alpha_b_ = split_hold_s_ = split_b_ = 0.0F;
+    split_frozen_ = true;
+  }
+  #endif
+
   Output out = base;
   out.state = state_;
   out.legs_locked = legs_held_;  // wheels stop, legs keep holding
@@ -53,6 +60,7 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
 }
 
 V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_in) {
+  wheel_carrier_rad_s_.fill(0.0F);
   // Roll on: the turn command is slewed (Roll::yaw_accel_rad_s2) so the
   // lean-in can build with the centripetal pull instead of after it.
   Command cmd = cmd_in;
@@ -119,14 +127,19 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
        (tierVirtual() || wholeBody() ? chain_rate_meas_ : chain_rate_f_));
   ground_x_ = config_.wheel_radius_m * (mean_pos + raw.pitch_rad + raw.leg_chain_rad);
 
-  // v3.3 tier 1: everything below (engage, balance loop, fall, runaway and
-  // held checks, height quality) works on the virtual pitch when enabled.
+  // v3.3 tier 1: the balance loop, fall, runaway, held checks and height
+  // quality use virtual pitch. Ready's operator-motion rate stays on the
+  // body IMU; its balance seed still uses the virtual pitch.
   updateVirtualPitch(raw);
   Input in = raw;
   in.pitch_rad = theta_v_;
   in.pitch_rate_rad_s = theta_v_rate_;
   if (state_ != State::Balancing) {
-    sus_vz_ = sus_dz_ = sus_dk_ = 0.0F;
+    wheel_leg_alpha_ = 0.0F;
+    wheel_leg_quiet_since_us_ = 0U;
+    sus_vz_ = sus_vz_slow_ = sus_dz_ = sus_dk_ = 0.0F;
+    sus_vz_eff_ = sus_alpha_ = 0.0F;
+    height_settled_since_us_ = 0U;
     wb_lean_init_ = false;
     if (excite_applied_) {
       knee_excite_rad_ = 0.0F;
@@ -135,15 +148,27 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     }
   }
   if (state_ != State::Balancing) {
-    updateTrunk(in, false, {0.0F, 0.0F});
+    updateLegLayers(in, false, {0.0F, 0.0F});
     const float step = std::max(config_.tier.rate_rad_s, 0.0F) * in.dt_s;
     dknee_ -= std::clamp(dknee_, -step, step);  // whole-body knee offset back to the pose
+    axle_hip_correction_ -= std::clamp(axle_hip_correction_, -step, step);
+    axle_limited_ = false;
   }
 
   Output out{};
   if (cmd.disable) {
     legs_held_ = false;
+    #ifdef TAP_SPLIT_HOST_PROTOTYPE
+    if (config_.split.enabled) {
+      split_a_ = split_b_ = split_alpha_b_ = split_hold_s_ = split_integral_ = 0.0F;
+      split_preview_ = split_model_target_ = 0.0F;
+      split_was_enabled_ = false; split_frozen_ = true;
+    }
+    #endif
+
     dhip_ = dknee_ = trunk_alpha_ = level_beta_ = 0.0F;  // legs released: no offsets left over
+    axle_hip_correction_ = 0.0F;
+    axle_limited_ = false;
     state_ = State::Idle;
     out.state = state_;
     return out;
@@ -163,6 +188,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
           height_target_m_ = LegHeight::maxHeight();
           knee_target_rad_ = knee_cmd_rad_ = 0.0F;
           height_speed_m_s_ = 0.0F;
+          height_accel_m_s2_ = 0.0F;
           pose_ = LegHeight::forKnee(0.0F);
         }
         out.engage_legs = !legs_held_;  // already holding after a fault: keep it
@@ -178,8 +204,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         state_since_us_ = in.now_us;
         ready_phase_ = 0;
         ready_entry_pitch_ = in.pitch_rad;
-        still_since_us_ = 0U;
-        still_n_ = 0;
+        resetReadyStill();
       }
       break;
     case State::Ready: {
@@ -188,7 +213,13 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
       out.wheels_enabled = true;
       if (!in.sensors_ok) return fault("sensor feedback lost while ready", out);
       const Engage& e = config_.engage;
-      const float rate = std::abs(in.pitch_rate_rad_s);
+      // Ready detects the operator carrying/holding/releasing the BODY.
+      // The virtual rate includes driver joint velocities: at full height
+      // their chatter can reset the still timer forever, even though the
+      // joints' positions and the bias-corrected IMU body rate stay quiet.
+      // It can also falsely trigger release after arming. Keep the virtual
+      // pitch angle for the balance seed, but use IMU rate for this handshake.
+      const float rate = std::abs(raw.pitch_rate_rad_s);
       const bool armed_only = e.wb_armed_only && config_.algo == Algo::WholeBody;
       bool go = !armed_only && (cmd.go || e.immediate);
       float armed_seed = in.pitch_rad;
@@ -197,27 +228,28 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
           if (rate > e.move_rate_rad_s ||
               std::abs(in.pitch_rad - ready_entry_pitch_) > e.move_pitch_rad) {
             ready_phase_ = 1;
-            still_since_us_ = 0U;
+            resetReadyStill();
           }
         } else if (ready_phase_ == 1) {
-          if (rate < e.still_rate_rad_s) {
-            if (still_since_us_ == 0U) {
-              still_since_us_ = in.now_us;
-              still_sum_ = 0.0F;
-              still_n_ = 0;
-            }
-            still_sum_ += in.pitch_rad;
-            ++still_n_;
-            if (in.now_us - still_since_us_ >= e.still_us) {
-              ready_phase_ = 2;
-              armed_pitch_ = still_sum_ / static_cast<float>(std::max(still_n_, 1));
-            }
-          } else {
-            still_since_us_ = 0U;
+          if (readyStill(in, raw.pitch_rad, rate)) {
+            ready_phase_ = 2;
+            ready_armed_us_ = in.now_us;
+            armed_pitch_ = still_sum_ / static_cast<float>(std::max(still_n_, 1));
+            ready_tip_us_ = 0U;
           }
-        } else if (rate > e.tip_rate_rad_s ||
-                   std::abs(in.pitch_rad - armed_pitch_) > e.tip_pitch_rad) {
-          go = true;  // released at the standing point: it starts to tip
+        } else {
+          // A short rate spike tolerated by the quiet window must not
+          // immediately release the robot on the following ARMED tick.
+          const bool gap = in.now_us <= ready_last_us_ || in.now_us-ready_last_us_ > 20'000U;
+          const auto dt_us = static_cast<std::uint64_t>(
+              std::clamp(in.dt_s, 0.0F, 0.01F) * 1.0e6F);
+          if (gap || rate <= e.tip_rate_rad_s) ready_tip_us_ = 0U;
+          else ready_tip_us_ += dt_us;
+          ready_last_us_ = in.now_us;
+          go = ready_tip_us_ >= 20'000U ||
+              std::abs(in.pitch_rad - armed_pitch_) > e.tip_pitch_rad ||
+              (e.armed_go_s > 0.0F && in.now_us - ready_armed_us_ >=
+                   static_cast<std::uint64_t>(e.armed_go_s * 1.0e6F));
         }
       }
       if (go) {
@@ -305,7 +337,10 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     }
     updateHeight(in, cmd);
     applyPoseOffsets(in);
+    updateWheelLegCoordination(in);
     if (wholeBody()) {
+      axle_hip_correction_ = 0.0F;
+      axle_limited_ = false;
       out.wheel_cmd_rad_s = wbUpdate(in, cmd);
       if (wb_ring_fault_) {
         wb_ring_fault_ = false;
@@ -313,8 +348,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
       }
     } else {
       out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
-      updateTrunk(in, true, out.wheel_cmd_rad_s);
-      if (kneeHoldOn()) dknee_ = kneeHold(dhip_);
+      updateLegLayers(in, true, out.wheel_cmd_rad_s);
+      coordinateTrunkAxle();
     }
     out.leg_hip_offset_rad = hipCommand();
     out.leg_knee_offset_rad = kneeCommand();
@@ -367,10 +402,22 @@ void V3Controller::engageBalance(const Input& in, float seed) {
   state_ = State::Balancing;
   runaway_v_imu_ = ground_v_;
   state_since_us_ = in.now_us;
+  height_startup_ = true;
+  // The slow startup stage reserves coordinated trunk/roll travel. A stored deep-crouch
+  // request is applied afterwards at the normal operator height speed.
+  const float hmax = supportedMaxHeight();
+  startup_height_m_ = std::min(LegHeight::forKnee(knee_cmd_rad_).axle_below_hip_m, hmax);
+  height_speed_m_s_ = 0.0F;
+  height_accel_m_s2_ = 0.0F;
+  height_settled_since_us_ = 0U;
+  sus_vz_ = sus_vz_slow_ = sus_dz_ = sus_dk_ = sus_vz_eff_ = sus_alpha_ = 0.0F;
   runaway_since_us_ = 0U;
   lqr_.reset(ground_x_, true);  // anchors LQR position to ground_x_ too
   lqr_.setBalanceTrim(seed);
   lqr_x_target_m_ = ground_x_;
+  stand_give_m_ = 0.0F;
+  stand_leash_wait_s_ = std::max(config_.stand_leash_release_s, 0.0F);
+  stand_leash_on_ = false;
   lqr_lead_filt_ = 0.0F;
   model_bad_since_us_ = 0U;
   // theta_b is the balance angle at the power-up height; the height
@@ -424,6 +471,7 @@ void V3Controller::heldRezero(const Input& in) {
   lqr_.setBalanceTrim(in.pitch_rad - ffPitch());
   lqr_x_target_m_ = ground_x_;
   lqr_lead_filt_ = 0.0F;
+  stand_give_m_ = 0.0F;
   held_quiet_ = true;
   held_outer_off_ = true;
   held_quiet_since_us_ = in.now_us;
@@ -578,13 +626,34 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
 }
 
+float V3Controller::lqrInertiaLength() noexcept {
+  // I_axle / (m l) of the whole robot at the commanded pose (CAD masses and
+  // inertia; wheels roll with the axle). Recomputed only when the pose moves.
+  if (std::abs(pose_.knee_offset_rad - lqr_leff_knee_) > 1.0e-3F ||
+      std::abs(pose_.hip_offset_rad - lqr_leff_hip_) > 1.0e-3F) {
+    lqr_leff_knee_ = pose_.knee_offset_rad;
+    lqr_leff_hip_ = pose_.hip_offset_rad;
+    const float hip = LegHeight::hangHipCad() + pose_.hip_offset_rad;
+    const auto b = robot_control::WholeBodyModel{}.compute(hip, pose_.knee_offset_rad, hip,
+                                                           pose_.knee_offset_rad);
+    const float l = std::hypot(b.com_offset_x_m, b.com_above_axle_m);
+    if (l > 0.01F && b.pitch_inertia_at_axle_kg_m2 > 0.0F) {
+      lqr_leff_m_ = b.pitch_inertia_at_axle_kg_m2 /
+          (robot_control::geometry::total_mass_kg * l);
+    }
+  }
+  return lqr_leff_m_;
+}
+
 std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd) {
   const Pid& p = config_.pid;  // shared held/lifted thresholds and deadband comp
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
   const float vmax = config_.lqr.max_ground_velocity_m_s;
   // v3.2: the pendulum length tracks the current leg height every tick; once
   // the gain table is built (Locking) this is a cheap interpolation.
-  lqr_.setComHeight(pose_.com_above_axle_m);
+  lqr_.setComHeight(config_.lqr_inertia_length
+      ? lqrInertiaLength() / std::max(config_.lqr.pendulum_length_per_com_height, 0.1F)
+      : pose_.com_above_axle_m);
   if (held_quiet_) {
     const float wheels = radius * 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
     const bool tilted = std::abs(in.pitch_rad - (lqr_.balanceTrim() + ffPitch())) > 0.03F;
@@ -593,6 +662,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     if (!tilted && !stopped) {
       lqr_.reset(ground_x_, true);
       lqr_x_target_m_ = ground_x_;
+      stand_give_m_ = 0.0F;
       held_window_start_us_ = 0U;
       return {0.0F, 0.0F};
     }
@@ -612,7 +682,8 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   // pulled back slowly afterwards (physics-sim T20).
   const float v_ref = lqr_.debugState().lqr_velocity_reference_m_s;
   if (std::abs(target_v) > 1.0e-3F || std::abs(v_ref) > 1.0e-3F) {
-    lqr_x_target_m_ += v_ref * in.dt_s;
+    lqr_x_target_m_ += stand_give_m_ + v_ref * in.dt_s;  // drive from where it is
+    stand_give_m_ = 0.0F;
     // Leash: a climb or a stall must not bank position error for a
     // catch-up sprint - on a dense rough road the robot slowed to 0.2 m/s on
     // a rise, then sprinted to 0.83 m/s (past the wheel cap) and fell (sim
@@ -624,6 +695,34 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     lqr_x_target_m_ = ground_x_;
     pid_driving_ = false;
   }
+  // Standing leash (Config::stand_leash_m): while a push runs the wheels
+  // near their cap, the anchor the LQR sees gives way to within the leash of
+  // the robot (stand_give_m_ off the station), and afterwards walks back to
+  // the station at stand_return_m_s - the robot still comes home, but is
+  // led back instead of sprung back. Slower (a hand pressing) the spring
+  // keeps its full reach. Not for stand_leash_release_s after an engage or
+  // a release: a wrong seed trim runs the wheels to the cap too, and there
+  // the spring is the brake (held 8 s, released at +0.11 rad of trim error:
+  // the leash let it run 1.5 m into a held re-zero and a fall, sim V4).
+  const float stand_leash = std::max(config_.stand_leash_m, 0.0F);
+  if (!pid_driving_ && stand_leash > 0.0F) {
+    const bool fast = std::abs(pid_v_filt_) >= std::max(config_.stand_leash_from, 0.0F) * vmax;
+    stand_leash_wait_s_ = std::max(stand_leash_wait_s_ - in.dt_s, 0.0F);
+    // Latched until the robot has stopped: it still rolls ~0.3 m while
+    // braking from the gate speed, and that is not station error either.
+    if (fast && stand_leash_wait_s_ <= 0.0F) stand_leash_on_ = true;
+    if (std::abs(pid_v_filt_) < 0.05F) stand_leash_on_ = false;
+    if (stand_leash_on_) {
+      stand_give_m_ = std::clamp(lqr_x_target_m_ + stand_give_m_, ground_x_ - stand_leash,
+                                 ground_x_ + stand_leash) - lqr_x_target_m_;
+    } else {
+      const float step = std::max(config_.stand_return_m_s, 0.0F) * in.dt_s;
+      stand_give_m_ -= std::clamp(stand_give_m_, -step, step);
+    }
+  } else {
+    stand_give_m_ = 0.0F;
+    stand_leash_on_ = false;
+  }
   // Horizontal specific force (see pidUpdate): tells a free robot from a held
   // one, shared by both algorithms' held/lifted exit condition.
   const float a_h = in.accel_x_m_s2 * std::cos(body_pitch_) +
@@ -633,6 +732,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   held_free_ticks_ = std::abs(ax_f_ - held_ax_ref_) > 0.15F ? held_free_ticks_ + 1 : 0;
   if (held_outer_off_ && (std::abs(body_rate_) > 0.15F || held_free_ticks_ >= 25)) {
     held_outer_off_ = false;
+    stand_leash_wait_s_ = std::max(config_.stand_leash_release_s, 0.0F);
     lqr_.setBalanceTrim(releaseBalance(in) - ffPitch());
     // Free again: walk the trim from the hold angle to the learned balance
     // angle (Config::learn_release_s) instead of balancing around wherever
@@ -650,6 +750,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     // stays here, so nothing is spent balancing a body that isn't falling.
     lqr_.setBalanceTrim(in.pitch_rad - ffPitch());
     lqr_x_target_m_ = ground_x_;
+    stand_give_m_ = 0.0F;
   } else if (trim_blend_) {
     const float goal = learned_trim_rad_ - ffPitch();
     const float d = goal - lqr_.balanceTrim();
@@ -672,11 +773,14 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     // "!(|u| < corr_max_rad)" freeze): a large seed error means the LQR's
     // own regulator is still catching the initial transient, and winding
     // the trim up during that fight overshot and fell (physics-sim T15).
-    const float ex = ground_x_ - lqr_x_target_m_;
+    // With the standing leash giving way, the integral sees the error to
+    // the anchor the LQR is given; learning still measures from the station.
+    const float ex_station = ground_x_ - lqr_x_target_m_;
+    const float ex = ex_station - stand_give_m_;
     lqr_.setBalanceTrim(lqr_.balanceTrim() - config_.lqr_trim_gain * ex * in.dt_s);
-    updateLearnedTrim(in, ex, lqr_.balanceTrim() + ffPitch());
+    updateLearnedTrim(in, ex_station, lqr_.balanceTrim() + ffPitch());
   }
-  lqr_.reanchorPosition(lqr_x_target_m_);
+  lqr_.reanchorPosition(lqr_x_target_m_ + stand_give_m_);
 
   // LqrBalancer::Config::wheel_velocity_reference_from_measured is true, so
   // the raw (noisy) encoder-derived ground_v_ feeds the state vector's
@@ -809,8 +913,23 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
     if (dbc <= 0.0F) return w;
     return w + dbc * std::tanh(w / std::max(p.deadband_eps_rad_s, 1.0e-3F));
   };
-  return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel),
-          comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel)};
+  auto& carrier = wheel_carrier_rad_s_;
+  if (tierVirtual() && config_.tier.wheel_carrier_compensation && !held_outer_off_ && !held_quiet_) {
+    for (std::size_t side = 0; side < 2U; ++side) {
+      // Native rolling kinematics: v_axle/R = wheel_relative + body_rate
+      // + hip_rate + knee_rate. The input side already ADDS this carrier
+      // in ground_v_. A partial inverse here informs the wheel servo of
+      // carrier motion without adding full instantaneous feed-forward to
+      // a delayed, already closed feedback loop. Use body gyro, not theta_v
+      // rate (which contains a different COM Jacobian). Bound the measured
+      // carrier at 3 rad/s, so the default correction is <=0.012 m/s.
+      carrier[side] = wheel_leg_alpha_ * std::clamp(config_.tier.wheel_carrier_gain, 0.0F, 1.0F) *
+          config_.lqr.left_wheel_sign * std::clamp(
+          body_rate_ + in.hip_rate_rad_s[side] + in.knee_rate_rad_s[side], -3.0F, 3.0F);
+    }
+  }
+  return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
+          comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
 }
 
 void V3Controller::wbReset(const Input& in) {
@@ -1130,6 +1249,65 @@ std::array<float, 2> V3Controller::wbUpdate(const Input& in, const Command& cmd)
   return {cap(sign * (wb_cmd_v_ - yaw) / radius), cap(sign * (wb_cmd_v_ + yaw) / radius)};
 }
 
+void V3Controller::resetReadyStill() noexcept {
+  still_since_us_ = ready_last_us_ = 0U;
+  still_quiet_us_ = still_bad_us_ = still_bad_run_us_ = ready_tip_us_ = 0U;
+  still_sum_ = 0.0F;
+  still_n_ = 0;
+  still_quiet_ = false;
+}
+
+bool V3Controller::readyStill(const Input& in, float body_pitch, float body_rate) noexcept {
+  const auto& e = config_.engage;
+  const float enter = e.still_rate_rad_s;
+  const float exit = 1.5F * enter;
+  const bool gap = ready_last_us_ != 0U &&
+      (in.now_us <= ready_last_us_ || in.now_us-ready_last_us_ > 20'000U);
+  // A real carry/tip, clock gap, or >0.86 degree change restarts the whole
+  // window. The angle bound rejects slow monotonic motion even below the
+  // rate threshold. Use BODY angle/rate, not encoder-induced virtual motion.
+  if (gap || !std::isfinite(body_rate) || !std::isfinite(body_pitch) || !std::isfinite(in.pitch_rad) ||
+      body_rate > 2.0F * exit) {
+    resetReadyStill();
+    return false;
+  }
+  if (still_since_us_ == 0U) {
+    if (body_rate >= enter) return false;
+    still_since_us_ = ready_last_us_ = in.now_us;
+    still_body_min_ = still_body_max_ = body_pitch;
+    still_quiet_ = true;
+    return false;
+  }
+  const auto elapsed_us = in.now_us-ready_last_us_;
+  const auto dt_us = std::min<std::uint64_t>(elapsed_us, 10'000U);
+  ready_last_us_ = in.now_us;
+  still_body_min_ = std::min(still_body_min_, body_pitch);
+  still_body_max_ = std::max(still_body_max_, body_pitch);
+  if (still_body_max_-still_body_min_ > std::max(e.still_span_rad, 0.0F)) {
+    resetReadyStill();
+    return false;
+  }
+  if (body_rate >= exit) still_quiet_ = false;
+  else if (body_rate < enter) still_quiet_ = true;
+  if (still_quiet_) {
+    still_quiet_us_ += dt_us;
+    still_bad_run_us_ = 0U;
+    still_sum_ += in.pitch_rad;  // virtual pitch remains the balance seed
+    ++still_n_;
+  } else {
+    still_bad_us_ += dt_us;
+    still_bad_run_us_ += dt_us;
+  }
+  // Default 700 ms quiet plus at most 100 ms disturbed in total; no run
+  // of disturbance longer than 70 ms. Brief vibrations lose only their
+  // own time; they do not throw away the entire preceding quiet interval.
+  if (still_bad_us_ > e.still_us/7U || still_bad_run_us_ > e.still_us/10U) {
+    resetReadyStill();
+    return false;
+  }
+  return still_quiet_ && still_quiet_us_ >= e.still_us && still_n_ > 0;
+}
+
 V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
   namespace geo = robot_control::geometry;
   const float hip = LegHeight::hangHipCad() + hip_offset;
@@ -1142,7 +1320,17 @@ V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset)
   const float den = cx * cx + cz * cz;
   return {std::atan2(cx, cz),
           (cz * jac.d_com_offset_x_d_hip - cx * jac.d_com_above_axle_d_hip) / den,
-          (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den};
+          (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den, cz};
+}
+
+float V3Controller::legModelError() const noexcept {
+  // The sign guard/trace needs only the angle, not a second full Jacobian.
+  namespace geo = robot_control::geometry;
+  const float hip = LegHeight::hangHipCad() + hipCommand(), knee = kneeCommand();
+  const auto model = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
+  const float x = model.com_offset_x_m + geo::parts[0].mass *
+      config_.tier.body_com_dx_m / geo::total_mass_kg;
+  return c_meas_ - std::atan2(x, std::max(model.com_above_axle_m, 0.01F));
 }
 
 void V3Controller::updateVirtualPitch(const Input& in) {
@@ -1168,10 +1356,19 @@ void V3Controller::updateVirtualPitch(const Input& in) {
   knee_meas_ = 0.5F * (in.knee_rad[0] + in.knee_rad[1]);
   const ComLine c = comLine(hip_meas_, knee_meas_);
   c_meas_ = c.angle;
+  com_meas_height_m_ = c.height_m;
   theta_v_ = in.pitch_rad + c.angle - com_line_hang_;
   // Analytic rate from the driver velocities: differentiating the angle and
   // filtering it would add lag to the balancer's D channel.
-  theta_v_rate_ = in.pitch_rate_rad_s + config_.tier.joint_rate_gain *
+  const Tier& t = config_.tier;
+  float rate_gain = t.joint_rate_gain;
+  if (t.joint_rate_gain_low >= 0.0F) {
+    const float ratio = std::clamp(c.height_m / std::max(com_hang_m_, 0.01F), 0.1F, 1.0F);
+    const float low_w = std::clamp((t.ratio_tall - ratio) / std::max(t.ratio_tall - t.ratio_low, 1.0e-3F),
+                                   0.0F, 1.0F);
+    rate_gain += low_w * (t.joint_rate_gain_low - t.joint_rate_gain);
+  }
+  theta_v_rate_ = in.pitch_rate_rad_s + rate_gain *
       (c.d_hip * hip_rate_meas_ + c.d_knee * knee_rate_meas_);
 }
 
@@ -1184,17 +1381,133 @@ void V3Controller::updateImuVelocity(const Input& raw, bool free) {
   // input (the tiers' hip_meas_ is only kept with the virtual pitch).
   const bool wb = wholeBody() && legs_measured_;
   if (!config_.tier.imu_kinematic || !free || !(tierVirtual() || wb)) return;
-  const float hip_off = wb ? 0.5F * (raw.hip_rad[0] + raw.hip_rad[1]) : hip_meas_;
-  const float knee = wb ? 0.5F * (raw.knee_rad[0] + raw.knee_rad[1]) : knee_meas_;
-  const float hip_rate = wb ? 0.5F * (raw.hip_rate_rad_s[0] + raw.hip_rate_rad_s[1]) : hip_rate_meas_;
-  const float knee_rate = wb ? 0.5F * (raw.knee_rate_rad_s[0] + raw.knee_rate_rad_s[1]) : knee_rate_meas_;
-  const float hip = LegHeight::hangHipCad() + hip_off;
-  const float wheel = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
-  const auto v = robot_control::WholeBodyModel::imuVelocityThroughLeg(
-      raw.pitch_rad, raw.pitch_rate_rad_s, hip, knee, hip_rate, knee_rate,
-      wheel, config_.wheel_radius_m);
+  // Roll makes the two legs asymmetric: average velocities AFTER FK, not
+  // joint angles before FK. Use the same supported-leg kinematics as skyhook.
+  robot_control::WholeBodyModel::PlanarVelocity v{};
+  for (std::size_t side = 0; side < 2U; ++side) {
+    const auto s = robot_control::WholeBodyModel::imuVelocityThroughLeg(
+        raw.pitch_rad, raw.pitch_rate_rad_s,
+        LegHeight::hangHipCad() + raw.hip_rad[side], raw.knee_rad[side],
+        raw.hip_rate_rad_s[side], raw.knee_rate_rad_s[side], raw.wheel_rad_s[side],
+        config_.wheel_radius_m);
+    v.horizontal_m_s += 0.5F * s.horizontal_m_s;
+    v.vertical_m_s += 0.5F * s.vertical_m_s;
+  }
   imu_velocity_ = {v.horizontal_m_s, v.vertical_m_s, std::isfinite(v.horizontal_m_s) &&
                                                          std::isfinite(v.vertical_m_s)};
+}
+
+void V3Controller::updateWheelLegCoordination(const Input& in) noexcept {
+  // A commanded height change already has a paired hip/knee trajectory
+  // and balance feed-forward. Do not classify its own carrier motion as a
+  // new external push. Use the existing tier law during that transition,
+  // then smoothly hand back to disturbance damping once the plan is quiet.
+  const bool moving = height_startup_ || knee_cmd_rad_ != knee_target_rad_ ||
+      std::abs(height_speed_m_s_) > 1.0e-5F || std::abs(height_accel_m_s2_) > 1.0e-4F;
+  if (moving || held_outer_off_ || held_quiet_) wheel_leg_quiet_since_us_ = 0U;
+  else if (wheel_leg_quiet_since_us_ == 0U) wheel_leg_quiet_since_us_ = in.now_us;
+  const bool settled = wheel_leg_quiet_since_us_ != 0U &&
+      in.now_us - wheel_leg_quiet_since_us_ >= 1'000'000U;
+  const float target = settled ? 1.0F : 0.0F;
+  const float step = std::max(in.dt_s, 0.0F) / (settled ? 0.5F : 0.1F);
+  wheel_leg_alpha_ += std::clamp(target-wheel_leg_alpha_, -step, step);
+}
+
+#ifdef TAP_SPLIT_HOST_PROTOTYPE
+// Slow posture allocation and transient capture are separate tasks, following
+// the task separation in wheel-legged whole-body control (IROS 2021,
+// doi:10.1109/iros51168.2021.9636371). This bounded position-driver prototype
+// is NOT full-body MPC; rotor-side FK remains an uncertain estimate.
+float V3Controller::splitModelPosture() const noexcept {
+  const float pitch = config_.tier.level_pitch_rad;
+  const float depth = std::max(pose_.axle_below_hip_m * std::cos(pitch), LegHeight::minHeight());
+  const float reach = LegHeight::maxHeight();
+  const float xmax = std::sqrt(std::max(reach*reach-depth*depth, 0.0F));
+  const float desired = com_line_hang_ + balanceRef() - pitch;
+  float x = 0.0F;
+  auto target = pose_;
+  for (int i = 0; i < 5; ++i) {
+    const auto at = LegHeight::forAxleOnPlane(x, depth, pitch);
+    if (!at.ok) break;
+    target.hip_offset_rad = at.hip_offset_rad;
+    target.knee_offset_rad = at.knee_offset_rad;
+    const float angle = comLine(at.hip_offset_rad, at.knee_offset_rad).angle;
+    const auto next = LegHeight::forAxleOnPlane(std::min(x+0.0001F,xmax), depth,pitch);
+    if (!next.ok || next.x_world_m-at.x_world_m < 1.0e-6F) break;
+    const float jac = (comLine(next.hip_offset_rad,next.knee_offset_rad).angle-angle) /
+                      (next.x_world_m-at.x_world_m);
+    if (!std::isfinite(jac) || std::abs(jac)<0.1F) break;
+    x = std::clamp(x+(desired-angle)/jac,-xmax,xmax);
+  }
+  return std::clamp(target.hip_offset_rad-pose_.hip_offset_rad,
+                    -config_.tier.level_max_rad,config_.tier.level_max_rad);
+}
+
+void V3Controller::updatePosture(const Input& in, bool on, bool saturated) {
+  const float dt = std::clamp(in.dt_s,0.0F,0.01F);
+  const Split& p = config_.split;
+  const float tau = std::max(p.posture_tau_s,1.5F);
+  body_lp_ += std::clamp(dt*2.0F*3.14159265F*config_.tier.level_lpf_hz,0.0F,1.0F) *
+              (body_pitch_-body_lp_);
+  split_model_target_ = splitModelPosture();
+  const float error = (body_lp_-config_.tier.level_pitch_rad) / std::max(j_hip_,0.2F);
+  split_frozen_ = !on || saturated || split_alpha_b_>0.001F;
+  // The learned wheel trim remains owned by LQR. A uses its bounded model
+  // target, and integrates only body-level error (no second CoM integrator).
+  const float increment = dt/tau*error;
+  if (!split_frozen_ && (!axle_limited_ || increment*axle_limit_direction_<=0.0F))
+    split_integral_ = std::clamp(split_integral_+increment,
+                              -config_.tier.level_max_rad,config_.tier.level_max_rad);
+  const float want = on ? std::clamp(split_model_target_+split_integral_,
+                    -config_.tier.level_max_rad,config_.tier.level_max_rad) : 0.0F;
+  const float rate = std::max(p.posture_rate_rad_s,0.0F)*dt;
+  // tau governs the slow level adaptation. Do not filter the already
+  // planned posture a second time: that delayed zero-offset correction.
+  split_a_ += std::clamp(want-split_a_,-rate,rate);
+}
+
+void V3Controller::updateShock(const Input&, bool, float, float) {
+  // Stage B is deliberately unavailable until the slow-posture gate passes.
+  // A failed gate must not be hidden by turning the fast reflex back on.
+  split_alpha_b_ = split_hold_s_ = split_b_ = 0.0F;
+}
+
+#endif
+
+void V3Controller::updateLegLayers(const Input& in, bool active,
+                                  std::array<float,2> wheel_cmd) {
+#ifndef TAP_SPLIT_HOST_PROTOTYPE
+  updateTrunk(in,active,wheel_cmd);
+#else
+  if (!config_.split.enabled) {
+    split_was_enabled_=false;
+    updateTrunk(in,active,wheel_cmd); return;
+  }
+  const float dt=std::clamp(in.dt_s,0.0F,0.01F);
+  if (!split_was_enabled_) {
+    split_a_=dhip_; split_b_=split_alpha_b_=split_hold_s_=split_quiet_s_=0.0F;
+    split_integral_=0.0F; split_armed_=true; split_was_enabled_=true;
+    body_lp_=body_pitch_;
+  }
+  // A is the continuously planned posture owner; it does not inherit the
+  // old fast-reflex's two-second enable delay. Its own slew and the exact
+  // workspace projection bound startup motion. Held/lifted blocks it.
+  const bool on=active && config_.tier.trunk && tierVirtual() &&
+    !held_outer_off_ && !held_quiet_;
+  const float cap=std::max(config_.lqr.max_ground_velocity_m_s,0.05F)/config_.wheel_radius_m;
+  const float wr=std::max(std::abs(wheel_cmd[0]),std::abs(wheel_cmd[1]))/cap;
+  float plan=0.0F;
+  if (config_.tier.preview && plan_n_>0U) plan=std::atan(planAt(config_.tier.preview_s).a/9.80665F);
+  updateShock(in,on,wr,plan);
+  updatePosture(in,on,wr>=config_.tier.wheel_sat_margin);
+  split_preview_=on ? config_.tier.lean_share*plan/std::max(j_hip_,0.2F) : 0.0F;
+  const float wanted=split_a_+split_b_+split_preview_;
+  const float step=config_.tier.rate_rad_s*dt;
+  dhip_+=std::clamp(wanted-dhip_,-step,step);
+  trunk_alpha_=on ? 1.0F : 0.0F;
+  level_i_=split_a_; level_beta_=on ? 1.0F : 0.0F;
+  if (!active) { split_integral_=0.0F; split_b_=split_alpha_b_=0.0F; }
+#endif
 }
 
 void V3Controller::updateTrunk(const Input& in, bool active,
@@ -1206,12 +1519,9 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   const std::uint64_t since = std::max(state_since_us_, trunk_block_us_);
   const bool settled = in.now_us - since >=
       static_cast<std::uint64_t>(std::max(t.settle_s, 0.0F) * 1.0e6F);
-  // Lean of the CoM line from the balance point (in.pitch is theta_v),
-  // split into the planned part (maneuver preview: known ahead, smooth) and
-  // the residual (disturbances). The legs take the planned lean from the
-  // plan itself, hip_advance_s early against the hip servo lag; only the
-  // residual goes through the high-pass and the (filtered) lead, so sensor
-  // noise and the lead's gain stop shaking the body during planned motion.
+  // Stable b4b6d4a split: the fast path sees whole-system lean, not body
+  // counter-rotation against the joints. The slow loop below sees the body
+  // itself, so static trim and sensor/model offsets do not set its posture.
   const float lean = in.pitch_rad - (balanceRef() + ffPitch());
   float lean_plan_now = 0.0F, lean_plan_ahead = 0.0F;
   if (t.preview && tierVirtual() && plan_n_ > 0U) {
@@ -1221,7 +1531,7 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   }
   const float residual = lean - lean_plan_now;
   if (trunk_alpha_ <= 0.0F) {
-    lean_lp_ = residual;  // start from the current lean: no step when it ramps in
+    lean_lp_ = residual;
     lean_rate_f_ = 0.0F;
   } else if (t.hpf_s > 0.0F) {
     lean_lp_ += std::min(in.dt_s / t.hpf_s, 1.0F) * (residual - lean_lp_);
@@ -1234,8 +1544,19 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   // Full-authority desired hip offset (alpha = 1, unclamped): the signal
   // that decides whether the legs are running out of range, independent of
   // how far alpha has already faded (see Tier::sat_margin).
-  const float ratio = std::clamp(pose_.com_above_axle_m / std::max(com_hang_m_, 0.01F),
-                                 0.1F, 1.0F);
+  // Gain schedule from the CURRENT encoder/FK CoM height, not the requested
+  // height slider. Smooth over 50 ms so VMC compliance/encoder noise does
+  // not modulate gains on every CAN sample. sqrt(l/g) is the pendulum's
+  // natural time scale (Pratt et al., Capture Point, Humanoids 2006).
+  const float observed_h = tierVirtual() ? com_meas_height_m_ : pose_.com_above_axle_m;
+  const float measured_ratio = std::clamp(observed_h / std::max(com_hang_m_, 0.01F), 0.1F, 1.0F);
+  if (!adaptive_init_ || !active) {
+    adaptive_ratio_ = measured_ratio;
+    adaptive_init_ = true;
+  } else {
+    adaptive_ratio_ += std::clamp(in.dt_s / 0.05F, 0.0F, 1.0F) * (measured_ratio-adaptive_ratio_);
+  }
+  const float ratio = adaptive_ratio_;
   const float span = std::max(t.ratio_tall - t.ratio_low, 1.0e-3F);
   const float low_w = std::clamp((t.ratio_tall - ratio) / span, 0.0F, 1.0F);
   const float exponent = t.height_exp_tall + low_w * (t.height_exp - t.height_exp_tall);
@@ -1243,21 +1564,63 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   const float jh = std::max(j_hip_, 0.2F);
   const float lead = t.lead_s * std::pow(ratio, std::max(t.lead_exp, 0.0F));
   const float plan_share = t.plan_full ? t.lean_share : share;
-  const float full_want = (plan_share * lean_plan_ahead +
-                           share * (residual - lean_lp_ + lead * lean_rate_f_)) / jh;
-  const float max_rad = std::max(t.max_rad, 1.0e-3F);
+  const float disturbance_share = share * std::clamp(t.disturbance_share, 0.0F, 1.0F);
+  const float fast_residual = residual - lean_lp_;
+  const float disturbance_motion = std::max(std::abs(fast_residual)/0.02F,
+                                            std::abs(lean_rate_f_)/0.20F);
+  const float damping_weight = std::clamp((disturbance_motion - 0.1F)/0.9F, 0.0F, 1.0F);
+  const float response = wheel_leg_alpha_ * damping_weight;
+  const float rate_lead = lead * lean_rate_f_;
+  const float plan_want = plan_share * lean_plan_ahead / jh;
+  // Viscous damping idea: Hogan, Impedance Control Part I (1985),
+  // doi:10.1115/1.3140702. This bounded position-driver proxy is not a
+  // torque impedance controller or a passivity proof for delayed actuators.
+  // Do not close a gyro-only loop around internal body/joint vibration.
+  // Damping is allowed only with a resolved whole-system disturbance;
+  // counter-rotation with a stationary axle->COM line keeps this at zero.
+  const float body_damping = std::max(t.body_damping_s, 0.0F) * std::sqrt(ratio) *
+      response * body_rate_ / jh;
+  // Tier::hip_deadband_rad: small leans stay with the wheels.
+  const float fast_signal = fast_residual + rate_lead;
+  const float hip_db = std::max(t.hip_deadband_rad, 0.0F);
+  const float fast_used = std::copysign(std::max(std::abs(fast_signal) - hip_db, 0.0F), fast_signal);
+  const float disturbance_want = disturbance_share * fast_used / jh +
+      std::clamp(body_damping, -0.04F, 0.04F);
+  const float full_want = plan_want + disturbance_want;
+  // Horizontal workspace at the current nominal gravity-frame depth.
+  // Limit dynamic authority before the final exact Cartesian projection;
+  // static level has its own limit and directional anti-windup.
+  const float depth = std::max(pose_.axle_below_hip_m * std::cos(body_pitch_), LegHeight::minHeight());
+  const float reach = LegHeight::maxHeight();
+  const float xmax = std::sqrt(std::max((reach-depth)*(reach+depth), 0.0F));
+  const float xbase = std::abs(pose_.axle_below_hip_m * std::sin(body_pitch_));
+  const float travel = std::atan2(std::max(xmax-xbase, 0.0F), std::max(depth, 0.01F));
+  const float max_rad = std::min(std::max(t.max_rad, 0.0F), travel);
+  const float sched = t.adaptive_schedule ? std::sqrt(ratio) : 1.0F;
+  const float adaptive_rate = std::max(t.rate_rad_s, 0.0F) * sched;
+  const float level_tau = std::max(t.level_tau_s * sched, 0.5F);
+  trunk_schedule_ = {ratio, lead, adaptive_rate, max_rad, jh, level_tau};
   const float margin = std::clamp(t.sat_margin, 0.0F, 0.99F);
-  const float mag_ratio = std::abs(full_want) / max_rad;
+  const float mag_ratio = std::abs(full_want) / std::max(max_rad, 1.0e-3F);
   // Gate the fade on the wheel command too (see Tier::sat_margin): only
   // once tier 1 itself is near its own cap does giving up hip range early
   // pay for itself.
   const float wheel_cap = std::max(config_.lqr.max_ground_velocity_m_s, 0.05F) /
       std::max(config_.wheel_radius_m, 1.0e-4F);
-  const float wheel_ratio = std::max(std::abs(wheel_cmd_rad_s[0]), std::abs(wheel_cmd_rad_s[1])) /
+  const float wheel_ratio = std::max(std::abs(wheel_cmd_rad_s[0] + wheel_carrier_rad_s_[0]),
+                                    std::abs(wheel_cmd_rad_s[1] + wheel_carrier_rad_s_[1])) /
       wheel_cap;
   const bool wheel_saturating = wheel_ratio >= std::clamp(t.wheel_sat_margin, 0.0F, 1.0F);
   const float range_ceiling = (!wheel_saturating || mag_ratio <= margin)
       ? 1.0F : std::clamp((1.0F - mag_ratio) / (1.0F - margin), 0.0F, 1.0F);
+  // Not gated on !height_startup_: that forced every trunk-on engage to
+  // wait out the whole 12 mm reserve-opening crouch (~1.2 s) before trunk
+  // or the slow level loop could act at all, even though max_rad above
+  // already tracks the REAL Cartesian workspace at whatever height the leg
+  // is at a given tick (near 0 at full extension, opening smoothly as the
+  // reserve crouch proceeds). Gating here duplicated that geometric limit
+  // with a coarser, all-or-nothing one and cost v3_tier_tests V15/V17/V25
+  // their settle-time budget for no extra protection.
   const bool on = active && settled && t.trunk && tierVirtual();
   const float target = on ? range_ceiling : 0.0F;
   const float up = t.ramp_s > 1.0e-3F ? in.dt_s / t.ramp_s : 1.0F;
@@ -1266,32 +1629,34 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   trunk_alpha_ = std::clamp(trunk_alpha_ + std::clamp(diff, -down, up), 0.0F, 1.0F);
   const float dyn = std::clamp(trunk_alpha_ * full_want, -max_rad, max_rad);
 
-  // Static level loop (Tier::level). body = theta_v - com_line terms, and
-  // tier 1 holds theta_v at the balance point, so a hip offset of
-  // (body - target) / J re-orients the body by exactly that much: the
-  // integrator's closed loop is first order with level_tau_s at any height
-  // (J cancels). Started once from the measured error (the first
-  // release of a power-up levels over ramp_s instead of 3 * tau), then only
-  // integrates with the dynamic part at full authority and the wheels
-  // clear of their cap: a faded or saturated tier 2 hands lean back to the
-  // body, which is not a posture error.
+  // Slow IMU body-level feedback, independent of the dynamic virtual lean.
+  // Keep the bumpless zero seed from the newer startup path.
   const float lp = std::clamp(2.0F * 3.14159265F * t.level_lpf_hz * in.dt_s, 0.0F, 1.0F);
   body_lp_ += lp * (body_pitch_ - body_lp_);
   const bool level_on = on && t.level;
   const float lmax = std::max(t.level_max_rad, 0.0F);
   if (level_on && !level_init_) {
+    // Seed from the measured error, not zero: level_beta_ below already
+    // ramps 0 -> 1 over the same up/sat_fade_s schedule as trunk_alpha_, so
+    // `want`'s actual output is bumpless regardless of the seed. Zero
+    // reintroduces the 3*tau_s crawl this seed exists to skip (v3_tier_tests
+    // V17/V25: level_settle_s went 5.0-12.2 s on every case, failing the
+    // <4/<5 s thresholds that passed before this file's startup rework).
     level_i_ = std::clamp((body_lp_ - t.level_pitch_rad) / jh, -lmax, lmax);
     level_init_ = true;
   } else if (level_on && level_beta_ >= 1.0F && trunk_alpha_ >= 1.0F && !wheel_saturating) {
-    level_i_ = std::clamp(level_i_ + in.dt_s / std::max(t.level_tau_s, 0.05F) *
-                                         (body_lp_ - t.level_pitch_rad) / jh,
-                          -lmax, lmax);
+    const float increment = in.dt_s / level_tau *
+        (body_lp_ - t.level_pitch_rad) / jh;
+    // Do not wind farther into an unreachable axle target. Still allow
+    // unwinding when the body error reverses, even at the workspace edge.
+    if (!axle_limited_ || increment * axle_limit_direction_ <= 0.0F)
+      level_i_ = std::clamp(level_i_ + increment, -lmax, lmax);
   }
   const float level_diff = (level_on ? 1.0F : 0.0F) - level_beta_;
   level_beta_ = std::clamp(level_beta_ + std::clamp(level_diff, -down, up), 0.0F, 1.0F);
 
   const float want = dyn + level_beta_ * level_i_;
-  const float step = std::max(t.rate_rad_s, 0.0F) * in.dt_s;
+  const float step = adaptive_rate * in.dt_s;
   dhip_ += std::clamp(want - dhip_, -step, step);
 }
 
@@ -1351,6 +1716,8 @@ void V3Controller::updateRoll(const Input& in, bool active) {
   // between the wheels (left turn, a_c > 0: left side down, roll < 0).
   roll_target_ = r.target_rad - r.turn_ff * std::atan(std::clamp(a_c / 9.80665F, -0.3F, 0.3F));
   const float half = 0.5F * std::max(r.track_m, 0.05F);
+  // Feasible roll travel opens at the slow common-height rate. Keep the
+  // normal roll slew so it can use that travel immediately on a cross slope.
   const float step = std::max(r.rate_m_s, 0.0F) * in.dt_s;
   if (!r.enabled || !active) {
     roll_dh_ -= std::clamp(roll_dh_, -step, step);  // back to even legs
@@ -1364,9 +1731,14 @@ void V3Controller::updateRoll(const Input& in, bool active) {
     roll_e_lp_ += std::clamp(2.0F * 3.14159265F * std::max(r.err_lpf_hz, 0.1F) * in.dt_s, 0.0F, 1.0F) *
         ((roll_est_ - roll_target_) - roll_e_lp_);
     const float e = roll_e_lp_;  // + = left side too high
-    const float room = std::max(std::min({r.max_dh_m, LegHeight::maxHeight() - pose_.axle_below_hip_m,
-                                          pose_.axle_below_hip_m - LegHeight::minHeight()}),
-                                0.0F);
+    // Shared hip/knee commands already include trunk, knee hold and
+    // suspension. Reserve roll range around THAT pose, not the height plan.
+    const auto common = robot_control::WholeBodyModel::legHeight(
+        LegHeight::hangHipCad() + hipCommand(), kneeCommand());
+    const float h = -common.height_m, x2 = common.x_m * common.x_m;
+    const float hi = std::sqrt(std::max(LegHeight::maxHeight() * LegHeight::maxHeight() - x2, 0.0F));
+    const float lo = std::sqrt(std::max(LegHeight::minHeight() * LegHeight::minHeight() - x2, 0.0F));
+    const float room = std::max(std::min({r.max_dh_m, hi - h, h - lo}), 0.0F);
     const float tau = r.vel_ff ? r.tau_vff : r.tau_s;
     const float kp = r.vel_ff ? r.kp_vff : r.kp;
     roll_i_ -= in.dt_s / std::max(tau, 0.02F) * half * std::sin(e);
@@ -1374,26 +1746,65 @@ void V3Controller::updateRoll(const Input& in, bool active) {
     const float p = -kp * half * std::sin(e);
     const float want = std::clamp(roll_i_ + ff + p, -room, room);
     roll_dh_ += std::clamp(want - roll_dh_, -step, step);
+    roll_dh_ = std::clamp(roll_dh_, -room, room);
   }
   // Side height offset -> joint offsets through the leg IK at the pose
   // (knee for the height, hip to keep the axle under the hip).
-  if (roll_deriv_key_ != knee_cmd_rad_) {
-    roll_deriv_key_ = knee_cmd_rad_;
-    const float k0 = pose_.knee_offset_rad;
-    const float k1 = std::clamp(k0 - 0.01F, LegHeight::kKneeMinRad, 0.0F);
-    const LegPose p1 = LegHeight::forKnee(k1);
-    const float dh = pose_.axle_below_hip_m - p1.axle_below_hip_m;
-    roll_dk_dh_ = std::abs(dh) > 1.0e-6F ? (k0 - k1) / dh : 0.0F;
-    roll_dq_dk_ = std::abs(k0 - k1) > 1.0e-6F ? (pose_.hip_offset_rad - p1.hip_offset_rad) / (k0 - k1) : 0.0F;
+  // Exact per-side IK: retain the shared axle fore/aft coordinate while
+  // changing its vertical distance. No cached linear Jacobian can become
+  // stale when suspension/trunk changes the common pose at a fixed knee plan.
+  const float hc = hipCommand(), kc = kneeCommand();
+  const auto common = robot_control::WholeBodyModel::legHeight(LegHeight::hangHipCad() + hc, kc);
+  std::array<float, 2> knee{}, hip{};
+  for (std::size_t side = 0; side < 2U; ++side) {
+    const float dh = (side == 0U ? 1.0F : -1.0F) * roll_dh_ * (r.sign < 0.0F ? -1.0F : 1.0F);
+    if (std::abs(dh) < 1.0e-7F) continue;
+    const float h = std::max(-common.height_m + dh, 0.0F);
+    const auto p = LegHeight::forAxleOnPlane(common.x_m, h, 0.0F);
+    if (!p.ok) continue;
+    hip[side] = p.hip_offset_rad - hc;
+    knee[side] = p.knee_offset_rad - kc;
   }
-  const float dk = roll_dh_ * roll_dk_dh_ * (r.sign < 0.0F ? -1.0F : 1.0F);
-  const std::array<float, 2> knee{dk, -dk}, hip{dk * roll_dq_dk_, -dk * roll_dq_dk_};
   for (std::size_t i = 0; i < 2U; ++i) {
     roll_knee_rate_[i] = r.vel_ff && in.dt_s > 0.0F ? (knee[i] - roll_knee_[i]) / in.dt_s : 0.0F;
     roll_hip_rate_[i] = r.vel_ff && in.dt_s > 0.0F ? (hip[i] - roll_hip_[i]) / in.dt_s : 0.0F;
   }
   roll_knee_ = knee;
   roll_hip_ = hip;
+}
+
+void V3Controller::coordinateTrunkAxle() noexcept {
+  axle_hip_correction_ = 0.0F;
+  axle_limited_ = false;
+  axle_limit_direction_ = 0.0F;
+  if (!kneeHoldOn()) { dknee_ = 0.0F; return; }
+  // Below 2 micrometres of requested axle motion, avoid subtracting nearly
+  // equal squared radii at full extension. Keep the nominal zero solution.
+  if (std::abs(dhip_) < 1.0e-5F) { dknee_ = 0.0F; return; }
+  // Keep the nominal pose's vertical projection at the CURRENT body pitch.
+  // Thus dhip=0 introduces no new posture correction on the lifting stand
+  // or during the max-height wheel catch. Cancel the arc caused by trunk
+  // swing, including its pitch coupling, without making a second fast body
+  // feedback loop. Height/suspension still own the nominal vertical target.
+  const float h = pose_.axle_below_hip_m;
+  // Preserve the existing tier's fore/aft calibration where its fixed-hip
+  // solution is feasible. That provisional FK specifies only X; the paired
+  // Cartesian solve below owns both final joints and the height constraint.
+  const float provisional_knee = pose_.knee_offset_rad + kneeHold(dhip_);
+  const auto provisional = robot_control::WholeBodyModel::legHeight(
+      LegHeight::hangHipCad() + pose_.hip_offset_rad + dhip_, provisional_knee);
+  const float requested_x = std::cos(body_pitch_)*provisional.x_m +
+      std::sin(body_pitch_)*provisional.height_m;
+  // At the deepest fold, h*cos(pitch) can fall below the supported minimum
+  // radius. Keep the plane at least that deep so X can pass continuously
+  // through zero instead of jumping between disconnected annulus branches.
+  const float depth = std::max(h * std::cos(body_pitch_), LegHeight::minHeight());
+  const auto target = LegHeight::forAxleOnPlane(requested_x, depth, body_pitch_);
+  if (!target.ok) { dknee_ = 0.0F; axle_limited_ = true; return; }
+  axle_hip_correction_ = target.hip_offset_rad - pose_.hip_offset_rad - dhip_;
+  dknee_ = target.knee_offset_rad - pose_.knee_offset_rad;
+  axle_limited_ = target.limited;
+  axle_limit_direction_ = target.x_world_m - requested_x;
 }
 
 float V3Controller::kneeHold(float dhip) noexcept {
@@ -1470,14 +1881,57 @@ V3Controller::PlanSample V3Controller::planAt(float delay_s) const noexcept {
   return plan_n_ > 0U ? plan_buf_[i] : PlanSample{plan_v_, plan_a_};
 }
 
+float V3Controller::heightStoppingDistance(float speed_m_s, float accel_m_s2,
+                                           float max_accel_m_s2,
+                                           float max_jerk_m_s3) noexcept {
+  const float speed = std::max(speed_m_s, 0.0F);
+  const float accel = std::max(max_accel_m_s2, 1.0e-3F);
+  const float jerk = std::max(max_jerk_m_s3, 1.0e-3F);
+  const float a0 = std::clamp(accel_m_s2, -accel, accel);
+  if (speed <= 1.0e-7F && a0 <= 0.0F) return 0.0F;
+
+  // Apply maximum reverse jerk until -accel, then maximum deceleration. This
+  // includes the extra distance caused by the acceleration ramp; v^2/(2a)
+  // alone stops too early once the profile is jerk limited.
+  const float ramp_s = std::max((a0 + accel) / jerk, 0.0F);
+  const float speed_after_ramp = speed + a0 * ramp_s - 0.5F * jerk * ramp_s * ramp_s;
+  const float distance_after_ramp = speed * ramp_s + 0.5F * a0 * ramp_s * ramp_s -
+      (jerk * ramp_s * ramp_s * ramp_s) / 6.0F;
+  if (speed_after_ramp <= 0.0F) {
+    // The speed reaches zero before the acceleration ramp reaches its limit.
+    const float stop_s = (a0 + std::sqrt(std::max(a0 * a0 + 2.0F * jerk * speed, 0.0F))) /
+        jerk;
+    const float distance = speed * stop_s + 0.5F * a0 * stop_s * stop_s -
+        (jerk * stop_s * stop_s * stop_s) / 6.0F;
+    return std::max(distance, 0.0F);
+  }
+  return std::max(distance_after_ramp + speed_after_ramp * speed_after_ramp / (2.0F * accel),
+                  0.0F);
+}
+
+float V3Controller::heightStopTarget() const noexcept {
+  const float speed = height_speed_m_s_;
+  const float direction = std::copysign(1.0F, speed);
+  const Height& h = config_.height;
+  const float max_accel = height_startup_
+      ? std::min(h.accel_m_s2, h.startup_accel_m_s2) : h.accel_m_s2;
+  const float max_jerk = height_startup_
+      ? std::min(h.jerk_m_s3, h.startup_jerk_m_s3) : h.jerk_m_s3;
+  const float distance = heightStoppingDistance(std::abs(speed),
+      height_accel_m_s2_ * direction, max_accel, max_jerk);
+  const float current = LegHeight::forKnee(knee_cmd_rad_).axle_below_hip_m;
+  const float hmax = supportedMaxHeight();
+  return std::clamp(current + direction * distance, LegHeight::minHeight(), hmax);
+}
+
 void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   const Height& h = config_.height;
-  // Roll needs room both ways: the straight knee at the full height can only
-  // fold, so with roll on the top is kept reserve_m lower.
-  const float hmax = LegHeight::maxHeight() -
-      (config_.roll.enabled ? std::clamp(config_.roll.reserve_m, 0.0F, 0.05F) : 0.0F);
-  if (cmd.height_m > 0.0F || height_target_m_ > hmax + 1.0e-4F) {
-    const float want = cmd.height_m > 0.0F ? cmd.height_m : height_target_m_;
+  // A straight knee has no height-preserving fore/aft workspace. Reserve
+  // the existing 12 mm for paired trunk motion even if roll is switched off.
+  const float hmax = supportedMaxHeight();
+  if (height_startup_ || cmd.height_m > 0.0F || height_target_m_ > hmax + 1.0e-4F) {
+    const float want = height_startup_ ? startup_height_m_
+        : cmd.height_m > 0.0F ? cmd.height_m : height_target_m_;
     const float target = std::clamp(want, LegHeight::minHeight(), hmax);
     if (std::abs(target - height_target_m_) > 1.0e-4F) {
       height_target_m_ = target;
@@ -1486,6 +1940,18 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   }
   if (knee_cmd_rad_ == knee_target_rad_) {
     height_speed_m_s_ = 0.0F;
+    height_accel_m_s2_ = 0.0F;
+    // Keep the delay even on a retry already at the reserved height.
+    if (in.now_us - state_since_us_ >=
+        static_cast<std::uint64_t>(std::max(h.startup_delay_s, 0.0F) * 1.0e6F)) {
+      height_startup_ = false;
+    }
+    return;
+  }
+  if (height_startup_ && in.now_us - state_since_us_ <
+      static_cast<std::uint64_t>(std::max(h.startup_delay_s, 0.0F) * 1.0e6F)) {
+    height_speed_m_s_ = 0.0F;
+    height_accel_m_s2_ = 0.0F;
     return;
   }
   // Speed quality: full while held (stand, hands: the wheels are not
@@ -1499,26 +1965,68 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
                          0.0F, 1.0F) *
         std::clamp(1.0F - std::abs(in.pitch_rate_rad_s) / h.max_pitch_rate_rad_s, 0.0F, 1.0F);
   }
-  // Signed height speed (+ = up): capped by the quality and by the speed
-  // that still stops at the target under accel_m_s2, and slew-limited.
-  const float remaining = height_target_m_ - pose_.axle_below_hip_m;
-  const float accel = std::max(h.accel_m_s2, 1.0e-3F);
-  const float v_stop = std::sqrt(2.0F * accel * std::abs(remaining));
-  const float v_des = std::copysign(std::min(h.rate_m_s * quality, v_stop), remaining);
-  const float dv = accel * in.dt_s;
-  height_speed_m_s_ += std::clamp(v_des - height_speed_m_s_, -dv, dv);
-  // Knee step via the local d height/d knee (folding the knee lowers it).
-  const LegPose ahead = LegHeight::forKnee(knee_cmd_rad_ - 0.01F);
-  const float dh_dk = std::max((pose_.axle_below_hip_m - ahead.axle_below_hip_m) / 0.01F, 0.02F);
-  const float step = height_speed_m_s_ * in.dt_s / dh_dk;
-  const float next = knee_cmd_rad_ + step;
-  const bool passed = knee_target_rad_ < knee_cmd_rad_ ? next <= knee_target_rad_
-                                                       : next >= knee_target_rad_;
-  if (passed || (std::abs(remaining) < 2.0e-4F && std::abs(height_speed_m_s_) < 2.0e-3F)) {
+  // Signed height speed (+ = up): cap speed to the balance quality and to
+  // the jerk-aware distance needed to stop at the target. Then shape both
+  // acceleration and speed so reversals remain continuous too.
+  // pose_ may include last tick's suspension/excitation offset. The nominal
+  // height planner must not integrate that offset back into its own target.
+  const auto planned = LegHeight::forKnee(knee_cmd_rad_);
+  const float remaining = height_target_m_ - planned.axle_below_hip_m;
+  const float accel = std::max(height_startup_
+      ? std::min(h.accel_m_s2, h.startup_accel_m_s2) : h.accel_m_s2, 1.0e-3F);
+  const float jerk = std::max(height_startup_
+      ? std::min(h.jerk_m_s3, h.startup_jerk_m_s3) : h.jerk_m_s3, 1.0e-3F);
+  const float rate = std::max(height_startup_
+      ? std::min(h.rate_m_s, h.startup_rate_m_s) : h.rate_m_s, 0.0F);
+  const float direction = std::copysign(1.0F, remaining);
+  const float max_speed = rate * quality;
+  // Reserve enough speed headroom to ramp a positive acceleration back to
+  // zero under the jerk limit. Without this anticipatory reduction, the
+  // actual profile velocity can exceed rate by a^2/(2j) while acceleration
+  // unwinds, even though the requested velocity is clamped to max_speed.
+  const float accel_toward_target = std::max(height_accel_m_s2_ * direction, 0.0F);
+  const float unwind_speed = 0.5F * accel_toward_target * accel_toward_target / jerk;
+  float speed_limit = std::max(max_speed - unwind_speed, 0.0F);
+  if (max_speed > 0.0F && height_speed_m_s_ * direction > 0.0F) {
+    const float current_accel_toward_target = height_accel_m_s2_ * direction;
+    float lo = 0.0F;
+    float hi = std::max(max_speed, height_speed_m_s_ * direction);
+    if (heightStoppingDistance(hi, current_accel_toward_target, accel, jerk) >
+        std::abs(remaining)) {
+      for (int i = 0; i < 18; ++i) {
+        const float mid = 0.5F * (lo + hi);
+        if (heightStoppingDistance(mid, current_accel_toward_target, accel, jerk) <=
+            std::abs(remaining)) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      speed_limit = std::min(speed_limit, lo);
+    }
+  }
+  const float v_des = direction * speed_limit;
+  const float dt = std::max(in.dt_s, 1.0e-4F);
+  const float accel_des = std::clamp((v_des - height_speed_m_s_) / dt, -accel, accel);
+  height_accel_m_s2_ += std::clamp(accel_des - height_accel_m_s2_, -jerk * dt, jerk * dt);
+  height_accel_m_s2_ = std::clamp(height_accel_m_s2_, -accel, accel);
+  height_speed_m_s_ += height_accel_m_s2_ * dt;
+  // Integrate in the quantity whose speed is limited, then use exact IK.
+  // The old 0.2 mm endpoint snap could jump ~0.1 mm in one 2 ms tick,
+  // exceeding the startup rate even when its internal speed was near zero.
+  const float next_height = planned.axle_below_hip_m + height_speed_m_s_ * in.dt_s;
+  const bool passed = remaining < 0 ? next_height <= height_target_m_
+                                   : next_height >= height_target_m_;
+  // Treat micrometre-scale FK/float residuals as reached so the speed
+  // profile cannot stall below its endpoint forever.
+  constexpr float kHeightEndpointToleranceM = 1.0e-5F;
+  if (passed || std::abs(remaining) < kHeightEndpointToleranceM) {
     knee_cmd_rad_ = knee_target_rad_;
     height_speed_m_s_ = 0.0F;
+    height_accel_m_s2_ = 0.0F;
+    height_startup_ = false;
   } else {
-    knee_cmd_rad_ = std::clamp(next, LegHeight::kKneeMinRad, 0.0F);
+    knee_cmd_rad_ = LegHeight::forHeight(next_height).knee_offset_rad;
   }
   pose_ = LegHeight::forKnee(knee_cmd_rad_);
   legs_moved_us_ = in.now_us;
@@ -1563,7 +2071,6 @@ void V3Controller::updateVmc(const Input& in, bool locked, bool soft, Output& ou
   // Soft blend: up over blend_s once free on the floor, down over stiffen_s.
   const float target = soft ? 1.0F : 0.0F;
   const float up = dt / std::max(v.blend_s, 1.0e-3F), down = dt / std::max(v.stiffen_s, 1.0e-3F);
-  const float beta_prev = vmc_beta_;
   vmc_beta_ = std::clamp(vmc_beta_ + std::clamp(target - vmc_beta_, -down, up), 0.0F, 1.0F);
   const float vel_a = std::clamp(2.0F * 3.14159265F * v.vel_lpf_hz * dt, 0.0F, 1.0F);
   for (std::size_t side = 0; side < 2U; ++side) {
@@ -1574,15 +2081,14 @@ void V3Controller::updateVmc(const Input& in, bool locked, bool soft, Output& ou
     const float dh_dk = std::max(-leg.d_height_d_knee, 0.01F);  // axle below hip per knee rad
     const float grav = v.grav_scale * stanceKneeTorque(hip, knee, body_pitch_, g);
     if (!vmc_init_) {
-      // Legs just locked: start from the gravity model as if loaded (held
-      // on the floor). On the stand the integral gives it back in ~ki_s.
-      vmc_i_[side] = std::clamp(grav, -v.i_max_nm, v.i_max_nm);
+      // The integrator stores only the soft-mode model correction. Do not
+      // seed it with stance gravity: beta is zero while stiff/held, and a
+      // gravity-sized seed there would push the knees even with suspension
+      // authority disabled.
+      vmc_i_[side] = 0.0F;
       vmc_qprev_[side] = q_ref;
       vmc_qrate_[side] = 0.0F;
     }
-    // Bumpless: the gravity term fades in with the soft blend, the
-    // integral gives back what it had been carrying for it.
-    vmc_i_[side] -= (vmc_beta_ - beta_prev) * grav;
     const float err = legs_measured_ ? q_ref - knee : 0.0F;
     const float kp_soft = std::clamp(kz * dh_dk * dh_dk, v.kp_min, v.kp_max);
     const float kd_soft = std::clamp(cz * dh_dk * dh_dk, v.kd_min, v.kd_max);
@@ -1604,11 +2110,13 @@ void V3Controller::updateVmc(const Input& in, bool locked, bool soft, Output& ou
     // Adaptive: towards hard as the knees get pounded (never softer).
     const float kp = std::max(kp_sp, kp_sp + vmc_adapt_ * (v.kp_hard - kp_sp));
     const float kd = std::max(kd_sp, kd_sp + vmc_adapt_ * (v.kd_hard - kd_sp));
-    vmc_i_[side] = std::clamp(vmc_i_[side] + dt / std::max(v.ki_s, 0.02F) * kp * err,
+    vmc_i_[side] = std::clamp(vmc_i_[side] + vmc_beta_ * dt / std::max(v.ki_s, 0.02F) * kp * err,
                               -v.i_max_nm, v.i_max_nm);
-    // Sky-hook: the leg pushes the body against its own vertical speed.
+    // In hybrid mode, the position suspension owns slow body-height error;
+    // the MIT sky-hook damps only the fast residual. VMC-only mode keeps the
+    // full-band sky-hook.
     const float f_up = -std::max(v.sky_n_s_m, 0.0F) * sus_vz_eff_;
-    const float tff = vmc_beta_ * (grav + dh_dk * f_up) + vmc_i_[side];
+    const float tff = vmc_beta_ * (grav + dh_dk * f_up + vmc_i_[side]);
     vmc_qrate_[side] += vel_a * ((q_ref - vmc_qprev_[side]) / dt - vmc_qrate_[side]);
     vmc_qprev_[side] = q_ref;
     auto& m = out.knee_mit[side];
@@ -1633,19 +2141,31 @@ void V3Controller::updateSuspension(const Input& in) {
   }
   sus_g_ += std::clamp(in.dt_s / 2.0F, 0.0F, 1.0F) * (fzw - sus_g_);
   // Off during KNEETEST FLOOR: it would fight the excitation it measures.
-  // With the knee VMC the speed estimate feeds its sky-hook force instead
-  // of these height offsets.
+  // In hybrid mode the slow speed band moves the nominal knee target while
+  // the VMC sky-hook damps the fast band in torque mode.
   const bool on = (t.suspension || vmcOn()) && tierVirtual() && !held_outer_off_ && !held_quiet_ &&
       knee_excite_rad_ == 0.0F;
-  // Height <-> knee at the pose: the pose keeps the axle under the hip, so
-  // the leg Jacobian's knee column is the path's own slope.
-  const auto leg = robot_control::WholeBodyModel::legHeight(
-      LegHeight::hangHipCad() + pose_.hip_offset_rad, knee_cmd_rad_);
-  const float dh_dk = std::max(-leg.d_height_d_knee, 0.02F);  // axle_below_hip per knee rad
-  if (on) {
+  // Startup reserve motion is a commanded posture change, not a bump.
+  // Do not integrate its transient and release it as a knee offset later.
+  if (height_startup_) height_settled_since_us_ = 0U;
+  else if (height_settled_since_us_ == 0U) height_settled_since_us_ = in.now_us;
+  const bool settled = height_settled_since_us_ != 0U &&
+      in.now_us - height_settled_since_us_ >=
+      static_cast<std::uint64_t>(std::max(t.sus_startup_settle_s, 0.0F) * 1.0e6F);
+  const float target = on && settled ? 1.0F : 0.0F;
+  const float blend_step = in.dt_s / std::max(t.sus_startup_ramp_s, 1.0e-3F);
+  sus_alpha_ += std::clamp(target - sus_alpha_, -blend_step, blend_step);
+  if (on && settled) {
     // Complementary: integrate the IMU, pulled towards the legs' height rate
     // (the body's vertical speed on a flat floor) with sus_leak_s.
-    const float vz_legs = dh_dk * knee_rate_meas_;
+    float vz_legs = 0.0F;
+    for (std::size_t side = 0; side < 2U; ++side) {
+      const auto v = robot_control::WholeBodyModel::imuVelocityThroughLeg(
+          body_pitch_, body_rate_, LegHeight::hangHipCad() + in.hip_rad[side], in.knee_rad[side],
+          in.hip_rate_rad_s[side], in.knee_rate_rad_s[side], in.wheel_rad_s[side],
+          config_.wheel_radius_m);
+      vz_legs += 0.5F * v.vertical_m_s;
+    }
     sus_vz_ += in.dt_s * (fzw - sus_g_) +
         in.dt_s / std::max(t.sus_leak_s, 0.05F) * (vz_legs - sus_vz_);
   } else {
@@ -1656,12 +2176,36 @@ void V3Controller::updateSuspension(const Input& in) {
   const float vz_err = sus_vz_ - height_speed_m_s_;
   const float db = std::max(t.sus_deadband_m_s, 0.0F);
   const float vz_eff = std::copysign(std::max(std::abs(vz_err) - db, 0.0F), vz_err);
-  sus_vz_eff_ = on ? vz_eff : 0.0F;
-  const float rate = on && !vmcOn() ? -t.sus_gain * vz_eff : 0.0F;
+  const bool hybrid = on && vmcOn() && t.suspension;
+  float vz_slow = 0.0F;
+  if (hybrid && settled) {
+    const float tau = std::max(t.sus_hybrid_split_s, 0.02F);
+    const float a = std::clamp(in.dt_s / (tau + in.dt_s), 0.0F, 1.0F);
+    sus_vz_slow_ += a * (vz_eff - sus_vz_slow_);
+    vz_slow = sus_vz_slow_;
+  } else {
+    sus_vz_slow_ = 0.0F;
+  }
+  // POS-only suspension uses its full observer band. When VMC is enabled,
+  // split at ~0.8 Hz: slow motion shifts the knee's nominal height target;
+  // fast motion stays in the driver-side damping path.
+  const float vz_for_position = hybrid ? vz_slow : vz_eff;
+  const float vz_for_vmc = hybrid ? vz_eff - vz_slow : vz_eff;
+  sus_vz_eff_ = on ? sus_alpha_ * vz_for_vmc : 0.0F;
+  const float rate = on && t.suspension ? -t.sus_gain * sus_alpha_ * vz_for_position : 0.0F;
   const float lim = std::max(t.sus_max_m, 0.0F);
   sus_dz_ = std::clamp(sus_dz_ + in.dt_s * (rate - sus_dz_ / std::max(t.sus_return_s, 0.05F)),
                        -lim, lim);
-  sus_dk_ = sus_dz_ / dh_dk;
+  // Invert the SAME coordinated hip/knee path used by applyPoseOffsets.
+  // A partial knee Jacobian at a mixed (offset hip / nominal knee) pose
+  // does not describe that path. Clamp the height state too: no windup at
+  // a straight knee or at the lower end of the supported model range.
+  const auto base = LegHeight::forKnee(knee_cmd_rad_);
+  const float target_height = std::clamp(base.axle_below_hip_m + sus_dz_,
+                                        LegHeight::minHeight(), LegHeight::maxHeight());
+  sus_dz_ = target_height - base.axle_below_hip_m;
+  sus_dk_ = std::abs(sus_dz_) < 1.0e-7F ? 0.0F
+      : LegHeight::forHeight(target_height).knee_offset_rad - knee_cmd_rad_;
 }
 
 void V3Controller::applyPoseOffsets(const Input& in) {
@@ -1674,8 +2218,8 @@ void V3Controller::applyPoseOffsets(const Input& in) {
     }
     return;
   }
-  // forKnee costs a few Newton steps: only when the offset or the height
-  // pose under it moved.
+  // Evaluate the nominal pose/COM only when the offset or the height pose
+  // under it moved; the analytic IK needs no Newton iterations.
   if (excite_applied_ && std::abs(dk - applied_dk_) < 2.0e-4F && applied_base_ == knee_cmd_rad_) {
     return;
   }

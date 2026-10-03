@@ -27,6 +27,16 @@ struct LegPose {
   bool ok = false;
 };
 
+// Joint offsets for a wheel axle target relative to its hip. The target
+// plane is horizontal in the gravity frame; +X is forward, depth is down.
+struct LegAxleTarget {
+  float hip_offset_rad = 0.0F;
+  float knee_offset_rad = 0.0F;
+  float x_world_m = 0.0F;
+  bool limited = false;
+  bool ok = false;
+};
+
 class LegHeight {
  public:
   // Deepest fold allowed: -1.38 rad, about 78 mm hip-axle. The CAD knee
@@ -44,6 +54,11 @@ class LegHeight {
   // CAD hip angle of the hang pose (hip offset 0): core offsets convert to
   // CAD joint angles as hip_cad = hangHipCad() + hip, knee_cad = knee (v3.3).
   [[nodiscard]] static float hangHipCad() noexcept;
+  // Cartesian IK, height first: project X into the supported knee workspace
+  // at the requested depth, then solve BOTH joints on the existing branch.
+  // pitch uses the native +Y convention R(p): (cx+sz, -sx+cz).
+  [[nodiscard]] static LegAxleTarget forAxleOnPlane(
+      float x_world_m, float depth_world_m, float body_pitch_rad) noexcept;
 };
 
 }  // namespace tap_fw::v3

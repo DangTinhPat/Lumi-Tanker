@@ -22,6 +22,8 @@
 #include <chrono>
 #include <deque>
 #include <random>
+#include <string>
+#include <vector>
 
 #include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/ImuStateEstimator.hpp"
@@ -31,6 +33,7 @@
 #include "WbDesign.hpp"
 #endif
 #include "tap_fw/v3/JointTestSchedule.hpp"
+#include "tap_fw/v3/LegLock.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 
@@ -48,7 +51,7 @@ struct Case {
   const char* name = "";
   V3Controller::Algo algo = V3Controller::Algo::Lqr;
   bool vpitch = false, trunk = false;
-  double lean_share = -1.0, tier_lead = -1.0, tier_max = -1.0, tier_hpf = -1.0;
+  double lean_share = -1.0, tier_lead = -1.0, tier_max = -1.0;
   double tier_exp = -1.0;         // < 0: firmware default (Tier::height_exp)
   int imu_kin = -1;              // -1: firmware default
   int preview = -1;              // -1: firmware default (Tier::preview)
@@ -107,6 +110,20 @@ struct Case {
   double acc_noise_scale = 1.0;  // accelerometer noise (0.05 m/s^2 per axis per sample) scale
   double leg_fb_period_s = 0.0104;  // 0x009 estimate period (~96 Hz)
   double hip_vel_noise = 0.03;      // driver velocity estimate noise [rad/s]
+  double knee_vel_noise = -1.0;     // knee's, < 0: same as the hip
+  // Control loop period in plant ticks (2 ms each): the ESP32 loop overran
+  // to ~3.6 ms per tick on 2026-10-02 (SENS ctrl_us, late).
+  int ctrl_every = 1;
+  double gyro_noise = 0.005;  // pitch gyro white noise per sample [rad/s]
+  // Gear backlash (total free play, link side [rad]) between each GDS68
+  // rotor and its link, 0 = rigid (the old path, bit-identical). With it
+  // the rotor is its own body (its inertia leaves the link), the servo
+  // and the encoder act on the ROTOR side, and torque reaches the link only
+  // through the gear: stiffness gear_k [N m/rad per joint] with damping
+  // ratio gear_zeta once the play is taken up.
+  double hip_backlash = 0.0, knee_backlash = 0.0, gear_k = 150.0, gear_zeta = 0.3;
+  double gear_k_knee = -1.0;  // knee gear stiffness, < 0: gear_k
+  double wheel_noise = 0.3;   // wheel speed reading noise per sample [rad/s]
   // Scenario.
   double drive_m_s = 0.0, drive_start_s = 6.0, drive_end_s = 10.0;
   double push_n = 0.0, push_start_s = 6.0, push_end_s = 6.3;  // at the body CoM
@@ -123,8 +140,13 @@ struct Case {
   struct Press { double t0, t1, x, v; };
   std::vector<Press> presses;
   std::vector<std::pair<double, double>> heights;
+  double height_brake_s = -1.0;  // TIER_STOP: jerk-limited stop, controller state only
+  int stop_mode = -1;           // -1 unchanged, 0 current, 1 wheel-only, 2 legacy
+
   double slope = 0.0;
   double height_low_m = 0.0, height_low_s = 6.0, height_up_s = 16.0;
+  bool trace_position = false;
+  std::string animation_file;
   double duration_s = 20.0;
   bool trace = false;
   bool ideal_imu = false;  // controller gets the true body pitch/rate (isolates the estimator)
@@ -154,6 +176,9 @@ struct Case {
   int level = -1;
   double level_rel = 0.0;
   int envelope = -1;  // Tier::envelope (-1: firmware default)
+  // Push / standing calm (< 0: firmware default): Config::stand_leash_m,
+  // Tier::hip_deadband_rad, Tier::sat_margin.
+  double stand_leash = -1.0, hip_db = -1.0, sat_margin = -1.0;
   // Roll (Config::Roll) on a lateral side model next to the planar plant:
   // left/right hip heights follow the commanded side offset through the
   // joint servo lag; the body rolls by their difference over the track plus
@@ -179,6 +204,8 @@ struct Result {
   int held_resets = 0;
   double body_dev_drive = 0.0;    // max |body pitch - rest| from drive start to end + 1 s
   double body_dev_all = 0.0;      // max |body pitch - rest| after 2 s
+  double capture_body_peak = 0.0; // first 3 s after placement, no 2 s exclusion
+  double capture_height_m = 0.0;  // measured leg height at placement
   double lean_max = 0.0;          // max |CoM line angle from vertical| after 2 s
   double max_dhip = 0.0, max_hip_rate = 0.0, max_hip_err = 0.0;
   double max_wheel_cmd = 0.0, max_speed = 0.0;
@@ -189,6 +216,7 @@ struct Result {
   double x_end = 0.0, max_x = 0.0, x_stop_travel = 0.0;
   double max_tau_hip = 0.0, max_tau_knee = 0.0, max_knee_err = 0.0;
   double body_vacc_peak = 0.0;     // |vertical body CoM acceleration| peak after 2 s (20 Hz)
+  double body_vacc_bump_peak = 0.0;  // filtered peak while the wheel crosses the test bump
   double body_vacc_rms = 0.0;      // its rms after 2 s
   double body_z_range = 0.0;       // body CoM height max - min after 2 s [m]
   double body_z_range_late = 0.0;  // ...after 11 s (crouch done in the sweeps that lower at 1 s)
@@ -206,6 +234,12 @@ struct Result {
   double push_body = 0.0, push_lean = 0.0, push_hip = 0.0;  // peak change in the 2 s after push start
   double push_knee = 0.0, push_dz = 0.0;  // knee and body CoM height, same window
   double push_height = 0.0;        // hip-to-axle height at the push [m]
+  double push_opposite = 0.0;      // body tipped against the push, 0.3-6 s after its start [rad]
+  double rest_trunk_pp = 0.0;      // tier-2 hip offset max - min over the last 15 s [rad]
+  double rest_x_pp = 0.0;          // wheel ground position max - min over the last 15 s [m]
+  double push_sequence_body_peak = 0.0;  // body error during a scheduled pulse sequence [rad]
+  double push_sequence_height_m = 0.0;   // plant hip-to-axle height at sequence start [m]
+  double press_rebound_rad = 0.0;       // opposite body pitch between release and next press
   double body_rms_all = 0.0, lean_rms_all = 0.0;  // dynamic rms after 2 s (share = body / lean)
   double drive_dz = 0.0;           // body CoM height change from the drive start, drive + 1 s [m]
   double drive_vacc_rms = 0.0, drive_vacc_peak = 0.0;  // body vertical accel while driving (+1 s)
@@ -233,6 +267,8 @@ struct Result {
   double body_acc_peak = 0.0, body_acc_rms = 0.0, body_jerk_rms = 0.0;
   double brake_bump = 0.0;   // max body speed gain after the drive release [m/s]
   double start_dip = 0.0;    // max body speed loss (against the command) after drive start
+  double height_down_s = -1.0, height_up_s = -1.0;
+  std::vector<double> x_trace;
 };
 
 using tap_fw::sim::LegPlant;
@@ -245,7 +281,9 @@ Result simulate(const Case& c) {
   const int sub = 8;
   const double dt = dt_c / sub;
   const double R = geo::wheel_radius_m;
-  LegPlant plant(c.body_dx, c.mass_scale, c.hip_rotor, c.knee_rotor, LegHeight::hangHipCad());
+  const bool backlash = c.hip_backlash > 0.0 || c.knee_backlash > 0.0;
+  LegPlant plant(c.body_dx, c.mass_scale, backlash ? 0.0 : c.hip_rotor, backlash ? 0.0 : c.knee_rotor,
+                 LegHeight::hangHipCad());
   std::function<double(double)> c_rough_surface;  // rough road: the floor (plant.ground is the axle path)
   auto bump_profile = [c](double x) {
     auto edge = [&](double x0) {
@@ -381,7 +419,7 @@ Result simulate(const Case& c) {
     };
   }
   std::mt19937 rng(7);
-  std::normal_distribution<double> n_acc(0, 0.05 * c.acc_noise_scale), n_gyr(0, 0.005), n_w(0, 0.3),
+  std::normal_distribution<double> n_acc(0, 0.05 * c.acc_noise_scale), n_gyr(0, c.gyro_noise), n_w(0, c.wheel_noise),
       n_q(0, 0.0005), n_qd(0, 0.03);
 
   // Stand at the hang pose, CoM over the axle plus the seed error.
@@ -390,7 +428,9 @@ Result simulate(const Case& c) {
   // Body pitch at balance with correctly arranged legs (the posture target).
   const double theta_rest0 = s[1];
   std::FILE* anim = nullptr;
-  if (const char* ap = std::getenv("TR_ANIM")) {
+  const char* animation_file = c.animation_file.empty() ? std::getenv("TR_ANIM")
+                                                         : c.animation_file.c_str();
+  if (const char* ap = animation_file) {
     if (plant.ground) {  // the floor profile for tools/tier_sim_view.py
       const std::string gp = std::string(ap) + ".ground";
       if (std::FILE* gf = std::fopen(gp.c_str(), "w")) {
@@ -402,7 +442,8 @@ Result simulate(const Case& c) {
     }
     anim = std::fopen(ap, "w");
     if (anim) std::fprintf(anim, "t,hip_x,hip_z,knee_x,knee_z,axle_x,axle_z,com_x,com_z,v,body,"
-                                 "b0x,b0z,b1x,b1z,b2x,b2z,b3x,b3z,lean,hip,knee,cmd_v,push,ground,press,press_x\n");
+                                 "b0x,b0z,b1x,b1z,b2x,b2z,b3x,b3z,lean,hip,knee,cmd_v,push,ground,press,press_x,"
+                                 "trunk_hip,hip_authority,rate,tvr,gx,hA,hB,aB,preview,modelA,plan_h,plan_v,plan_a\n");
   }
   // The legs as actually arranged; released this far from their own balance.
   s[2] = c.hip_zero_err;
@@ -433,18 +474,57 @@ Result simulate(const Case& c) {
   auto cfg = tap_fw::v3::defaultV3Config();
   cfg.algo = c.algo;
   cfg.engage.wb_armed_only = false;  // the harness engages with GO (its stand holds the body still)
+  if (const char* v = std::getenv("TR_LQRTRIM")) cfg.lqr_trim_gain = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_HLS")) cfg.wb_held_leg_sign = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_WBSOFT")) cfg.wb_soft_from = static_cast<float>(std::atof(v));
   cfg.tier.virtual_pitch = c.vpitch;
   cfg.tier.trunk = c.trunk;
+  // Host-only A/B playback: hold every startup, plant and disturbance
+  // parameter fixed while comparing tier-2 hip compensation enabled/off.
+  if (const char* v = std::getenv("TR_TRUNK")) cfg.tier.trunk = std::atoi(v) != 0;
+  if (c.stop_mode == 1) cfg.tier.trunk = false;
+  if (c.stop_mode == 2) {
+    cfg.tier.height_exp = 1.5F; cfg.tier.height_exp_tall = 0.5F;
+    cfg.tier.lead_exp = 0.0F; cfg.tier.level_tau_s = 1.5F;
+    cfg.tier.knee_hold = false; cfg.tier.adaptive_schedule = false;
+    cfg.tier.wheel_carrier_compensation = false; cfg.tier.body_damping_s = 0.0F;
+  }
+
   if (c.lean_share >= 0) cfg.tier.lean_share = static_cast<float>(c.lean_share);
   if (c.tier_lead >= 0) cfg.tier.lead_s = static_cast<float>(c.tier_lead);
   if (c.tier_max >= 0) cfg.tier.max_rad = static_cast<float>(c.tier_max);
-  if (c.tier_hpf >= 0) cfg.tier.hpf_s = static_cast<float>(c.tier_hpf);
   if (c.tier_exp >= 0) cfg.tier.height_exp = cfg.tier.height_exp_tall = static_cast<float>(c.tier_exp);
   if (const char* v = std::getenv("TIER_EXP_TALL")) cfg.tier.height_exp_tall = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_HEXP")) cfg.tier.height_exp = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_TVG")) cfg.tier.joint_rate_gain = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_TVGLOW")) cfg.tier.joint_rate_gain_low = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SPLIT")) cfg.split.enabled = std::atoi(v) != 0 && c.stop_mode <= 0;
+  if (const char* v = std::getenv("TR_SPLIT_TAU")) cfg.split.posture_tau_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SPLIT_RATE")) cfg.split.posture_rate_rad_s = static_cast<float>(std::atof(v));
+
+  if (const char* v = std::getenv("TR_TRATE")) cfg.tier.rate_rad_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_TMAX")) cfg.tier.max_rad = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SLEASH")) cfg.stand_leash_m = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_TDB")) cfg.tier.hip_deadband_rad = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SLFROM")) cfg.stand_leash_from = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SRET")) cfg.stand_return_m_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SLREL")) cfg.stand_leash_release_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_THPF")) cfg.tier.hpf_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_TLEADLPF")) cfg.tier.lead_lpf_hz = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SATFADE")) cfg.tier.sat_fade_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_WSATM")) cfg.tier.wheel_sat_margin = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_SATM")) cfg.tier.sat_margin = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_TLEAD")) cfg.tier.lead_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_DSHARE")) cfg.tier.disturbance_share = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_BODYDAMP")) cfg.tier.body_damping_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_CARRIER")) cfg.tier.wheel_carrier_compensation = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_CARRIER_GAIN")) cfg.tier.wheel_carrier_gain = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_START_RATE")) cfg.height.startup_rate_m_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_START_ACCEL")) cfg.height.startup_accel_m_s2 = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_START_DELAY")) cfg.height.startup_delay_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_HRATE")) cfg.height.rate_m_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_HACCEL")) cfg.height.accel_m_s2 = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_HJERK")) cfg.height.jerk_m_s3 = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_TLEADEXP")) cfg.tier.lead_exp = static_cast<float>(std::atof(v));
   if (c.imu_kin >= 0) cfg.tier.imu_kinematic = c.imu_kin != 0;
   if (c.preview >= 0) cfg.tier.preview = c.preview != 0;
@@ -456,13 +536,21 @@ Result simulate(const Case& c) {
   if (c.held_cap >= 0) cfg.held_wheel_cap_m_s = static_cast<float>(c.held_cap);
   if (c.no_rezero) { cfg.pid.held_dv_m_s = 1.0e9F; cfg.runaway_us = 1'000'000'000U; }
   if (c.level >= 0) cfg.tier.level = c.level != 0;
+  if (c.stand_leash >= 0.0) cfg.stand_leash_m = static_cast<float>(c.stand_leash);
+  if (c.hip_db >= 0.0) cfg.tier.hip_deadband_rad = static_cast<float>(c.hip_db);
+  if (c.sat_margin >= 0.0) cfg.tier.sat_margin = static_cast<float>(c.sat_margin);
+  if (const char* v = std::getenv("TR_LEVELTAU")) cfg.tier.level_tau_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_LEVELLFP")) cfg.tier.level_lpf_hz = static_cast<float>(std::atof(v));
   if (c.envelope >= 0) cfg.tier.envelope = c.envelope != 0;
   if (c.roll >= 0) cfg.roll.enabled = c.roll != 0;
+  if (const char* v = std::getenv("TR_ROLL")) cfg.roll.enabled = std::atoi(v) != 0;
   if (const char* v = std::getenv("TR_ROLLTAU")) cfg.roll.tau_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_ROLLFF")) cfg.roll.turn_ff = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_ROLLRATE")) cfg.roll.rate_m_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_ROLLKP")) cfg.roll.kp = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_LQRLEAD")) cfg.lqr_lead_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_LQRLEFF")) cfg.lqr_inertia_length = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_LQRLMAX")) cfg.lqr.max_pendulum_length_m = static_cast<float>(std::atof(v));
   if (c.lqr_lead >= 0) cfg.lqr_lead_s = static_cast<float>(c.lqr_lead);
   if (c.wheel_pred >= 0) cfg.wheel_pred.enabled = cfg.wheel_pred.with_wb = c.wheel_pred != 0;
   if (std::getenv("TR_WPRED")) cfg.wheel_pred.enabled = cfg.wheel_pred.with_wb = std::atoi(std::getenv("TR_WPRED")) != 0;
@@ -477,6 +565,7 @@ Result simulate(const Case& c) {
   if (const char* v = std::getenv("TR_PLANFULL")) cfg.tier.plan_full = std::atoi(v) != 0;
   if (const char* v = std::getenv("TR_KHOLD")) cfg.tier.knee_hold = cfg.tier.knee_hold_wb = std::atoi(v) != 0;
   if (c.suspension >= 0) cfg.tier.suspension = c.suspension != 0;
+  if (const char* v = std::getenv("TR_SUSPENSION")) cfg.tier.suspension = std::atoi(v) != 0;
   if (c.vmc >= 0) cfg.vmc.enabled = c.vmc != 0;
   if (const char* v = std::getenv("TR_LEASH")) cfg.drive_leash_m = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_VMC")) cfg.vmc.enabled = std::atoi(v) != 0;
@@ -513,6 +602,7 @@ Result simulate(const Case& c) {
   ctrl.setWholeBodyTable(c.wb_table);
   V3Controller::Input in{};
   V3Controller::Command cmd{};
+  V3Controller::Output out_hold{};
   in.legs_ready = true;
   in.legs_measured = true;
   in.pitch_rad = imu.pitch_rad;
@@ -523,9 +613,17 @@ Result simulate(const Case& c) {
   (void)ctrl.update(in, cmd);
   assert(ctrl.state() == V3Controller::State::Ready);
   cmd.go = true;
-  est.setConfig(tap_fw::v3::balancingEstimatorConfig(base));
+  {
+    auto bal = tap_fw::v3::balancingEstimatorConfig(base);
+    // Estimator sweeps (docs/V3.3_HANDOFF.md 5.34): accelerometer trust while balancing.
+    if (const char* v = std::getenv("TR_IMUACC")) bal.accel_correction_gain_hz = static_cast<float>(std::atof(v));
+    if (const char* v = std::getenv("TR_IMUKT")) bal.kinematic_accel_trust_scale_m_s2 = static_cast<float>(std::atof(v));
+    est.setConfig(bal);
+  }
 
   Result r;
+  if (c.trace_position) r.x_trace.reserve(static_cast<std::size_t>(c.duration_s / dt_c));
+  r.capture_height_m = -plant.points(s[2], s[3]).axle.z;
   std::uint64_t t0_us = 1'302'000U;
   double held_wheel_pos = 0.0;
   if (c.held_s > 0.0) {
@@ -593,6 +691,25 @@ Result simulate(const Case& c) {
   double hip_integ = std::clamp(hold[0], -2.0, 2.0), knee_integ = hold[1];
   double q_meas = s[2] - c.hip_zero_err, qd_meas = 0.0, k_meas = s[3] - c.knee_zero_err,
          kd_meas = 0.0, next_leg_fb = 0.0;
+  // Rotor-side angle/rate of the hip and knee pairs (Case::hip_backlash).
+  // Start loaded: the play already taken up in the direction of the static
+  // joint torque.
+  double mh = s[2], mhd = 0.0, mk = s[3], mkd = 0.0;
+  auto gear = [&](double m, double q, double md, double qd, double play, double rotor, double kj) {
+    // Torque the pair of gears passes to the links (two joints).
+    const double h = 0.5 * play, e = m - q;
+    const double k = 2.0 * kj;
+    const double cg = 2.0 * c.gear_zeta * std::sqrt(k * 2.0 * std::max(rotor, 1.0e-4));
+    if (e > h) return k * (e - h) + cg * (md - qd);
+    if (e < -h) return k * (e + h) + cg * (md - qd);
+    return 0.0;
+  };
+  if (backlash) {
+    const double kp = 2.0 * c.gear_k;
+    if (hold[0] != 0.0) mh += std::copysign(0.5 * c.hip_backlash + std::abs(hold[0]) / kp, hold[0]);
+    const double kpk = 2.0 * (c.gear_k_knee > 0.0 ? c.gear_k_knee : c.gear_k);
+    if (hold[1] != 0.0) mk += std::copysign(0.5 * c.knee_backlash + std::abs(hold[1]) / kpk, hold[1]);
+  }
   double hip_zoh = 0.0, knee_zoh = s[3] - c.knee_zero_err, next_hip_cmd = 0.0;
   double s_acc[LegPlant::kDof] = {};
   double dv_sq = 0.0, dp_sq = 0.0, vr_sum = 0.0, va_sum = 0.0;
@@ -623,8 +740,11 @@ Result simulate(const Case& c) {
   double roll_cmd_prev = 0.0;
   long roll_app_n = 0;
   double body_mean_sum = 0.0;
+  double rest_trunk_lo = 1e9, rest_trunk_hi = -1e9, rest_x_lo = 1e9, rest_x_hi = -1e9;
   long all_n = 0;
   double height_held_s = 0.0;
+  bool push_sequence_measured = false;
+  float height_brake_target = 0.0F;
   for (int k = 0; k < static_cast<int>(duration_s / dt_c); ++k) {
     const double t = k * dt_c;
     if (c.push_wait_height && c.height_low_m > 0.0 && t < push_start_s && t + dt_c >= push_start_s) {
@@ -638,6 +758,11 @@ Result simulate(const Case& c) {
     for (const auto& d : c.drives) if (t >= d.t0 && t < d.t1) fwd += d.v;
     cmd.forward_m_s = static_cast<float>(fwd);
     for (const auto& hs : c.heights) if (t >= hs.first) cmd.height_m = static_cast<float>(hs.second);
+    if (c.height_brake_s >= 0.0 && t >= c.height_brake_s) {
+      if (height_brake_target == 0.0F) height_brake_target = ctrl.heightStopTarget();
+      cmd.height_m = height_brake_target;
+    }
+
     if (c.trunk_on_s >= 0.0 && std::abs(t - c.trunk_on_s) < 1e-9) ctrl.config().tier.trunk = true;
     if (c.trunk_off_s >= 0.0 && std::abs(t - c.trunk_off_s) < 1e-9) ctrl.config().tier.trunk = false;
     if (c.height_low_m > 0.0) {
@@ -647,10 +772,10 @@ Result simulate(const Case& c) {
     // Leg feedback (0x009) at ~96 Hz.
     if (t >= next_leg_fb) {
       next_leg_fb = t + c.leg_fb_period_s;
-      q_meas = s[2] - hz + n_q(rng);
-      qd_meas = sd[2] + n_qd(rng) * (c.hip_vel_noise / 0.03);
-      k_meas = s[3] - kz + n_q(rng);
-      kd_meas = sd[3] + n_qd(rng) * (c.hip_vel_noise / 0.03);
+      q_meas = (backlash ? mh : s[2]) - hz + n_q(rng);
+      qd_meas = (backlash ? mhd : sd[2]) + n_qd(rng) * (c.hip_vel_noise / 0.03);
+      k_meas = (backlash ? mk : s[3]) - kz + n_q(rng);
+      kd_meas = (backlash ? mkd : sd[3]) + n_qd(rng) * ((c.knee_vel_noise >= 0.0 ? c.knee_vel_noise : c.hip_vel_noise) / 0.03);
     }
     if (c.excite_amp > 0.0 && t >= c.excite_start_s) {
       // Same centring as AppV3: keep the whole swing inside the knee range.
@@ -738,7 +863,11 @@ Result simulate(const Case& c) {
       }
     }
     const auto prof_t0 = std::chrono::steady_clock::now();
-    const auto out = ctrl.update(in, cmd);
+    if (k % std::max(c.ctrl_every, 1) == 0) {
+      in.dt_s = static_cast<float>(dt_c * std::max(c.ctrl_every, 1));
+      out_hold = ctrl.update(in, cmd);
+    }
+    const auto& out = out_hold;
     {
       const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - prof_t0).count();
       r.update_us_sum += us; ++r.update_n;
@@ -757,6 +886,9 @@ Result simulate(const Case& c) {
                   double(ctrl.groundVelocity()), double(ctrl.runawayImuSpeed()));
     }
     cmd.go = false;
+    if (t < 3.0) {
+      r.capture_body_peak = std::max(r.capture_body_peak, std::abs(s[1] - theta_rest0));
+    }
     if (out.state == V3Controller::State::Fault) {
       r.fell = true;
       r.fault = ctrl.lastFault();
@@ -766,15 +898,21 @@ Result simulate(const Case& c) {
                                 std::abs(double(out.wheel_cmd_rad_s[1]))});
     wheel_q.push_back(0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]));
     if (wheel_q.size() > c.wheel_delay_ticks) { wheel_applied = wheel_q.front(); wheel_q.pop_front(); }
-    // Hip command: LegLock resends at 250 Hz, then CAN + driver delay.
+    // Paired targets use the same deadline pacing as the firmware, then
+    // CAN + driver delay. Do not turn 3 ms into 4 ms by using t+period.
     if (t >= next_hip_cmd) {
-      next_hip_cmd = t + 0.004;
+      next_hip_cmd += tap_fw::v3::LegLock::Config{}.resend_period_us * 1.0e-6;
       hip_zoh = ctrl.hipCommand();
       knee_zoh = ctrl.kneeCommand();
       // Held over when the controller skips a tick (as LegLock does).
       if (out.knee_mit_valid) {
-        const auto& l = out.knee_mit[0];
-        const auto& rr = out.knee_mit[1];
+        // Match LegLock's hardware gain cap, not the unbounded core request.
+        const auto limit = [](const auto& knee) {
+          return tap_fw::v3::LegLock::driverKneeImpedance(
+              {knee.kp, knee.kd, knee.tff_nm, knee.vel_rad_s});
+        };
+        const auto l = limit(out.knee_mit[0]);
+        const auto rr = limit(out.knee_mit[1]);
         mit_zoh = {true, 0.5 * (l.kp + rr.kp), 0.5 * (l.kd + rr.kd), 0.5 * (l.tff_nm + rr.tff_nm),
                    0.5 * (l.vel_rad_s + rr.vel_rad_s)};
       }
@@ -841,6 +979,7 @@ Result simulate(const Case& c) {
         sd[3] += acck * dt;
         s[3] += sd[3] * dt;
       }
+      mh = s[2]; mhd = sd[2]; mk = s[3]; mkd = sd[3];
       for (double& a : s_acc) a = 0.0;
       const double th = s[1] + c.imu_mount;
       feed(-kG * std::sin(th), kG * std::cos(th), tilt_rate);
@@ -855,6 +994,7 @@ Result simulate(const Case& c) {
       r.putdown_wheel = ud;
       r.putdown_cmd = 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]);
       sd = {0.0, 0.0, 0.0, 0.0};
+      mh = s[2]; mhd = 0.0; mk = s[3]; mkd = 0.0;
     }
     if (put_down && t >= put_down_t && t < put_down_t + 2.0) {
       r.post_release_dev = std::max(r.post_release_dev, std::abs(s[1] - theta_rest0));
@@ -875,31 +1015,43 @@ Result simulate(const Case& c) {
         udd_des = ws_acc;
       }
       // Hip position servo (P position -> PI velocity -> torque), two joints.
-      const double vel_sp = c.hip_kp * (hip_applied + hz - s[2]);
-      const double vel_err = vel_sp - sd[2];
+      const double hq = backlash ? mh : s[2], hqd = backlash ? mhd : sd[2];
+      const double kq = backlash ? mk : s[3], kqd = backlash ? mkd : sd[3];
+      const double vel_sp = c.hip_kp * (hip_applied + hz - hq);
+      const double vel_err = vel_sp - hqd;
       hip_integ = std::clamp(hip_integ + 2.0 * kv_joint * 2.0 * vel_err * dt, -2.0, 2.0);
       const double tau_h = std::clamp(2.0 * kv_joint * vel_err + hip_integ,
                                       -2.0 * c.hip_tau_max, 2.0 * c.hip_tau_max);
       r.max_tau_hip = std::max(r.max_tau_hip, std::abs(tau_h));
       // Knee position servo, same structure; its integrator carries the
       // body's weight, so it may use the whole torque range.
-      const double vel_err_k = c.knee_kp * (knee_applied + kz - s[3]) - sd[3];
+      const double vel_err_k = c.knee_kp * (knee_applied + kz - kq) - kqd;
       const double cap_k = 2.0 * c.knee_tau_max;
       double tau_k;
       if (mit_applied.on) {
         // GDS68 MIT law in the driver (both knees): T = Kp (q* - q) +
         // Kd (qd* - qd) + T_ff, at the plant's substep rate.
-        const double m = mit_applied.kp * (knee_applied + kz - s[3]) +
-                         mit_applied.kd * (mit_applied.vel - sd[3]) + mit_applied.tff;
+        const double m = mit_applied.kp * (knee_applied + kz - kq) +
+                         mit_applied.kd * (mit_applied.vel - kqd) + mit_applied.tff;
         tau_k = 2.0 * std::clamp(m, -c.knee_tau_max, c.knee_tau_max);
       } else {
         knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
         tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
       }
       if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
+      // Through the gears (backlash): the links get the gear torque, the
+      // rotors the servo torque minus it.
+      const double tau_hl = backlash ? gear(mh, s[2], mhd, sd[2], c.hip_backlash, c.hip_rotor, c.gear_k) : tau_h;
+      const double tau_kl = backlash ? gear(mk, s[3], mkd, sd[3], c.knee_backlash, c.knee_rotor, c.gear_k_knee > 0.0 ? c.gear_k_knee : c.gear_k) : tau_k;
+      if (backlash) {
+        mhd += (tau_h - tau_hl) / (2.0 * std::max(c.hip_rotor, 1.0e-4)) * dt;
+        mh += mhd * dt;
+        mkd += (tau_k - tau_kl) / (2.0 * std::max(c.knee_rotor, 1.0e-4)) * dt;
+        mk += mkd * dt;
+      }
       // Wheel torque that realises udd_des (linear in the torque), capped.
-      const auto a0 = plant.accel(s, sd, 0.0, tau_h, tau_k, fx, c.slope);
-      const auto a1 = plant.accel(s, sd, 1.0, tau_h, tau_k, fx, c.slope);
+      const auto a0 = plant.accel(s, sd, 0.0, tau_hl, tau_kl, fx, c.slope);
+      const auto a1 = plant.accel(s, sd, 1.0, tau_hl, tau_kl, fx, c.slope);
       const double u0 = a0[0] / R - a0[1] - a0[2] - a0[3];
       const double u1 = a1[0] / R - a1[1] - a1[2] - a1[3];
       const double tw = std::clamp((udd_des - u0) / (u1 - u0), -c.wheel_tau_max, c.wheel_tau_max);
@@ -954,6 +1106,15 @@ Result simulate(const Case& c) {
         zb_max = std::max(zb_max, zb);
         if (t > 11.0) { zl_min = std::min(zl_min, zb); zl_max = std::max(zl_max, zb); }
       }
+      if (c.bump_h != 0.0 && c.drive_m_s != 0.0 && t >= c.drive_start_s &&
+          t <= c.drive_end_s + 0.5) {
+        const double axle_x = plant.world(s, LegPlant::kAxle).x;
+        const double bump_lo = c.bump_x0 - 0.06;
+        const double bump_hi = c.bump_x0 + 2.0 * c.bump_ramp + c.bump_width + 0.06;
+        if (axle_x >= bump_lo && axle_x <= bump_hi) {
+          r.body_vacc_bump_peak = std::max(r.body_vacc_bump_peak, std::abs(abz_f));
+        }
+      }
     }
     {
       const double a_prev = ab_f;
@@ -986,7 +1147,24 @@ Result simulate(const Case& c) {
     // hips at the height pose), relative to which the body deviation counts.
     const double rest = theta_rest0 + (level_active ? c.level_rel : 0.0);
     const double dev = s[1] - rest;
+    for (std::size_t pi = 0; pi < c.presses.size(); ++pi) {
+      const auto& pr = c.presses[pi];
+      const double end = pi+1 < c.presses.size() ? c.presses[pi+1].t0 : duration_s;
+      if (t >= pr.t1 && t < end)
+        r.press_rebound_rad = std::max(r.press_rebound_rad,
+            std::max(-std::copysign(1.0, pr.x)*dev, 0.0));
+    }
     if (k == 0) r.start_dev = dev;
+    if (!c.pushes.empty() && !push_sequence_measured && t >= c.pushes.front().t0) {
+      const Pt hip_pt = plant.worldOf(s, {0.0, 0.0});
+      const Pt axle_pt = plant.world(s, LegPlant::kAxle);
+      r.push_sequence_height_m = hip_pt.z - axle_pt.z;
+      push_sequence_measured = true;
+    }
+    if (push_sequence_measured && !c.pushes.empty() &&
+        t <= c.pushes.back().t1 + 0.5) {
+      r.push_sequence_body_peak = std::max(r.push_sequence_body_peak, std::abs(dev));
+    }
     if (c.excite_amp > 0.0) {
       if (t < c.excite_start_s) { excite_b0 = s[1]; excite_l0 = lean; }
       else if (t < c.excite_start_s + tap_fw::v3::kFloorTestDurationS + 1.0) {
@@ -1005,6 +1183,14 @@ Result simulate(const Case& c) {
         r.push_knee = std::max(r.push_knee, std::abs(s[3] - push_k0));
         r.push_dz = std::max(r.push_dz, std::abs(plant.world(s, 0).z - push_z0));
       }
+      if (t >= push_start_s + 0.3 && t < push_start_s + 6.0) {
+        r.push_opposite = std::max(r.push_opposite, (c.push_n > 0.0 ? -1.0 : 1.0) * dev);
+      }
+    }
+    if (t > duration_s - 15.0) {
+      const double th = ctrl.trunkHip();
+      rest_trunk_lo = std::min(rest_trunk_lo, th); rest_trunk_hi = std::max(rest_trunk_hi, th);
+      rest_x_lo = std::min(rest_x_lo, s[0]); rest_x_hi = std::max(rest_x_hi, s[0]);
     }
     if (t > 2.0) {
       if (std::abs(dev) > 0.015) r.level_settle_s = t;
@@ -1050,9 +1236,17 @@ Result simulate(const Case& c) {
       std::fprintf(anim, "%.3f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f", t, hip.x, hip.z,
                    knee.x, knee.z, ax.x, ax.z, com.x, com.z, sd[0], dev);
       for (const Pt& q : b) std::fprintf(anim, ",%.5f,%.5f", q.x, q.z);
-      std::fprintf(anim, ",%.4f,%.4f,%.4f,%.3f,%.2f,%.5f,%.2f,%.3f\n", lean, s[2], s[3],
+      std::fprintf(anim, ",%.4f,%.4f,%.4f,%.3f,%.2f,%.5f,%.2f,%.3f,%.4f,%.2f", lean, s[2], s[3],
                    double(cmd.forward_m_s), fx, plant.ground ? plant.ground(s[0]) : 0.0, plant.ext.fz,
-                   plant.ext.local.x);
+                   plant.ext.local.x, double(ctrl.trunkHip()), double(ctrl.trunkAuthority()));
+      // As the firmware TR line logs them (tools/tr_rest_stats.py --sim):
+      // the IMU pitch rate the controller got, theta_v rate, encoder axle_x.
+      const auto split = ctrl.splitTelemetry();
+      std::fprintf(anim, ",%.4f,%.4f,%.5f,%.6f,%.6f,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                   double(in.pitch_rate_rad_s), double(ctrl.virtualPitchRate()), double(ctrl.groundPosition()),
+                   double(split.hip_a), double(split.hip_b), double(split.alpha_b), double(split.preview),
+                   double(split.model_target), double(ctrl.legPose().axle_below_hip_m),
+                   double(ctrl.heightSpeed()), double(ctrl.heightAcceleration()));
     }
     const int trace_every = std::getenv("TR_FINE") ? 1 : 25;
     if (c.trace && k % trace_every == 0 && std::getenv("TR_WBDBG")) {
@@ -1075,6 +1269,18 @@ Result simulate(const Case& c) {
     }
     r.max_speed = std::max(r.max_speed, std::abs(sd[0]));
     r.max_x = std::max(r.max_x, std::abs(s[0]));
+    if (c.trace_position) r.x_trace.push_back(s[0]);
+    if (c.height_low_m > 0.0) {
+      const float height = ctrl.legPose().axle_below_hip_m;
+      if (r.height_down_s < 0.0 && t >= c.height_low_s && t < c.height_up_s &&
+          std::abs(height - c.height_low_m) < 0.002F) {
+        r.height_down_s = t - c.height_low_s;
+      }
+      const float hmax = ctrl.supportedMaxHeight();
+      if (r.height_up_s < 0.0 && t >= c.height_up_s && std::abs(height - hmax) < 0.002F) {
+        r.height_up_s = t - c.height_up_s;
+      }
+    }
     if (k == static_cast<int>((c.drive_end_s + 3.0) / dt_c)) x_stop = s[0];
   }
   if (anim) std::fclose(anim);
@@ -1097,6 +1303,8 @@ Result simulate(const Case& c) {
   r.lean_rms_all = all_n ? std::sqrt(all_lean_sq / all_n) : 0.0;
   r.rest_rate_rms = body_n ? std::sqrt(rest_rate_sq / body_n) : 0.0;
   r.rest_hip_rms = body_n ? std::sqrt(rest_hip_sq / body_n) : 0.0;
+  r.rest_trunk_pp = rest_trunk_hi > rest_trunk_lo ? rest_trunk_hi - rest_trunk_lo : 0.0;
+  r.rest_x_pp = rest_x_hi > rest_x_lo ? rest_x_hi - rest_x_lo : 0.0;
   r.held_resets = ctrl.heldResets();
   r.est_err_rms = est_n ? std::sqrt(est_sq / est_n) : 0.0;
   r.body_acc_rms = ev_n ? std::sqrt(ev_acc_sq / ev_n) : 0.0;
@@ -1125,6 +1333,205 @@ Case withMode(Case c, int mode) {
   return c;
 }
 
+void runHybridPushRegression() {
+  // Layered body hold and knee suspension under alternating fore/aft hand
+  // pushes. Positive force is forward; every second pulse reverses direction.
+  // Wait for a crouch target to settle before starting the pulse train, then
+  // assert the plant's measured hip-to-axle height at the first impulse.
+  struct Support { const char* name; int suspension; int vmc; bool trunk; };
+  const Support modes[] = {
+      {"no trunk", 1, 0, false}, {"position", 1, 0, true},
+      {"VMC only", 0, 1, true}, {"hybrid", 1, 1, true}};
+  for (double h : {double(LegHeight::maxHeight()), 0.110}) {
+    double no_trunk_body = 0.0;
+    for (const auto& mode : modes) {
+      Case c = withMode(Case{}, 2);
+      c.trunk = mode.trunk;
+      c.name = "V31 alternating fore/aft pushes";
+      c.duration_s = 23.0;
+      if (h < LegHeight::maxHeight() - 1.0e-4) c.heights.push_back({1.0, h});
+      c.suspension = mode.suspension;
+      c.vmc = mode.vmc;
+      // Match the active hybrid app: roll is enabled, so the existing
+      // startup reserves 12 mm before trunk sway. Exact max extension has
+      // no horizontal workspace at unchanged height (covered by IK tests
+      // and MAXSTART); do not claim body isolation there.
+      c.roll = 1;
+      for (int i = 0; i < 8; ++i) {
+        const double t = 13.0 + 0.55 * i;
+        c.pushes.push_back({t, t + 0.25, (i % 2 == 0) ? 4.0 : -4.0});
+      }
+      const Result r = simulate(c);
+      std::printf("V31 h %.0f mm %-9s: fell=%d held=%d body=%.4f rad pushBody=%.4f rad "
+                  "hPush=%.1f mm trunkHip=%.4f rad kneeTau=%.2f N m bodyZ(after11s)=%.1f mm\n",
+                  h * 1000.0, mode.name, r.fell, r.held_resets, r.body_dev_all,
+                  r.push_sequence_body_peak, r.push_sequence_height_m * 1000.0,
+                  r.max_dhip, r.max_tau_knee, r.body_z_range_late * 1000.0);
+      std::fflush(stdout);
+      assert(!r.fell && r.held_resets == 0);
+      assert(r.body_dev_all < 0.15);
+      const double expected_height = std::min(h, double(LegHeight::maxHeight()) -
+          double(tap_fw::v3::defaultV3Config().roll.reserve_m));
+      assert(std::abs(r.push_sequence_height_m - expected_height) < 0.006);
+      assert(r.push_sequence_body_peak < 0.15);
+      if (!mode.trunk) {
+        no_trunk_body = r.push_sequence_body_peak;
+        assert(r.max_dhip < 1.0e-3);
+      } else {
+        assert(r.max_dhip > 0.01);
+        assert(r.push_sequence_body_peak < 0.8 * no_trunk_body);
+      }
+      assert(r.max_tau_knee < 5.0);
+    }
+  }
+}
+
+void runHeightTransitionRegression() {
+  const char* selected_height = std::getenv("TIER_HEIGHT_MM");
+  for (double height : {0.110, 0.0784}) {
+    if (selected_height &&
+        std::abs(height * 1000.0 - std::atof(selected_height)) > 0.2) continue;
+    Case hold = withMode(Case{}, 2);
+    hold.name = "height transition reference";
+    hold.duration_s = 30.0;
+    hold.roll = 0;
+    hold.vmc = 1;
+    hold.trace_position = true;
+    Case move = hold;
+    move.name = "jerk-limited height transition";
+    move.height_low_m = height;
+    move.height_low_s = 5.0;
+    move.height_up_s = 17.0;
+    if (const char* animation = std::getenv("TR_HEIGHT_ANIM")) {
+      move.animation_file = animation;
+    }
+    // Repeat equal and opposite fore/aft taps during both directions of
+    // travel. The no-height run uses identical pulses as the station-hold
+    // reference, so the measured X difference isolates the pose transition.
+    if (std::getenv("TIER_HEIGHT_NOPUSH") == nullptr) {
+      for (int i = 0; i < 4; ++i) {
+        const double down_t = 6.0 + 0.55 * i;
+        const double up_t = 18.0 + 0.55 * i;
+        const double force = (i % 2 == 0) ? 4.0 : -4.0;
+        hold.pushes.push_back({down_t, down_t + 0.25, force});
+        hold.pushes.push_back({up_t, up_t + 0.25, force});
+      }
+    }
+    move.pushes = hold.pushes;
+
+    const Result reference = simulate(hold);
+    const Result result = simulate(move);
+    double peak_x_error = 0.0;
+    assert(reference.x_trace.size() == result.x_trace.size());
+    for (std::size_t i = 0; i < result.x_trace.size(); ++i) {
+      peak_x_error = std::max(peak_x_error,
+          std::abs(result.x_trace[i] - reference.x_trace[i]));
+    }
+    const double final_x_error = result.x_trace.empty() ? 1.0
+        : result.x_trace.back() - reference.x_trace.back();
+    std::printf("HEIGHT PROFILE h=%.1f mm %s: down=%.2f s up=%.2f s fell=%d body=%.4f rad "
+                "peak station error=%.1f mm final=%.1f mm xRef=%.1f mm xMove=%.1f mm\n",
+                height * 1000.0, hold.pushes.empty() ? "no push" : "alternating pushes",
+                result.height_down_s, result.height_up_s,
+                result.fell ? 1 : 0, result.body_dev_all, peak_x_error * 1000.0,
+                final_x_error * 1000.0, reference.x_end * 1000.0, result.x_end * 1000.0);
+    std::fflush(stdout);
+    assert(!result.fell && result.held_resets == 0);
+    assert(result.height_down_s >= 0.0 && result.height_down_s < 8.0);
+    assert(result.height_up_s >= 0.0 && result.height_up_s < 7.0);
+    assert(result.body_dev_all < 0.05);
+    assert(peak_x_error < 0.05);
+    assert(std::abs(final_x_error) < 0.03);
+  }
+}
+
+void runVmcBumpRegression() {
+  auto bump = [](Case& c) {
+    c.bump_h = 0.005;
+    c.bump_ramp = 0.015;
+    c.bump_x0 = 0.25;
+    c.bump_width = 0.03;
+    c.drive_m_s = 0.30;
+    c.drive_start_s = 12.0;
+    c.drive_end_s = 16.0;
+    c.duration_s = 21.0;
+  };
+  for (double h : {0.110, 0.084}) {
+    Result r[2];
+    for (int vmc = 0; vmc < 2; ++vmc) {
+      Case c = withMode(Case{}, 2);
+      c.heights.push_back({1.0, h});
+      bump(c);
+      c.vmc = vmc;
+      c.name = vmc ? "VMC bump event" : "position bump event";
+      r[vmc] = simulate(c);
+      assert(!r[vmc].fell && r[vmc].held_resets == 0);
+    }
+    std::printf("V30 %.0f mm bump: all-run peak %.2f/%.2f, bump-window peak %.2f/%.2f m/s^2\n",
+                h * 1000.0, r[0].body_vacc_peak, r[1].body_vacc_peak,
+                r[0].body_vacc_bump_peak, r[1].body_vacc_bump_peak);
+    std::fflush(stdout);
+    assert(r[0].body_vacc_bump_peak > 0.1);
+    assert(r[1].body_vacc_bump_peak < 0.7 * r[0].body_vacc_bump_peak);
+  }
+}
+
+// V33 / V34: the calm settings (Config::stand_leash_m, Tier::hip_deadband_rad,
+// Tier::sat_margin) against the same nominal cases with them off.
+Case calmCase(double h, bool calm) {
+  Case c = withMode(Case{}, 2);
+  if (h < 0.188) c.heights.push_back({1.0, h});
+  if (calm) { c.stand_leash = 0.10; c.hip_db = 0.003; c.sat_margin = 0.8; }
+  return c;
+}
+
+void runCalmRegression() {
+  // V33: a hard push (wheels into their cap) must not throw the body the
+  // other way on the stop - the spring back to the old spot and the hips
+  // handing the braking lean to the body did - yet the robot still walks
+  // home, and the catch itself holds.
+  for (double h : {0.189, 0.110}) {
+    for (double f : {6.0, -8.0, 8.0}) {
+      Result r[2];
+      for (int calm = 0; calm < 2; ++calm) {
+        Case c = calmCase(h, calm);
+        c.push_n = f; c.push_start_s = 14.0; c.push_end_s = 14.3; c.duration_s = 30.0;
+        r[calm] = simulate(c);
+      }
+      std::printf("V33 %3.0f mm push %+.0f N off/on: fell %d/%d held %d/%d opposite %.3f/%.3f rad "
+                  "x_end %+.3f/%+.3f m\n", h * 1000, f, r[0].fell, r[1].fell, r[0].held_resets,
+                  r[1].held_resets, r[0].push_opposite, r[1].push_opposite, r[0].x_end, r[1].x_end);
+      std::fflush(stdout);
+      assert(!r[1].fell && r[1].held_resets == 0);
+      // 8 N: at least a quarter less (sim: 0.07-0.08 -> 0.013-0.034 rad).
+      // 6 N never reaches the wheel cap; the deadband leaves the body a
+      // little more of it (110 mm: 0.019 -> 0.023), allowed up to 5 mrad.
+      if (std::abs(f) > 7.0) assert(r[1].push_opposite <= 0.75 * r[0].push_opposite);
+      else assert(r[1].push_opposite <= r[0].push_opposite + 0.005);
+      assert(std::abs(r[1].x_end) < 0.10);
+    }
+  }
+  // V34: standing, the hips stop twitching on noise and stick-slip and the
+  // wheels stop wandering (at 84 mm the position trim wound into a +-0.2 m,
+  // ~16 s cycle).
+  for (double h : {0.189, 0.110, 0.084}) {
+    Result r[2];
+    for (int calm = 0; calm < 2; ++calm) {
+      Case c = calmCase(h, calm);
+      c.duration_s = 40.0;
+      r[calm] = simulate(c);
+    }
+    std::printf("V34 %3.0f mm standing off/on: hip pp %.4f/%.4f rad wheel pp %.1f/%.1f mm "
+                "rest %.3f/%.3f\n", h * 1000, r[0].rest_trunk_pp, r[1].rest_trunk_pp,
+                r[0].rest_x_pp * 1000, r[1].rest_x_pp * 1000, r[0].rest_rate_rms, r[1].rest_rate_rms);
+    std::fflush(stdout);
+    assert(!r[1].fell && r[1].held_resets == 0);
+    assert(r[1].rest_trunk_pp < 0.9 * r[0].rest_trunk_pp);
+    assert(r[1].rest_x_pp < std::max(r[0].rest_x_pp, 0.06));
+    assert(r[1].rest_rate_rms < r[0].rest_rate_rms + 0.01);
+  }
+}
+
 // Plant variants around the fitted/CAD values the tiers must tolerate.
 struct Variant { const char* name; void (*apply)(Case&); };
 const Variant kVariants[] = {
@@ -1147,6 +1554,74 @@ const Variant kVariants[] = {
     {"knee soft (hip gains)", [](Case& c) { c.knee_vel_bw = -1.0; }},
     {"knee stiff", [](Case& c) { c.knee_kp = 50.0; }},
 };
+
+void runCoordinatedAdaptiveRegression() {
+  int episodes = 0;
+  int failures = 0;
+  double worst_body = 0;
+  for (double height : {double(LegHeight::maxHeight())-0.012, 0.110, 0.084}) {
+    for (const auto& variant : kVariants) {
+      Case c = withMode(Case{}, 2);
+      c.name = "paired adaptive alternating pushes";
+      c.roll = c.vmc = c.suspension = 1;
+      c.duration_s = 23;
+      c.heights.push_back({1.0, height});
+      variant.apply(c);
+      for (int i = 0; i < 8; ++i) {
+        const double t = 13 + 0.55*i;
+        c.pushes.push_back({t, t+0.25, i%2 == 0 ? 4.0 : -4.0});
+      }
+      const auto r = simulate(c);
+      std::printf("PAIRED ADAPT h=%.1f mm %-24s fell=%d held=%d body=%.4f "
+                  "hPush=%.1f mm rest=%.4f\n", height*1000, variant.name, r.fell,
+                  r.held_resets, r.body_dev_all, r.push_sequence_height_m*1000, r.rest_rate_rms);
+      std::fflush(stdout);
+      const bool pass = !r.fell && r.held_resets == 0 && r.body_dev_all < 0.15 &&
+          std::abs(r.push_sequence_height_m-height) < 0.006;
+      if (!pass) ++failures;
+      worst_body = std::max(worst_body, r.body_dev_all);
+      ++episodes;
+    }
+  }
+  std::printf("PAIRED ADAPT %d/%d pass, worst body %.4f rad\n", episodes-failures, episodes, worst_body);
+  std::fflush(stdout);
+  assert(failures == 0);
+}
+
+void runAlternatingPressRegression() {
+  int total = 0, failures = 0;
+  double worst_body = 0, worst_rebound = 0, worst_rest = 0;
+  for (double h : {double(LegHeight::maxHeight())-0.012, 0.136, 0.110, 0.084}) {
+    for (int vi : {0, 1, 2, 3, 12, 4, 6}) {
+      Case c = withMode(Case{}, 2);
+      c.name = "alternating nose/tail presses";
+      c.roll = c.vmc = c.suspension = 1;
+      c.duration_s = 30;
+      c.heights.push_back({1.0, h});
+      kVariants[vi].apply(c);
+      for (int i = 0; i < 8; ++i) {
+        const double start = 13+1.5*i;
+        c.presses.push_back({start, start+0.5, i%2 ? -0.11 : 0.11, -3.0});
+      }
+      const auto r = simulate(c);
+      const bool pass = !r.fell && r.held_resets == 0 && r.body_dev_all < 0.15 &&
+                        r.rest_rate_rms < 0.15;
+      std::printf("ALT PRESS h=%.1f mm %-22s fell=%d held=%d body=%.4f rebound=%.4f rest=%.4f pass=%d\n",
+                  h*1000, kVariants[vi].name, r.fell, r.held_resets, r.body_dev_all,
+                  r.press_rebound_rad, r.rest_rate_rms, pass);
+      std::fflush(stdout);
+      ++total;
+      failures += !pass;
+      worst_body = std::max(worst_body, r.body_dev_all);
+      worst_rebound = std::max(worst_rebound, r.press_rebound_rad);
+      worst_rest = std::max(worst_rest, r.rest_rate_rms);
+    }
+  }
+  std::printf("ALT PRESS %d/%d pass body=%.4f rebound=%.4f rest=%.4f\n",
+              total-failures, total, worst_body, worst_rebound, worst_rest);
+  std::fflush(stdout);
+  assert(failures == 0);
+}
 
 }  // namespace
 
@@ -1412,6 +1887,10 @@ int main() {
   for (int flip = 0; flip < 2; ++flip) {
     auto cfg = tap_fw::v3::defaultV3Config();
     cfg.tier.virtual_pitch = true;
+    // Isolate the sensor/model sign guard; tier-2 body leveling is tested in
+    // V25 and must not move the expected pose while this fixture stays rigid.
+    cfg.tier.trunk = false;
+    cfg.tier.level = false;
     cfg.engage.immediate = true;
     V3Controller ctrl(cfg);
     V3Controller::Input in{};
@@ -1440,6 +1919,86 @@ int main() {
     assert((fault != nullptr) == (flip == 1));
   }
   auto run = [](Case c) { const Result r = simulate(c); report(c, r); return r; };
+  if (std::getenv("TIER_ALT_PRESS") != nullptr) {
+    runAlternatingPressRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_PAIRED_ADAPT") != nullptr) {
+    runCoordinatedAdaptiveRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_V30_BUMP") != nullptr) {
+    runVmcBumpRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_HEIGHT_PROFILE") != nullptr) {
+    runHeightTransitionRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_HYBRID_PUSH") != nullptr) {
+    runHybridPushRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_CALM") != nullptr) {
+    runCalmRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_MAXSTART") != nullptr) {
+    // Exercise the real knee driver gain cap with the boot hybrid profile.
+    // The historical sweep remains POS unless MS_VMC=1 is supplied.
+    const bool vmc_start = std::getenv("MS_VMC") && std::atoi(std::getenv("MS_VMC")) != 0;
+    std::printf("MAXSTART config vmc=%d driver_kp_cap=%.1f\n", vmc_start,
+                tap_fw::board::kLegMaxKpNmPerRad);
+    // Immediate placement at engagement: measured legs start fully extended.
+    // No use of held_s: that older fixture pins the measured knee to zero
+    // then replaces it with the commanded knee at placement. It cannot prove
+    // continuous joint motion for a long spell on the stand.
+    // This fixture covers the floor catch and roll-reserve transition only;
+    // it does not model touchdown impact or the preceding hand-held motion.
+    const bool animation = std::getenv("MS_ANIM") != nullptr;
+    const double selected_force = animation && std::getenv("MS_FORCE")
+        ? std::atof(std::getenv("MS_FORCE")) : 3.0;
+    const double selected_bias = animation && std::getenv("MS_BIAS")
+        ? std::atof(std::getenv("MS_BIAS")) : 0.02;
+    int episodes = 0;
+    double peak = 0, rest = 0;
+    for (int roll : {0, 1}) for (double bias : {-0.06, -0.02, 0.0, 0.02, 0.06}) {
+      for (double force : {0.0, 3.0}) for (int vi : {0, 1, 2, 3, 12, 4, 6}) {
+        const double run_force = animation && std::getenv("MS_FORCE") ? selected_force : force;
+        if (animation && (roll != (std::getenv("MS_ROLL") ? std::atoi(std::getenv("MS_ROLL")) : 1)
+                          || bias != selected_bias || force != (selected_force == 0.0 ? 0.0 : 3.0) || vi != 0)) continue;
+        Case c = withMode(Case{}, 2);
+        c.vmc = vmc_start ? 1 : 0;
+        c.roll = roll;
+        c.seed_error = bias;
+        c.duration_s = 18;
+        kVariants[vi].apply(c);
+        if (run_force > 0) {
+          const bool late_only = animation && std::getenv("MS_LATE_ONLY") != nullptr;
+          if (late_only) {
+            c.presses = {{10.0, 10.5, 0.11, -run_force}, {13.0, 13.5, -0.11, -run_force}};
+          } else {
+            c.presses = {{0.25, 0.5, 0.11, -run_force}, {1.25, 1.5, -0.11, -run_force},
+                         {10.0, 10.5, 0.11, -run_force}, {13.0, 13.5, -0.11, -run_force}};
+          }
+        }
+        const Result r = simulate(c);
+        std::printf("MAXSTART roll=%d bias=%+.3f force=%.0f variant=%d height=%.1f mm "
+                    "fell=%d capture=%.4f body=%.4f rest=%.4f%s%s\n",
+                    roll, bias, run_force, vi, r.capture_height_m * 1000, r.fell,
+                    r.capture_body_peak, r.body_dev_all, r.rest_rate_rms,
+                    r.fell ? " fault=" : "", r.fell ? r.fault : "");
+        std::fflush(stdout);
+        assert(std::abs(r.capture_height_m - LegHeight::maxHeight()) < 0.0001);
+        assert(!r.fell && r.capture_body_peak <= 0.15 && r.body_dev_all <= 0.15);
+        peak = std::max(peak, std::max(r.capture_body_peak, r.body_dev_all));
+        rest = std::max(rest, r.rest_rate_rms);
+        ++episodes;
+      }
+    }
+    std::printf("MAXSTART PASS %d episodes peak %.4f rad rest %.4f rad/s\n", episodes, peak, rest);
+    return 0;
+  }
   if (const char* tr = std::getenv("TIER_TRACE")) {
     // Diagnostics: TIER_TRACE=<drive m/s> [TR_MODE=0|1|2] [TR_H=<height m>] [TR_IDEAL=1]
     Case c = withMode(Case{}, std::getenv("TR_MODE") ? std::atoi(std::getenv("TR_MODE")) : 2);
@@ -1630,6 +2189,26 @@ int main() {
     return 0;
   }
 #endif
+  if (std::getenv("TIER_STOP") != nullptr) {
+    Case c = withMode(Case{}, 2);
+    c.duration_s = 26.0;
+    c.heights = {{1.0, 0.150}, {10.0, std::getenv("STOP_H") ? std::atof(std::getenv("STOP_H")) : 0.095}};
+    c.stop_mode = std::getenv("STOP_MODE") ? std::atoi(std::getenv("STOP_MODE")) : 0;
+    if (const char* v = std::getenv("STOP_BRAKE")) c.height_brake_s = std::atof(v);
+    const int variant = std::getenv("STOP_VARIANT") ? std::atoi(std::getenv("STOP_VARIANT")) : 0;
+    if (variant == 1 || variant == 2) {
+      c.hip_backlash = 0.001; c.gear_k = 20.0; c.gear_k_knee = 150.0;
+    }
+    if (variant == 2 || variant == 3) c.wheel_delay_ticks += 10;
+    if (variant == 4) c.hip_vel_noise = c.knee_vel_noise = 0.12;
+    if (variant == 5) { c.hip_zero_err = 0.05; c.knee_zero_err = -0.04; }
+    c.vmc = 1; c.roll = 1;
+    const Result r = simulate(c);
+    std::printf("STOP h=%.0f mode=%d variant=%d fell=%d held=%d body=%.5f rest=%.5f fault=%s\n",
+                c.heights.back().second*1000, c.stop_mode, variant, r.fell, r.held_resets,
+                r.body_dev_all, r.rest_rate_rms, r.fault);
+    return 0;  // This is measurement, not a passing assertion.
+  }
   if (std::getenv("TIER_ZERO") != nullptr) {
     // Legs arranged off by hand: N-P aligned only with the body tilted.
     // Does the level loop straighten the body with the legs?
@@ -2244,6 +2823,50 @@ int main() {
     }
     return 0;
   }
+  if (std::getenv("TIER_DIAG") != nullptr) {
+    // One push (or none) for tools/tier_push_metrics.py: the CSV goes to
+    // TR_ANIM. DIAG_H height [m, 0 = full], DIAG_F force [N] at 14 s for
+    // DIAG_LEN [s], DIAG_VAR plant variant, DIAG_DUR run length [s].
+    Case c = withMode(Case{}, 2);
+    const double h = std::getenv("DIAG_H") ? std::atof(std::getenv("DIAG_H")) : 0.0;
+    if (h > 0.0) c.heights.push_back({1.0, h});
+    const double f = std::getenv("DIAG_F") ? std::atof(std::getenv("DIAG_F")) : 0.0;
+    const double len = std::getenv("DIAG_LEN") ? std::atof(std::getenv("DIAG_LEN")) : 0.3;
+    c.push_n = f; c.push_start_s = 14.0; c.push_end_s = 14.0 + len;
+    c.duration_s = std::getenv("DIAG_DUR") ? std::atof(std::getenv("DIAG_DUR")) : 40.0;
+    if (const char* v = std::getenv("DIAG_VAR")) kVariants[std::atoi(v)].apply(c);
+    if (const char* v = std::getenv("DIAG_LVL")) c.level = std::atoi(v);
+    if (const char* v = std::getenv("DIAG_HELD")) c.held_s = std::atof(v);
+    if (const char* v = std::getenv("DIAG_GRAB")) c.grab_s = std::atof(v);
+    if (const char* v = std::getenv("DIAG_GRAB_BIAS")) c.grab_release_bias_rad = std::atof(v);
+    if (std::getenv("DIAG_NOLEARN")) c.learn_hold = 1000.0;
+    if (const char* v = std::getenv("DIAG_SEED")) c.seed_error = std::atof(v);
+    if (const char* v = std::getenv("DIAG_HVN")) c.hip_vel_noise = std::atof(v);
+    if (const char* v = std::getenv("DIAG_KVN")) c.knee_vel_noise = std::atof(v);
+    if (const char* v = std::getenv("DIAG_CTRL_EVERY")) c.ctrl_every = std::atoi(v);
+    if (const char* v = std::getenv("DIAG_GYRN")) c.gyro_noise = std::atof(v);
+    if (const char* v = std::getenv("DIAG_ACCN")) c.acc_noise_scale = std::atof(v);
+    if (const char* v = std::getenv("DIAG_DRIVE")) {
+      c.drive_m_s = std::atof(v); c.drive_start_s = 12.0; c.drive_end_s = 16.0;
+    }
+    if (const char* v = std::getenv("DIAG_IDEALIMU")) c.ideal_imu = std::atoi(v) != 0;
+    if (const char* v = std::getenv("DIAG_WNOISE")) c.wheel_noise = std::atof(v);
+    if (const char* v = std::getenv("DIAG_WDELAY")) c.wheel_delay_ticks = static_cast<std::size_t>(std::atoi(v));
+    if (const char* v = std::getenv("DIAG_WMEAS")) c.wheel_meas_delay_ticks = static_cast<std::size_t>(std::atoi(v));
+    if (const char* v = std::getenv("DIAG_WTAU")) c.wheel_tau = std::atof(v);
+    if (const char* v = std::getenv("DIAG_WTQ")) c.wheel_tau_max = std::atof(v);
+    if (const char* v = std::getenv("DIAG_BLH")) c.hip_backlash = std::atof(v);
+    if (const char* v = std::getenv("DIAG_BLK")) c.knee_backlash = std::atof(v);
+    if (const char* v = std::getenv("DIAG_GK")) c.gear_k = std::atof(v);
+    if (const char* v = std::getenv("DIAG_GZ")) c.gear_zeta = std::atof(v);
+    if (const char* v = std::getenv("DIAG_GKK")) c.gear_k_knee = std::atof(v);
+    if (const char* v = std::getenv("DIAG_WDB")) c.deadband = std::atof(v);
+    const Result r = simulate(c);
+    std::printf("DIAG fell=%d%s held=%d body_all=%.4f est_max=%.4f est_rms=%.4f body_drive=%.4f\n", r.fell,
+                r.fell ? r.fault : "", r.held_resets, r.body_dev_all, r.est_err_max, r.est_err_rms,
+                r.body_dev_drive);
+    return 0;
+  }
   if (std::getenv("TIER_ACCEL") != nullptr) {
     // Commanded speed-up / braking at each height on the wheel variants
     // (TR_PLANFULL / TR_KHOLD from the environment): does the body stay
@@ -2426,7 +3049,6 @@ int main() {
             Case c = withMode(Case{}, 2);
             if (vi > 0) kVariants[vi].apply(c);
             c.tier_exp = e; c.tier_lead = lead;
-            if (const char* v = std::getenv("LD_HPF")) c.tier_hpf = std::atof(v);
             if (const char* v = std::getenv("LD_MAX")) c.tier_max = std::atof(v);
             if (std::getenv("LD_ONE") && (vi != 0 || std::abs(lead - std::atof(std::getenv("LD_ONE"))) > 1e-6 ||
                                           std::abs(h - std::atof(std::getenv("LD_H"))) > 1e-4 || e != std::atof(std::getenv("LD_E")))) continue;
@@ -3214,6 +3836,7 @@ int main() {
       std::printf("   bump %d mm: bob %.1f -> %.1f mm, vertical accel peak %.2f -> %.2f m/s^2\n",
                   b ? 8 : 5, r[0].body_z_range * 1000, r[1].body_z_range * 1000,
                   r[0].body_vacc_peak, r[1].body_vacc_peak);
+      std::fflush(stdout);
       // The 8 mm bump is a slow 4 cm ramp the body has to follow. On the
       // measured wheel (2026-10-01) it already rides it softer without the
       // suspension (9.1 mm / 1.96 m/s^2 -> 8.6 / 1.71), leaving ~10 % to take
@@ -3382,24 +4005,7 @@ int main() {
   // no fall or false hold over bumps, hand presses, a push and a drive at
   // 189 / 110 / 84 mm, standing as calm, the knee within 70 % of its rating.
   {
-    auto bump = [](Case& c) { c.bump_h = 0.005; c.bump_ramp = 0.015; c.bump_x0 = 0.25; c.bump_width = 0.03;
-                              c.drive_m_s = 0.30; c.drive_start_s = 12.0; c.drive_end_s = 16.0; c.duration_s = 21; };
-    for (double h : {0.110, 0.084}) {
-      Result r[2];
-      for (int v = 0; v < 2; ++v) {
-        Case c = withMode(Case{}, 2);
-        c.heights.push_back({1.0, h});
-        bump(c);
-        c.vmc = v;
-        static char name[64];
-        std::snprintf(name, sizeof name, "V30 %.0f mm bump 5 mm, VMC %s", h * 1000, v ? "on" : "off");
-        c.name = name;
-        r[v] = run(c);
-        assert(!r[v].fell && r[v].held_resets == 0);
-      }
-      std::printf("   body vertical accel peak %.2f -> %.2f m/s^2\n", r[0].body_vacc_peak, r[1].body_vacc_peak);
-      assert(r[1].body_vacc_peak < 0.7 * r[0].body_vacc_peak);
-    }
+    runVmcBumpRegression();
     struct Sc { const char* name; void (*apply)(Case&); };
     const Sc scs[] = {
         {"stand", [](Case&) {}},
@@ -3429,6 +4035,15 @@ int main() {
       }
     }
   }
+  // V31: the same alternating push regression can be run in isolation with
+  // TIER_HYBRID_PUSH=1 and remains part of the complete suite below.
+  runHybridPushRegression();
+  // V32: height profile transitions with alternating fore/aft pushes and an
+  // identical no-transition position reference.
+  runHeightTransitionRegression();
+  // V33 / V34: push and standing calm (SET sleash / tdb / tsatm) against the
+  // same cases with them off.
+  runCalmRegression();
   std::puts("v3_tier_tests: all checks passed");
   return 0;
 }

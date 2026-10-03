@@ -79,7 +79,8 @@ class V3Controller {
     std::uint64_t held_window_us = 150'000U;
   };
 
-  // Ready-state auto engage (IMU pitch rate / pitch only).
+  // Ready-state auto engage uses IMU body rate; the held pitch seed uses
+  // the virtual CoM-line angle when enabled.
   // Roll (left/right leg length difference). The planar controllers hold
   // pitch; this keeps the body level across: on a cross slope, over a
   // one-wheel bump, with legs arranged unevenly by hand - and leans it into
@@ -157,7 +158,9 @@ class V3Controller {
   //    the joint by the leg Jacobian, (dh/dk)^2 - the same feel at every
   //    height;
   //  - T_ff: gravity of the leg's share standing on its wheel (x grav_scale),
-  //    sky-hook -sky * v_body (replaces Tier::suspension's height offsets)
+  //    sky-hook -sky * v_body. When Tier::suspension is also enabled, its
+  //    slow position correction and the VMC share complementary velocity
+  //    bands instead of both reacting to the full body speed.
   //    and an integral of the knee error (model error, bumpless hand-over);
   //  - stiff (kp_stiff) until balancing on the floor, and again while held
   //    or lifted (gravity compensation would push the legs out).
@@ -250,18 +253,36 @@ class V3Controller {
     bool wb_armed_only = true;
     float move_rate_rad_s = 0.40F;    // carrying the robot off the stand
     float move_pitch_rad = 0.08F;
-    float still_rate_rad_s = 0.08F;   // held still at the standing point
+    float still_rate_rad_s = 0.08F;   // bias-corrected IMU body rate, not joint rate
+    // Quiet time required, with hysteresis and a bounded short-glitch
+    // allowance. Sustained movement or body-angle drift restarts the window.
     std::uint64_t still_us = 700'000U;
+    // Body pitch span allowed inside the quiet window. The IMU pitch of a
+    // robot held perfectly still on the floor reads 0.010-0.023 rad pp
+    // (hardware 2026-10-03), so 0.015 kept restarting the window for ~45 s.
+    float still_span_rad = 0.015F;
     float tip_rate_rad_s = 0.12F;     // released: starts to tip
     float tip_pitch_rad = 0.02F;
+    // Armed: engage this long after ARMED even if it has not tipped (0 =
+    // wait for the tip). Armed means held still ON THE FLOOR, so the wheels
+    // cannot race in the air; an operator still steadying it by hand was
+    // otherwise waited on forever (84 s, hardware 2026-10-03).
+    float armed_go_s = 0.0F;
   };
 
   // v3.1 height change while balancing (both algorithms).
   struct Height {
-    float rate_m_s = 0.015F;          // hip-axle height change speed
-    // Height speed changes at most this fast (start, stop, slow-down): the
-    // speed used to step 0 <-> 15 mm/s in one tick.
-    float accel_m_s2 = 0.05F;
+    float rate_m_s = 0.025F;          // hip-axle height change speed
+    // Let the wheel balance loop engage before reserving roll travel.
+    float startup_delay_s = 0.8F;
+    float startup_rate_m_s = 0.008F;
+    float startup_accel_m_s2 = 0.02F;
+    float startup_jerk_m_s3 = 0.25F;
+    // Peak height acceleration; jerk_m_s3 limits how quickly this reaches it.
+    float accel_m_s2 = 0.07F;
+    // Bound the change in height acceleration so the commanded joint path
+    // starts, brakes and reverses with an S-curve instead of an accel step.
+    float jerk_m_s3 = 0.50F;
     // Speed scales down smoothly with the balance quality and reaches zero
     // at these: (1 - |pitch - ref| / err) * (1 - |pitch_rate| / rate). A hard
     // on/off gate here (0.05 rad / 0.5 rad/s) stopped and restarted the legs
@@ -280,17 +301,13 @@ class V3Controller {
     float balance_ff_scale = -0.38F;
   };
 
-  // v3.3 two-tier control, Ascento style. Both flags off = v3.2 exactly.
-  //  - Tier 1 (wheels, LQR or PID unchanged) balances the virtual pendulum,
-  //    the axle -> whole-robot CoM line: theta_v = body pitch + com_line(
-  //    measured hip/knee) - com_line(hang pose). At the hang pose theta_v is
-  //    the body pitch, so every v3.2 threshold, trim and seed keeps its units.
-  //  - Tier 2 (hips) takes the tier-1 lean: the hips turn by lean / J, J =
-  //    d com_line / d hip, so the legs lean under the CoM and the body stays at
-  //    its balance pitch. theta_v includes the measured hip, so this is the
-  //    body-pitch feedback theta_b -> target written through the geometry
-  //    (q_cmd = q_meas + (theta_b - target) / J): zero steady error, and no
-  //    loop through the hip servo lag beyond the encoder age.
+  // v3.3 two-tier control. Both flags off = v3.2 exactly.
+  //  - Tier 1 (wheels) balances the axle -> whole-robot CoM line:
+  //    theta_v = body pitch + com_line(measured hip/knee) - com_line(hang).
+  //  - Tier 2 (hips) takes dynamic whole-system lean with planned acceleration
+  //    feedforward. A slower IMU body-angle loop holds level_pitch_rad.
+  //    Use the b4b6d4a split: fast body/leg counter-rotation cancels in theta_v
+  //    instead of being amplified into hip commands by body-only feedback.
   struct Tier {
     // Default ON (operator, 2026-10-01: all algorithms always on, no GUI
     // toggles). SET vpitch 0 (outside balancing) returns to v3.2 exactly;
@@ -298,12 +315,23 @@ class V3Controller {
     // with the PID algorithm.
     bool virtual_pitch = true;   // SET vpitch 0/1 (not while balancing)
     bool trunk = true;           // SET trunk 0/1; needs virtual_pitch (LQR only)
+    // LQR solves ground wheel speed; UART drives wheel speed relative to
+    // the moving shin. Bounded feed-forward uses the inverse of odometry's
+    // carrier transform. Full correction worsened the delayed wheel plant;
+    // retain feedback authority and use only a small coordination term.
+    bool wheel_carrier_compensation = true;
+    float wheel_carrier_gain = 0.10F;
     // Body CoM fore/aft correction of the CAD mass model [m, body frame].
     // Fitted to the measured balance-angle shifts with height (188 -> 110 mm
     // -0.025 rad, 188 -> 78 mm -0.03 rad): +21 mm predicts -0.014 / -0.036,
     // the CAD alone +0.054 / +0.097 (wrong sign).
     float body_com_dx_m = 0.021F;
-    float lean_share = 1.0F;   // share of the lean the hips take (1 = body level)
+    float lean_share = 1.0F;   // full virtual-lean isolation inside the existing travel limits
+    // Residual whole-system lean authority, separate from maneuver preview.
+    float disturbance_share = 1.0F;
+    // Long-lived CoM lean belongs to wheel trim; body level is measured by
+    // the separate slow IMU loop. Restored from stable hardware b4b6d4a.
+    float hpf_s = 3.0F;
     // The share may fall with the pendulum length as (l / l_hang)^exponent,
     // the exponent blending from height_exp_tall at pendulum ratio >=
     // ratio_tall to height_exp at <= ratio_low. Both 0 now: the hips take
@@ -322,32 +350,44 @@ class V3Controller {
     float height_exp_tall = 0.0F;
     float ratio_tall = 0.80F;
     float ratio_low = 0.55F;
-    // Lean-rate lead against the hip servo lag, scaled by the pendulum
+    // Body-rate lead against the hip servo lag, scaled by the pendulum
     // ratio as ratio^lead_exp: 0.5 keeps it a fixed fraction of the
     // pendulum's time constant sqrt(l / g) (0.06 s at the hang pose, ~0.04
     // at 84 mm). Fixed 0.06 rang crouched; fixed 0.03 is calm crouched but
     // gives up ~25 % of the tall push body (TIER_EXP, 78-189 mm).
+    // Removing this lead made the delayed-servo 2-D plant less stable.
+    // Keep the height-scaled setting; this is simulation evidence, not a
+    // new hardware calibration of the loaded hip/knee servos.
     float lead_s = 0.06F;
     float lead_exp = 0.5F;
-    // The hips take the lean's changes; a lean held longer than about this
-    // [s] (a balance-trim error while it still learns, a slope) goes back to
-    // the body, as in v3.2. Without it the body copied every trim error
-    // (seed 0.08 rad off: body 0.08 off for > 10 s) and spent hip range on it.
-    // The static body attitude is the level loop's job (below), which
-    // measures the body itself instead of trusting the trim.
-    float hpf_s = 3.0F;
-    // Static "gimbal" (SET tlvl, needs trunk): a slow integrator on the IMU
-    // body pitch adds its own hip offset until the body sits at
-    // level_pitch_rad, whatever the release angle, trim quality, height pose,
-    // hand-arranged leg zero or CoM model error. Tier 1 keeps the CoM over
-    // the axle through theta_v, so turning the hip only re-orients the body
-    // against the legs; it does not unbalance the robot. The high-passed
-    // dynamic law above stays the fast part. Hardware 2026-09-30 logs: the
-    // free-standing body sat at -0.085 rad with the legs at the pose (one
-    // session +0.022), so level 0 costs ~0.085 rad of hip at J ~= 1.
+    // Hip rate limit and level-loop time scaled by sqrt(l / l_hang) with the
+    // measured CoM height (since 2026-10-02, HANDOFF 5.29). Crouched that cuts
+    // the hip rate to ~2.1 rad/s and the level time to ~0.53 s - where the
+    // robot started falling below ~95 mm; b4b6d4a, which stood at 78 mm, had
+    // fixed values. false = fixed rate_rad_s / level_tau_s (SET tadapt 0).
+    bool adaptive_schedule = true;
+    // Bounded gyro damping of body rotation, distinct from virtual-lean
+    // tracking. Positive hip counter-rotation opposes positive body rate
+    // under the native +Y convention. Schedule by sqrt(l/l_hang).
+    float body_damping_s = 0.04F;
+    // Soft deadband on the fast feedback part of the tier-2 hip (residual
+    // lean + lead), not on the planned lean or the slow level loop [rad of
+    // lean, SET tdb; 0 = off]. Standing, sensor noise and wheel stick-slip
+    // kept the hips twitching ~0.03 rad pp; the wheels hold those small
+    // leans alone, the hips act on real disturbances. With the 0.10 m
+    // standing leash, 0.003 cut rest hip pp 17-21 % over 7 plant variants
+    // (nominal 84 mm: 0.045 -> 0.024, wander 337 -> 39 mm; with +10 ms hip
+    // lag the lead alone walked it +-0.4 m; sim TIER_DIAG). 0.005 cut
+    // 23-33 % but let the body take more (GENERAL body share p90 0.35 ->
+    // 0.42) and drifted 48 mm in V32; 0.002 lost the 8 N catch at 189 mm.
+    float hip_deadband_rad = 0.0F;
+    // Static "gimbal" (SET tlvl): slow feedback on the body IMU angle,
+    // independent of the dynamic virtual-lean term and wheel trim.
     bool level = true;
     float level_pitch_rad = 0.0F;  // SET tlevel: target body pitch (IMU frame)
-    float level_tau_s = 1.5F;      // SET tltau: integrator time constant
+    // Tall-pose base. Schedule as max(base*sqrt(l/l_hang), 0.5 s), keeping
+    // the body loop slow and the separate 0.5 Hz noise filter intact.
+    float level_tau_s = 0.75F;
     // SET tlvmax: |static hip offset| allowed. It also absorbs legs arranged
     // off by hand at power-up (the encoder zero): hip 0.10 + knee 0.08 rad
     // off needed 0.135 and left the body ~1 deg tilted at 0.12 (sim V25).
@@ -356,9 +396,9 @@ class V3Controller {
     float max_rad = 0.15F;     // |dynamic hip offset| from the static height pose
     float rate_rad_s = 3.0F;   // hip command slew
     float ramp_s = 1.0F;       // tier-2 authority ramp 0 <-> 1
-    // Tier 2 waits this long after the balance loop engages: the release
-    // catch (a seed error of up to 0.08 rad) is left to tier 1 as in v3.2,
-    // and the high-pass starts from the settled lean.
+    // Tier 2 waits this long after balance engages so the wheel loop handles
+    // the initial release catch first. Then virtual-lean and slow body-level
+    // feedback ramp in; the simulator validates the first seconds separately.
     float settle_s = 2.0F;
     // Plausibility of the virtual pitch: the com_line of the MEASURED legs
     // must stay within this of the commanded pose's (plus J * tier-2 hip)
@@ -370,6 +410,15 @@ class V3Controller {
     // Weight of the joint-velocity term in theta_v_rate (the balancer's D
     // channel): 1 = full CoM-line rate, 0 = gyro only (as v3.2).
     float joint_rate_gain = 1.0F;
+    // The same weight crouched (blending in below ratio_tall, all of it at
+    // ratio_low, by the measured CoM height; < 0 = joint_rate_gain). The
+    // driver rates are ROTOR-side: through a compliant / backlashed hip
+    // gear under the crouched load they lead the link, and the error rides
+    // straight into the balancer's D channel (sim: hip gear 20 N m/rad + 20
+    // ms more wheel delay, rest lean std 0.005 tall -> 0.059 at 85-110 mm;
+    // weight 0.5 -> 0.006. Robot 2026-10-03: hip tracking 0.77 of the
+    // command, 82 ms late, crouched only; HANDOFF 5.37). SET tvglow.
+    float joint_rate_gain_low = -1.0F;
     // Early hand-back to the body when the WHOLE system, not just the hip,
     // is out of headroom. A hard clamp at max_rad alone lets tier 2 hold
     // full authority (body at zero lean) right up to the wall and then hand
@@ -446,7 +495,12 @@ class V3Controller {
     // <= 0.039 rad at 84-189 mm with the slow-wheel variants, CoM lean up to
     // 0.17 (the legs swing, the body stays).
     float env_lean_rad = 0.10F;
-    // Knee keeps the hip-axle height while the hip swings (exact leg IK,
+    // Paired hip/knee IK keeps the axle on a horizontal target plane while
+    // the trunk swings (LQR); at limits, project X and block integral windup.
+    // A supported pose reserves 12 mm even if roll is off. Ready stays at
+    // the unchanged power-up pose. The WB option retains its prior knee
+    // height solve and is not part of this coordinated LQR path.
+    // Legacy knee-height compensation (exact leg IK,
     // SET khold): the pose puts the axle straight under the hip, so a hip
     // swing dq moves the wheel fore/aft at first order but drops the body by
     // ~r (1 - cos dq) - a linear controller (the WB LQR included) cannot
@@ -506,8 +560,13 @@ class V3Controller {
     // moves it 5-10 cm per rad (v3_tier_tests TIER_RATIO).
     bool suspension = true;
     float sus_gain = 3.0F;        // height rate per body vertical speed (SET tsusg)
-    float sus_return_s = 0.3F;    // offset back to the pose
+    // With the complete supported-leg velocity estimate, 0.6 s retains
+    // damping through slow 8 mm ramps (V24); 0.3 s releases it too early.
+    float sus_return_s = 0.6F;    // offset back to the pose
+    float sus_startup_settle_s = 0.4F;
+    float sus_startup_ramp_s = 1.0F;
     float sus_max_m = 0.008F;     // |height offset| (SET tsusmax)
+    float sus_hybrid_split_s = 0.20F;  // VMC high-pass / position low-pass time constant
     // Vertical speed estimate: IMU above this time constant, the legs' own
     // height rate (encoders; equal to it on a flat floor) below - an IMU-only
     // estimate drifted and the knees wandered 5-11 mm standing (sim).
@@ -517,8 +576,28 @@ class V3Controller {
     float sus_deadband_m_s = 0.005F;
   };
 
+  #ifdef TAP_SPLIT_HOST_PROTOTYPE
+  // Experimental host prototype. Default-off keeps the existing path intact.
+  struct Split {
+    bool enabled = false;
+    float posture_tau_s = 1.5F;
+    float posture_rate_rad_s = 0.1F;
+    float lean_threshold_rad = 0.04F;
+    float rate_threshold_rad_s = 0.6F;
+    float accel_threshold_m_s2 = 1.5F;
+    float wheel_threshold = 0.6F;
+    float attack_s = 0.03F;
+    float hold_s = 0.3F;
+    float release_s = 0.75F;
+    float rearm_s = 0.3F;
+    float crouch_scale = 1.0F;
+  };
+  #endif
   struct Config {
     Algo algo = Algo::Pid;
+    #ifdef TAP_SPLIT_HOST_PROTOTYPE
+    Split split{};
+    #endif
     Tier tier{};
     Roll roll;
     WheelPredict wheel_pred;
@@ -548,6 +627,15 @@ class V3Controller {
     float lqr_lead_s = 0.03F;
     // LQR position-error trim integral [rad per m*s] (half the PID kix).
     float lqr_trim_gain = 0.01F;
+    // LQR pendulum model length (SET lqrleff). false: the point-mass model,
+    // pendulum_length_per_com_height x CoM height. true: the rigid body's
+    // effective length I_axle / (m l) from the CAD inertia at the current
+    // pose - the length that actually sets theta'' = (g theta - a) / l. The
+    // body's own pitch inertia matters more as the CoM drops: the true
+    // length is 1.22x the point-mass one at 189 mm, 1.72x at 95 mm, 2.03x at
+    // 78 mm (HANDOFF 5.37), so crouched the gains were designed for a
+    // pendulum ~30 % faster and ~1.7x more responsive than the robot.
+    bool lqr_inertia_length = false;
     // Algo::WholeBody: rate [rad per m s] at which the position error teaches
     // the measured natural body pitch (IMU mount + CoM model error).
     float wb_bias_gain = 0.10F;
@@ -619,6 +707,20 @@ class V3Controller {
     float runaway_dv_m_s = 0.25F;
     // LQR drive anchor at most this far from the robot (0 = off, SET leash).
     float drive_leash_m = 0.10F;
+    // Standing leash [m] (0 = off, SET sleash; see lqrUpdate): once the
+    // wheels pass stand_leash_from of their cap, the LQR anchor gives way to
+    // within this of the robot until it has stopped, then walks back to the
+    // station at stand_return_m_s. Without it an 8 N x 0.3 s push ran the
+    // wheels into the 0.8 m/s cap for 75 cm, and the spring back to the old
+    // spot leaned the CoM -0.2 rad to brake - the hips swung back with it
+    // and the body tipped the other way (sim TIER_DIAG, 189 mm). A fixed
+    // leash instead (no gate, no walk back) let a 3-5 N hand press roll
+    // 1-1.7 m instead of 0.25-0.6 (TIER_PRESS), lost station keeping (V18,
+    // V32), and at 5 cm lost the catch at 8 N.
+    float stand_leash_m = 0.0F;
+    float stand_leash_from = 0.7F;  // same give point as wb_give_from
+    float stand_return_m_s = 0.10F;  // anchor walk back to the station
+    float stand_leash_release_s = 5.0F;  // leash off this long after engage/release
     float runaway_v_tau_s = 1.5F;
     // The runaway guard stays off while the operator drives and this long
     // after the last drive command (covers LqrBalancer's stop ramp).
@@ -731,7 +833,8 @@ class V3Controller {
     if (state_ == State::Balancing) {
       state_ = State::Ready;
       ready_phase_ = 0;
-      still_since_us_ = 0U;
+      ready_entry_pitch_ = theta_v_;
+      resetReadyStill();
     }
   }
   [[nodiscard]] float balanceAngle() const noexcept { return balance_rad_; }
@@ -744,6 +847,12 @@ class V3Controller {
   [[nodiscard]] float learnedTrim() const noexcept { return learned_trim_rad_; }
   [[nodiscard]] float pitchRef() const noexcept { return pid_ref_; }
   [[nodiscard]] float positionError() const noexcept { return pid_x_ - pid_x_target_; }
+  // LQR anchor relative to the robot, and the standing-leash give in it
+  // (Config::stand_leash_m); for telemetry.
+  [[nodiscard]] float lqrAnchorOffset() const noexcept {
+    return lqr_x_target_m_ + stand_give_m_ - ground_x_;
+  }
+  [[nodiscard]] float standGive() const noexcept { return stand_give_m_; }
   // Ready sub-phase for the log: 0 wait move, 1 wait still, 2 armed.
   [[nodiscard]] int readyPhase() const noexcept { return ready_phase_; }
   // Number of held/lifted re-zeroes since the balance loop engaged.
@@ -752,7 +861,21 @@ class V3Controller {
   [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
   [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  // Roll and coordinated trunk motion both need knee extension in reserve.
+  // START/Ready still hold the exact power-up pose; this ceiling applies
+  // only to the subsequent supported height profile.
+  [[nodiscard]] float supportedMaxHeight() const noexcept {
+    const bool reserve = config_.roll.enabled ||
+        (tierVirtual() && config_.tier.trunk && kneeHoldOn());
+    return LegHeight::maxHeight() - (reserve
+        ? std::clamp(config_.roll.reserve_m, 0.0F, 0.05F) : 0.0F);
+  }
   [[nodiscard]] float heightSpeed() const noexcept { return height_speed_m_s_; }
+  [[nodiscard]] float heightAcceleration() const noexcept { return height_accel_m_s2_; }
+  // Nominal hip-to-axle target that brings the current height speed to rest.
+  // Used by HMOVE release so the requested stop uses the same jerk-limited
+  // profile as updateHeight().
+  [[nodiscard]] float heightStopTarget() const noexcept;
   [[nodiscard]] bool legsHeld() const noexcept { return legs_held_; }
   [[nodiscard]] const LegPose& legPose() const noexcept { return pose_; }
   [[nodiscard]] bool lqrGainTableReady() const noexcept { return lqr_.gainTableReady(); }
@@ -763,7 +886,8 @@ class V3Controller {
   // tier-2 hip offset on top of the height pose, and its authority 0..1.
   [[nodiscard]] float virtualPitch() const noexcept { return theta_v_; }
   [[nodiscard]] float virtualPitchRate() const noexcept { return theta_v_rate_; }
-  [[nodiscard]] float trunkHip() const noexcept { return dhip_; }
+  [[nodiscard]] float trunkHip() const noexcept { return dhip_ + axle_hip_correction_; }
+  [[nodiscard]] float trunkSwingRequest() const noexcept { return dhip_; }
   [[nodiscard]] float trunkAuthority() const noexcept { return trunk_alpha_; }
   // Knee suspension (Tier::suspension): height offset [m], vertical speed.
   [[nodiscard]] float suspensionOffset() const noexcept { return sus_dz_; }
@@ -775,8 +899,30 @@ class V3Controller {
   [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
   [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
+  #ifdef TAP_SPLIT_HOST_PROTOTYPE
+  struct SplitTelemetry { float hip_a, hip_b, alpha_b, preview, model_target; bool frozen; };
+  [[nodiscard]] SplitTelemetry splitTelemetry() const noexcept {
+    return {split_a_, split_b_, split_alpha_b_, split_preview_, split_model_target_, split_frozen_};
+  }
+  #endif
+
   // Hip offset to send to the legs (height pose + tier 2), every state.
-  [[nodiscard]] float hipCommand() const noexcept { return pose_.hip_offset_rad + dhip_; }
+  [[nodiscard]] float hipCommand() const noexcept {
+    return pose_.hip_offset_rad + dhip_ + axle_hip_correction_;
+  }
+  [[nodiscard]] bool trunkWorkspaceLimited() const noexcept { return axle_limited_; }
+  struct TrunkSchedule {
+    float com_ratio = 1.0F;
+    float lead_s = 0.06F;
+    float rate_rad_s = 3.0F;
+    float max_rad = 0.15F;
+    float hip_to_lean_gain = 1.0F;
+    float level_tau_s = 0.75F;
+  };
+  [[nodiscard]] const TrunkSchedule& trunkSchedule() const noexcept { return trunk_schedule_; }
+  [[nodiscard]] const std::array<float, 2>& wheelCarrierCorrection() const noexcept {
+    return wheel_carrier_rad_s_;
+  }
   // Knee offset to send to the legs (height pose + whole-body offset).
   [[nodiscard]] float kneeCommand() const noexcept { return pose_.knee_offset_rad + dknee_; }
   [[nodiscard]] bool wholeBody() const noexcept { return config_.algo == Algo::WholeBody; }
@@ -804,10 +950,8 @@ class V3Controller {
   [[nodiscard]] ImuVelocity imuVelocity() const noexcept { return imu_velocity_; }
   // d com_line / d hip at the current height pose (CAD + body_com_dx).
   [[nodiscard]] float comLineHipGain() const noexcept { return j_hip_; }
-  // Measured minus expected com_line [rad] (the model check's signal).
-  [[nodiscard]] float legModelError() const noexcept {
-    return c_meas_ - c_pose_ - j_hip_ * dhip_;
-  }
+  // Measured minus exact commanded com_line, including paired knee motion.
+  [[nodiscard]] float legModelError() const noexcept;
 
  private:
   Output fault(const char* reason, const Output& base);
@@ -842,19 +986,29 @@ class V3Controller {
   float knee_target_rad_ = 0.0F;
   float knee_cmd_rad_ = 0.0F;
   float height_speed_m_s_ = 0.0F;  // signed hip-axle speed, + = up
+  float height_accel_m_s2_ = 0.0F; // signed acceleration of the height profile
   LegPose pose_{};
   float chain_prev_rad_ = 0.0F;
   float chain_rate_f_ = 0.0F;
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
+  [[nodiscard]] static float heightStoppingDistance(float speed_m_s,
+                                                     float accel_m_s2,
+                                                     float max_accel_m_s2,
+                                                     float max_jerk_m_s3) noexcept;
   void applyPoseOffsets(const Input& in);
   void updateSuspension(const Input& in);
   float knee_excite_rad_ = 0.0F;
   float applied_dk_ = 0.0F, applied_base_ = 0.0F;
-  float sus_g_ = 9.80665F, sus_vz_ = 0.0F, sus_dz_ = 0.0F, sus_dk_ = 0.0F;
+  float sus_g_ = 9.80665F, sus_vz_ = 0.0F, sus_vz_slow_ = 0.0F;
+  float sus_dz_ = 0.0F, sus_dk_ = 0.0F;
   float sus_vz_eff_ = 0.0F;  // body vertical speed off the plan, past the deadband
   bool sus_init_ = false;
+  bool height_startup_ = false;
+  float startup_height_m_ = 0.0F;
+  std::uint64_t height_settled_since_us_ = 0U;
+  float sus_alpha_ = 0.0F;
   bool excite_applied_ = false;
   // The virtual pitch already carries the balance shift with height (from
   // the measured legs), so the CAD feed-forward is off with it.
@@ -870,10 +1024,24 @@ class V3Controller {
     return config_.tier.virtual_pitch && legs_measured_ && config_.algo == Algo::Lqr;
   }
   // com_line angle [rad] and its partials by hip/knee at core leg offsets.
-  struct ComLine { float angle, d_hip, d_knee; };
+  struct ComLine { float angle, d_hip, d_knee, height_m; };
+  void resetReadyStill() noexcept;
+  [[nodiscard]] bool readyStill(const Input& in, float body_pitch, float body_rate) noexcept;
   [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;
   void updateVirtualPitch(const Input& in);
   void updateTrunk(const Input& in, bool active, std::array<float, 2> wheel_cmd_rad_s);
+  void updateLegLayers(const Input& in, bool active, std::array<float, 2> wheel_cmd_rad_s);
+  #ifdef TAP_SPLIT_HOST_PROTOTYPE
+  void updatePosture(const Input& in, bool on, bool saturated);
+  void updateShock(const Input& in, bool on, float wheel_ratio, float plan_lean);
+  [[nodiscard]] float splitModelPosture() const noexcept;
+  float split_a_ = 0.0F, split_b_ = 0.0F, split_alpha_b_ = 0.0F;
+  float split_preview_ = 0.0F, split_model_target_ = 0.0F, split_integral_ = 0.0F;
+  float split_hold_s_ = 0.0F, split_quiet_s_ = 0.0F;
+  bool split_was_enabled_ = false, split_frozen_ = false, split_armed_ = true;
+  #endif
+
+  void updateWheelLegCoordination(const Input& in) noexcept;
   void updateImuVelocity(const Input& raw, bool free);
   // v3.3 maneuver preview: jerk-limited speed plan and its history.
   struct PlanSample { float v, a; };
@@ -882,6 +1050,7 @@ class V3Controller {
   // Knee offset from the pose that keeps the pose's hip-axle height with the
   // hip at pose + dhip (Tier::knee_hold), 0 when off.
   [[nodiscard]] float kneeHold(float dhip) noexcept;
+  void coordinateTrunkAxle() noexcept;
   [[nodiscard]] bool kneeHoldOn() const noexcept {
     return config_.tier.knee_hold || (wholeBody() && config_.tier.knee_hold_wb);
   }
@@ -905,7 +1074,6 @@ class V3Controller {
   float roll_v_lp_ = 0.0F, roll_w_lp_ = 0.0F, roll_i_ = 0.0F, roll_e_lp_ = 0.0F;
   float yaw_cmd_ = 0.0F;  // the turn command as used (slewed with roll on)
   float roll_target_ = 0.0F;
-  float roll_dk_dh_ = 0.0F, roll_dq_dk_ = 0.0F, roll_deriv_key_ = 1.0F;
   std::array<float, 2> roll_hip_{}, roll_knee_{}, roll_hip_rate_{}, roll_knee_rate_{};
   // Knee VMC state per side: integral [N m], soft blend 0..1, last q*, its rate.
   std::array<float, 2> vmc_i_{}, vmc_qprev_{}, vmc_qrate_{};
@@ -917,7 +1085,7 @@ class V3Controller {
   }
   [[nodiscard]] PlanSample planDelayed() const noexcept;
   [[nodiscard]] PlanSample planAt(float delay_s) const noexcept;  // plan delay_s ago
-  float lean_rate_f_ = 0.0F;  // filtered lean rate for the tier-2 lead
+  float lean_lp_ = 0.0F, lean_rate_f_ = 0.0F; // whole-system residual / rate
   float plan_v_ = 0.0F, plan_a_ = 0.0F, plan_j_ = 0.0F, plan_dt_ = 0.002F;
   bool plan_init_ = false;
   std::array<PlanSample, 128> plan_buf_{};
@@ -931,10 +1099,20 @@ class V3Controller {
   float j_hip_knee_ = 1.0e9F;  // knee pose j_hip_ was computed for
   float c_pose_ = 0.0F;         // com_line of the commanded height pose
   float c_meas_ = 0.0F;         // com_line of the measured legs
+  float com_meas_height_m_ = 0.0F;
+  float adaptive_ratio_ = 1.0F;
+  bool adaptive_init_ = false;
+  TrunkSchedule trunk_schedule_{};
+  std::array<float, 2> wheel_carrier_rad_s_{};
+  float wheel_leg_alpha_ = 0.0F;
+  std::uint64_t wheel_leg_quiet_since_us_ = 0U;
   std::uint64_t model_bad_since_us_ = 0U;
   float dhip_ = 0.0F;
+  // dhip is the requested swing; IK may alter the actual hip AND knee.
+  float axle_hip_correction_ = 0.0F;
+  bool axle_limited_ = false;
+  float axle_limit_direction_ = 0.0F;
   float trunk_alpha_ = 0.0F;
-  float lean_lp_ = 0.0F;  // slow part of the lean (tier-2 high-pass)
   // Static level loop (Tier::level): integrated hip offset, its authority,
   // the filtered body pitch it integrates, and whether it has been started.
   float level_i_ = 0.0F;
@@ -966,6 +1144,14 @@ class V3Controller {
   // release - same job as pid_x_target_ but LqrBalancer takes it directly as
   // an absolute anchor (reanchorPosition), not a relative target.
   float lqr_x_target_m_ = 0.0F;
+  // Config::lqr_inertia_length: CAD effective pendulum length, cached per pose.
+  float lqr_leff_hip_ = 1.0e9F, lqr_leff_knee_ = 1.0e9F, lqr_leff_m_ = 0.15F;
+  [[nodiscard]] float lqrInertiaLength() noexcept;
+  // Standing leash give: the LQR anchor is lqr_x_target_m_ + this (see
+  // Config::stand_leash_m), back to 0 at stand_return_m_s.
+  float stand_give_m_ = 0.0F;
+  float stand_leash_wait_s_ = 0.0F;  // leash off after engage/release
+  bool stand_leash_on_ = false;      // giving way until the robot stops
   // v3.2 LQR: low-pass filtered ground_accel for the wheel-lag lead term
   // (unfiltered, the raw instantaneous LQR solve - itself sensitive to gyro
   // and encoder noise via the pitch_rate/velocity state terms - rode straight
@@ -996,6 +1182,12 @@ class V3Controller {
   std::uint64_t still_since_us_ = 0U;
   float still_sum_ = 0.0F;
   int still_n_ = 0;
+  std::uint64_t ready_last_us_ = 0U;
+  std::uint64_t still_quiet_us_ = 0U, still_bad_us_ = 0U, still_bad_run_us_ = 0U;
+  std::uint64_t ready_tip_us_ = 0U;
+  std::uint64_t ready_armed_us_ = 0U;  // when ARMED (Engage::armed_go_s)
+  float still_body_min_ = 0.0F, still_body_max_ = 0.0F;
+  bool still_quiet_ = false;
   float armed_pitch_ = 0.0F;
 
   void engageBalance(const Input& in, float seed);

@@ -12,14 +12,30 @@ namespace {
 constexpr float kTwoPi = 6.28318530717958647692F;
 }
 
+LegLock::KneeMit LegLock::driverKneeImpedance(KneeMit knee) noexcept {
+  // BoardConfig records GDS68 buzzing at 40 Nm/rad and the hardware cap
+  // of 12. VMC used to bypass it, including the very first lock frame.
+  // Its soft spring is defined in joint units; cap Kp without scaling its
+  // gravity torque or weakening the existing damping.
+  knee.kp = std::clamp(knee.kp, 0.0F, board::kLegMaxKpNmPerRad);
+  return knee;
+}
+
+void LegLock::setKneeImpedance(const std::array<KneeMit, 2>& knees) noexcept {
+  for (std::size_t side = 0; side < knees.size(); ++side) {
+    knee_mit_[side] = driverKneeImpedance(knees[side]);
+  }
+}
+
 bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
                      motor_transport::Transport& transport) noexcept {
   start_turns_ = start_turns;
   engage_us_ = now_us;
   engaged_ = true;
+  next_send_us_ = now_us + config_.resend_period_us;
   bool ok = true;
   const auto legs = board::MotorIds{}.leg_can;
-  knee_mit_ = {};
+  resetKneeImpedance();
   for (std::size_t i = 0; i < kLegs; ++i) {
     const auto node = legs[i].node_id;
     const std::int32_t input_mode = jointMit(i) ? frame::kInputModeMit
@@ -114,7 +130,12 @@ bool LegLock::sendTargets(std::uint64_t now_us,
 
 bool LegLock::update(std::uint64_t now_us, motor_transport::Transport& transport) noexcept {
   if (!engaged_) return true;
-  if (now_us - last_send_us_ < config_.resend_period_us) return true;
+  if (now_us < next_send_us_) return true;
+  // Anchor to the deadline, not the actual send time: now+3 ms on a 2 ms
+  // clock would silently remain 250 Hz. Skip missed cycles after a stall.
+  const auto period = std::max(config_.resend_period_us, 1U);
+  next_send_us_ += period;
+  if (now_us >= next_send_us_) next_send_us_ = now_us + period;
   return sendTargets(now_us, transport);
 }
 

@@ -32,13 +32,13 @@ def load(path):
 
 
 class Viewer:
-    def __init__(self, root, runs):
+    def __init__(self, root, runs, start_at_s=0.0, speed=0.5):
         self.root = root
         self.runs = runs
         self.n = min(len(r["rows"]) for r in runs)
         self.dt = runs[0]["rows"][1]["t"] - runs[0]["rows"][0]["t"]
-        self.i = 0.0
-        self.speed = 0.5
+        self.i = float(bisect.bisect_left(runs[0]["rows"], start_at_s, key=lambda row: row["t"]))
+        self.speed = min(max(speed, 0.0625), 2.0)
         self.paused = False
         h = PANEL_H * len(runs) + PLOT_H + 30
         self.c = tk.Canvas(root, width=WIDTH, height=h, bg="#fbfbf8", highlightthickness=0)
@@ -151,6 +151,11 @@ class Viewer:
                             f"gối {math.degrees(row['knee'] - run['knee0']):+5.1f}°"))
         c.create_text(14, top + 62, anchor="w", font=("DejaVu Sans Mono", 11), fill="#222",
                       text=f"tốc độ {row['v']:+.2f} m/s (lệnh {row['cmd_v']:+.2f})")
+        if "hip_authority" in row:
+            c.create_text(14, top + 82, anchor="w", font=("DejaVu Sans Mono", 11),
+                          fill="#176b3a" if row["hip_authority"] > 0.05 else "#777",
+                          text=(f"phân tầng hông: bù {math.degrees(row['trunk_hip']):+.1f}°  "
+                                f"quyền {row['hip_authority'] * 100:.0f}%"))
 
     @staticmethod
     def ground_at(run, x, row):
@@ -220,6 +225,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="+", help="file.csv[:label]")
     ap.add_argument("--title", default="TAP v3.3 - mô phỏng 2D")
+    ap.add_argument("--start-at", type=float, default=0.0,
+                    help="begin near this simulation time (seconds), e.g. before a press")
+    ap.add_argument("--speed", type=float, default=0.5)
     args = ap.parse_args()
     runs = []
     for spec in args.runs:
@@ -240,7 +248,7 @@ def main():
                      "light": LIGHT[k], "terrain": terrain})
     root = tk.Tk()
     root.title(args.title)
-    Viewer(root, runs)
+    Viewer(root, runs, args.start_at, args.speed)
     root.mainloop()
 
 

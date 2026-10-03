@@ -35,6 +35,7 @@ JOY_SIZE = 180          # joystick canvas [px]
 JOY_KNOB = 18           # knob radius [px]
 JOY_DEADZONE = 0.08
 MODE_RE = re.compile(r"CONTROL mode=(\S+) enable=(\d+)")
+ALGO_RE = re.compile(r"V3 TUNE algo=(LQR|PID|WB)\b")
 SENS_RE = re.compile(
     r"SENS .*?can_legs=(\d+) uart_wheels=(\d+) homed=(\d+) "
     r"joint_q=\[[^]]+\] pitch=([+-]?[\d.]+) pitch_rate=([+-]?[\d.]+)"
@@ -143,6 +144,7 @@ class TapSerialControlApp:
         self.port_var = tk.StringVar()
         self.connection_var = tk.StringVar(value="Chưa kết nối")
         self.mode_var = tk.StringVar(value="—")
+        self.algorithm_var = tk.StringVar(value="Chưa đọc được")
         self.enable_var = tk.StringVar(value="—")
         self.imu_var = tk.StringVar(value="Chưa có dữ liệu")
         self.feedback_var = tk.StringVar(value="CAN chân: —   UART bánh: —   Zero chân: —")
@@ -192,12 +194,15 @@ class TapSerialControlApp:
         ttk.Label(status, textvariable=self.mode_var, width=18).grid(row=0, column=1, sticky="w")
         ttk.Label(status, text="Motor enable:").grid(row=0, column=2, sticky="w", padx=(20, 0))
         ttk.Label(status, textvariable=self.enable_var, width=10).grid(row=0, column=3, sticky="w")
+        ttk.Label(status, text="Thuật toán:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(status, textvariable=self.algorithm_var, width=18).grid(
+            row=1, column=1, sticky="w", pady=(8, 0))
         ttk.Label(status, text="Pitch robot (trục roll IMU):").grid(
-            row=1, column=0, sticky="w", pady=(8, 0))
+            row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Label(status, textvariable=self.imu_var).grid(
-            row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
+            row=2, column=1, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Label(status, textvariable=self.feedback_var).grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(5, 0))
+            row=3, column=0, columnspan=4, sticky="w", pady=(5, 0))
 
         actions = ttk.LabelFrame(self.root, text="Khởi động và dừng", padding=10)
         actions.pack(fill="x", padx=10, pady=8)
@@ -370,6 +375,7 @@ class TapSerialControlApp:
         self.connect_button.configure(text="Ngắt kết nối")
         self._append_log(
             f"Đã mở {device} @ {BAUD}; chờ SENS sau boot rồi mới cho START.")
+        self._send("GET")  # read-only: show the active balancer in the status panel
 
     def _send(self, command: str) -> None:
         if not self.link.send(command):
@@ -586,6 +592,8 @@ class TapSerialControlApp:
         if match := MODE_RE.search(line):
             self.mode_var.set(match.group(1))
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")
+        if match := ALGO_RE.search(line):
+            self.algorithm_var.set(match.group(1))
         if match := SENS_RE.search(line):
             if not self.firmware_ready:
                 self.firmware_ready = True
