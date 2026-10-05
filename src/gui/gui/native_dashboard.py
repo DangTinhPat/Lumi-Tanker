@@ -204,7 +204,7 @@ class NativeDashboard:
 
         skill = ttk.LabelFrame(toolbar, text="Skill", style="Card.TLabelframe", padding=6)
         skill.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(skill, text="Gimbal VMC · xoay tại chỗ + đổi chiều cao theo nhịp",
+        ttk.Label(skill, text="Gimbal · xoay tại chỗ + đổi chiều cao theo nhịp",
                   style="Card.TLabel").pack(side="left", padx=(2, 10))
         ttk.Button(skill, text="Múa ↻",
                    command=lambda: self.start_dance(1.0)).pack(side="left", padx=2)

@@ -72,7 +72,7 @@ class MotorFeedback {
     return estimate_[joint];
   }
   // Torque the driver reports in its MIT reply (Iq x Kt, core sign) [N m];
-  // only fresh while the joint is commanded in MIT (knee VMC).
+  // only fresh while the joint is commanded in MIT (not used in the POS-only legs).
   [[nodiscard]] float legEffort(std::size_t joint) const noexcept { return effort_nm_[joint]; }
   [[nodiscard]] const AxisStatus& legAxis(std::size_t joint) const noexcept {
     return axis_[joint];

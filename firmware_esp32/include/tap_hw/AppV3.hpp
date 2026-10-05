@@ -70,7 +70,7 @@ class AppV3 {
   [[nodiscard]] float legJointRad(std::size_t leg) const noexcept;
   // Driver velocity estimate (0x009) of a LegLock joint [rad/s], driver frame.
   [[nodiscard]] float legJointRate(std::size_t leg) const noexcept;
-  // v3.1: joint angle (driver frame, rad) the lock is holding this leg at.
+  // joint angle (driver frame, rad) the lock is holding this leg at.
   [[nodiscard]] float legTargetRad(std::size_t leg) const noexcept;
   [[nodiscard]] float legChainRad() const noexcept;
   [[nodiscard]] const char* legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept;

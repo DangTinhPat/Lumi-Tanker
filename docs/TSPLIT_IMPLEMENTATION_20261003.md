@@ -1,5 +1,7 @@
 # Tách đặt dáng CoM/gimbal và phản xạ — 03/10/2026
 
+> **Báo cáo lịch sử (03/10).** Prototype chỉ có trong CMake host (`TAP_SPLIT_HOST_PROTOTYPE`); cổng A không đạt. Các cấu hình chạy ở đây có VMC bật (đã gỡ ngày 04/10). Tóm tắt hiện hành: `docs/V3.3_HANDOFF.md` mục 5.
+
 ## Trạng thái bàn giao
 
 **Dừng tại cổng lớp A. Không tích hợp vào ESP32, không nạp, không chạy robot,

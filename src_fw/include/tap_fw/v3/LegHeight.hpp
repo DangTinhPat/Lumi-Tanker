@@ -2,13 +2,13 @@
 
 namespace tap_fw::v3 {
 
-// v3.1 height planner for the locked-leg pendulum.
+// Height planner: leg poses as a function of the hip-to-axle height.
 //
 // Leg zero is the gravity-hang pose the operator arranges before powering
-// the motors. On 2026-09-26 the right leg moved from that pose to the CAD
-// natural pose read knee -1.069 rad against CAD -1.068, so the hang pose is
-// knee = 0 in the CAD frame, with the hip at the angle that puts the axle
-// straight below the hip (x = 0): hip = +0.388 rad CAD, 188.6 mm hip-axle.
+// the motors. A leg measured in that pose read knee -1.069 rad against the CAD
+// natural pose -1.068, so the hang pose is knee = 0 in the CAD frame, with the
+// hip at the angle that puts the axle straight below the hip (x = 0):
+// hip = +0.388 rad CAD, 188.6 mm hip-axle.
 //
 // Lowering the body folds the knee (core knee folding is negative) and turns
 // the hip to keep the axle straight below the hip, as Impulse keeps its foot
@@ -40,9 +40,8 @@ struct LegAxleTarget {
 class LegHeight {
  public:
   // Deepest fold allowed: -1.38 rad, about 78 mm hip-axle. The CAD knee
-  // envelope (-1.2 rad) is a simulation value, not a measured stop; on
-  // 2026-09-28 the robot reached 89 mm and the operator saw about 1 cm more
-  // room. The physics plant still balances at CoM 43 % of the hang height.
+  // envelope (-1.2 rad) is a simulation value, not a measured stop; the robot
+  // has reached 78 mm. The physics plant balances at CoM 43 % of the hang height.
   static constexpr float kKneeMinRad = -1.38F;
 
   // Pose for a knee fold (clamped to [kKneeMinRad, 0]).
@@ -52,7 +51,7 @@ class LegHeight {
   [[nodiscard]] static float maxHeight() noexcept;  // hang pose
   [[nodiscard]] static float minHeight() noexcept;  // at kKneeMinRad
   // CAD hip angle of the hang pose (hip offset 0): core offsets convert to
-  // CAD joint angles as hip_cad = hangHipCad() + hip, knee_cad = knee (v3.3).
+  // CAD joint angles as hip_cad = hangHipCad() + hip, knee_cad = knee.
   [[nodiscard]] static float hangHipCad() noexcept;
   // Cartesian IK, height first: project X into the supported knee workspace
   // at the requested depth, then solve BOTH joints on the existing branch.

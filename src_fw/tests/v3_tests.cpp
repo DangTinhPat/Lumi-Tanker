@@ -212,7 +212,7 @@ int main() {
     assert(!lock.engaged());
   }
 
-  // v3.1 height offsets: core hip/knee offsets become driver turns per leg
+  // Height core hip/knee offsets become driver turns per leg
   // (8:1, driver sign); the engage ramp still starts at the measured pose.
   {
     FakeTransport bus;
@@ -266,67 +266,6 @@ int main() {
       const auto& d = bus.can[i].data;
       const auto vff = static_cast<std::int16_t>(static_cast<std::uint16_t>(d[4] | (d[5] << 8)));
       assert(std::abs(vff - expect) <= 1.0F);
-    }
-  }
-
-  // Knee MIT (knee VMC): knees engage in MIT input mode and send MIT frames
-  // with their side's gains, torque and rate in the driver frame; the hips
-  // stay Set_Input_Pos passthrough.
-  {
-    FakeTransport bus;
-    LegLock::Config cfg{};
-    cfg.ramp_s = 0.0F;
-    cfg.knee_mit = true;
-    LegLock lock(cfg);
-    lock.setOffsets(0.1F, -0.5F);
-    assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
-    const auto legs = tap_fw::board::MotorIds{}.leg_can;
-    for (std::size_t i = 0; i < 4U; ++i) {
-      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
-      const auto& mode = bus.can[i];  // Set_Controller_Mode frames first
-      assert(cmdOf(mode) == robot_control::motor_frame::kSetControllerModeCmdId);
-      const std::int32_t input = static_cast<std::int32_t>(mode.data[4] | (mode.data[5] << 8) |
-                                                           (mode.data[6] << 16) | (mode.data[7] << 24));
-      assert(input == (knee ? robot_control::motor_frame::kInputModeMit
-                            : robot_control::motor_frame::kInputModePassthrough));
-      if (knee) {
-        // The first lock frame must already obey the GDS68 hardware cap;
-        // waiting for VMC to arm would expose the joint to Kp=40 meanwhile.
-        const auto first = robot_control::motor_frame::unpackMitCommand(bus.can[4U + i].data);
-        assert(first.kp <= tap_fw::board::kLegMaxKpNmPerRad + 0.15F);
-      }
-    }
-    lock.setKneeImpedance({LegLock::KneeMit{12.0F, 0.4F, 1.5F, 0.2F}, LegLock::KneeMit{8.0F, 0.3F, 2.0F, -0.1F}});
-    bus.can.clear();
-    assert(lock.update(1'000'000U, bus) && bus.can.size() == 4U);
-    for (std::size_t i = 0; i < 4U; ++i) {
-      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
-      const bool left = legs[i].joint_index < 3U;
-      if (!knee) {
-        assert(cmdOf(bus.can[i]) == robot_control::motor_frame::kSetInputPosCmdId);
-        continue;
-      }
-      assert(cmdOf(bus.can[i]) == robot_control::motor_frame::kMitControlCmdId);
-      const auto m = robot_control::motor_frame::unpackMitCommand(bus.can[i].data);
-      const LegLock::KneeMit want = left ? LegLock::KneeMit{12.0F, 0.4F, 1.5F, 0.2F}
-                                         : LegLock::KneeMit{8.0F, 0.3F, 2.0F, -0.1F};
-      assert(near(m.kp, want.kp, 0.15F) && near(m.kd, want.kd, 0.01F));
-      assert(near(m.tff_nm, legs[i].driver_sign * want.tff_nm, 0.03F));
-      assert(near(m.vel_rad_s, legs[i].driver_sign * want.vel_rad_s, 0.04F));
-      assert(near(m.pos_rad, -0.5F * legs[i].driver_sign, 1.0e-3F));
-    }
-    lock.setKneeImpedance({LegLock::KneeMit{80.0F, 0.4F, 1.5F, 0.2F},
-                           LegLock::KneeMit{40.0F, 0.3F, 2.0F, -0.1F}});
-    bus.can.clear();
-    assert(lock.update(1'004'000U, bus));
-    for (std::size_t i = 0; i < 4U; ++i) {
-      if (legs[i].joint_index != 1U && legs[i].joint_index != 4U) continue;
-      const bool left = legs[i].joint_index < 3U;
-      const auto m = robot_control::motor_frame::unpackMitCommand(bus.can[i].data);
-      assert(near(m.kp, tap_fw::board::kLegMaxKpNmPerRad, 0.15F));
-      assert(near(m.kd, left ? 0.4F : 0.3F, 0.01F));
-      assert(near(m.tff_nm, legs[i].driver_sign * (left ? 1.5F : 2.0F), 0.03F));
-      assert(near(m.vel_rad_s, legs[i].driver_sign * (left ? 0.2F : -0.1F), 0.04F));
     }
   }
 
@@ -548,7 +487,7 @@ int main() {
     assert(o.state == V3Controller::State::Balancing);
   }
 
-  // Full-height v3.3 startup: velocity feedback can chatter while all four
+  // Full-height tiered startup: velocity feedback can chatter while all four
   // joints stay at zero. The operator's carry/still/release sequence must
   // follow the IMU body rate, not the noisy virtual CoM-line derivative.
   {
@@ -680,7 +619,7 @@ int main() {
                 100.0 * spinning / 5000.0);
     assert(c.heldResets() > 0);
     assert(spinning < 5000 / 4);
-    // v3.1: lower the legs while held on the stand. The balance feed-forward
+    // lower the legs while held on the stand. The balance feed-forward
     // must not wind the wheels up (robot log 2026-09-27: -19 rad/s).
     V3Controller::Command hcmd{};
     hcmd.height_m = 0.160F;

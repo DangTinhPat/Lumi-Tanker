@@ -108,7 +108,7 @@ LegPose LegHeight::forHeight(float axle_below_hip_m) noexcept {
   // At X=0 the requested height is the two-link radius. Use the same
   // supported branch as forAxleOnPlane, rather than repeatedly computing
   // the whole robot COM during a secant search. Roll calls this twice per
-  // tick and the hybrid suspension once even at a fixed operator height.
+  // tick and the suspension once even at a fixed operator height.
   namespace geo = robot_control::geometry;
   const float ax = geo::origins[1].x, az = geo::origins[1].z;
   const float bx = geo::origins[2].x, bz = geo::origins[2].z;

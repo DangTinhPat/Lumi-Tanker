@@ -172,7 +172,6 @@ def main() -> int:
                         f"pitch_state={state.get('lqr_pitch_state')} "
                         f"cmd_lw={state.get('cmd_lw')} cmd_rw={state.get('cmd_rw')} "
                         f"speed_hip={state.get('wb_speed_hip')} speed_com={state.get('wb_speed_com')} "
-                        f"vmc={state.get('wb_vmc_pitch_torque')} "
                         f"trim={state.get('wb_trim')} com={state.get('wb_com_x')} "
                         f"comline={state.get('wb_com_line_angle')} "
                         f"joints=({state.get('joint_lh')},{state.get('joint_lk')},"

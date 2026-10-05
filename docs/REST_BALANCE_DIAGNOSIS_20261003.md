@@ -1,5 +1,7 @@
 # Dao động khi đứng yên ở tư thế thấp — kiểm tra 03/10/2026
 
+> **Báo cáo lịch sử (03/10).** Cấu hình thử có VMC bật (đã gỡ ngày 04/10). Kết luận hiện hành về ngã ở tư thế thấp: `docs/V3.3_HANDOFF.md` 5.37, 5.45–5.46.
+
 Phạm vi: đọc source hiện tại trên branch `fw`, phân tích log có sẵn, build
 host và đối chứng plant 2D. Không thay controller, không nạp firmware và
 không điều khiển phần cứng. Giữ nguyên các sửa đổi chưa commit của người dùng.

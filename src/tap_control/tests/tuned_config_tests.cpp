@@ -61,8 +61,6 @@ int main() {
   check(near(cfg.knee_min_rad, geometry::native_knee_min_rad) &&
             near(cfg.knee_max_rad, geometry::native_knee_max_rad),
         "knee limits from native envelope");
-  check(near(cfg.whole_body_stance.vmc_max_torque_nm, 0.8F * 3.0F),
-        "VMC capped at 80% of the leg envelope");
   check(!cfg.keep_legs_active_when_fallen, "fall stops every actuator");
   check(!cfg.flight_observer.torque_corroboration_enabled,
         "no motor-current input in the balance path");

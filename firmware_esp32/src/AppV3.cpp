@@ -112,14 +112,12 @@ const char* recName(int kind) {
 
 std::uint64_t nowUs() { return static_cast<std::uint64_t>(esp_timer_get_time()); }
 
-// SET legacy 1: the tier-2 settings the robot stood on for 25 min at 78 mm
-// (2026-10-01, b4b6d4a) - partial hip share tall too, fixed lead, slow
-// level loop, fixed (not CoM-scaled) hip rate / level time, no knee hold /
-// carrier / body damping. 0: today's. Below ~95 mm today's build fell 5/5
-// times (HANDOFF 5.36). VMC is separate (DISABLE, then SET vmc 0/1).
+// SET legacy 1: the tier-2 settings of the b4b6d4a build (partial hip share also
+// tall, fixed lead, slow level loop, fixed hip rate / level time, no knee hold /
+// carrier / body damping), kept for A/B runs against the current ones (0).
 void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
   auto& t = c.tier;
-  t.height_exp = 1.5F;
+  t.height_exp = old ? 1.5F : 0.15F;
   t.height_exp_tall = old ? 0.5F : 0.0F;
   t.lead_exp = old ? 0.0F : 0.5F;
   t.level_tau_s = old ? 1.5F : 0.75F;
@@ -127,7 +125,7 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
   t.knee_hold = !old;
   t.wheel_carrier_compensation = !old;
   t.wheel_carrier_gain = 0.10F;
-  t.body_damping_s = old ? 0.0F : 0.04F;
+  t.body_damping_s = old ? 0.0F : 0.08F;
 }
 
 }  // namespace
@@ -163,41 +161,55 @@ bool AppV3::begin() noexcept {
   BLEDevice::setCustomGattsHandler(onV3GattsEvent);
   out_.println("BLE: Dabble GamePad as TAP-RB (joystick drive, Start=START, Select=GO, "
                  "Triangle/Cross hold = raise/lower); USB serial GUI also works");
-  // Boot the sim-backed hybrid tier profile; the roll reserve is applied
-  // only after release on the floor. VMC changes the knee drivers to MIT at
-  // the next leg lock. WholeBody and VMC adaptation remain opt-in because the
-  // handoff records wheel-loop ringing and a rough-road regression.
-  // Operator handshake kept but loosened (2026-10-03): put it on the floor,
-  // hold it roughly still 0.5 s (pitch span 0.04 rad: the IMU alone reads up
-  // to 0.023 standing still) -> ARMED -> balances 0.5 s later or as soon as
-  // it tips. SET imm 1 = balance right after START; SET armgo 0 = wait for
-  // the tip only (the old behaviour, with SET stillms 700 / stillspan 0.015).
+  // Shipped configuration: struct defaults (V3Controller.hpp) plus the overrides
+  // below. Each override names the SET key that reverts it and the HANDOFF
+  // section holding the evidence.
+  //
+  // Start handshake: put the robot on the floor and hold it roughly still 0.5 s
+  // (pitch span 0.04 rad, the IMU alone reads up to 0.023 still) -> ARMED ->
+  // balances 0.5 s later or as soon as it tips. SET imm 1 = balance right after
+  // START; SET armgo 0 = wait for the tip only (with SET stillms / stillspan).
   ctrl_.config().engage.immediate = false;
   ctrl_.config().engage.still_us = 500'000U;
   ctrl_.config().engage.still_span_rad = 0.04F;
   ctrl_.config().engage.armed_go_s = 0.5F;
-  // Crouched, the hips take only part of the lean again (share (l/l_hang)^1.5
-  // below ratio_low, ~0.35 at 78 mm; tall stays full, texpt 0). With the
-  // full share (texp 0, since 2026-10-02) the robot rang at 2-3 Hz and fell
-  // within seconds below ~100 mm in all three sessions that went there
-  // (97, 89, 92 mm); with texp 1.5 it stood 1420 + 312 + 141 s at 78-105 mm
-  // (2026-10-01). The sim does not reproduce that fall (it stays calm at
-  // texp 0), so the robot decides; the sim tests keep the core default.
-  // SET texp 1.0 / 0.75 gives the hips more if it stays calm.
-  ctrl_.config().tier.height_exp = 1.5F;
-  ctrl_.config().roll.enabled = true;
-  ctrl_.config().vmc.enabled = true;
-  legs_.setKneeMit(true);
-  // Crouched, the theta_v rate takes 0.7 of the joint-rate term (1.0 tall).
-  // The robot fell 6/6 times below ~95 mm (HANDOFF 5.36-5.37): its hips
-  // tracked 0.77 of the command 82 ms late there (0.92-1.00 / 41 ms on
-  // 2026-10-01), and in the sim only a compliant hip transmission plus wheel
-  // delay reproduces "calm tall, rocking and falling crouched"; the
-  // rotor-side joint rates then corrupt the balancer's D channel. 0.7: lean
-  // std 0.059 -> 0.0055 at 95-110 mm on that plant, tall unchanged, no new
-  // fall in the firmware-config press / accel suites. SET tvglow -1 = off.
+  // Hip share of the residual lean = (l/l_hang)^0.15 (0.88 at 78 mm): mechanism 1
+  // must still act crouched. SET texp 1.5 restores the old crouch cut (HANDOFF 5.46).
+  ctrl_.config().tier.height_exp = 0.15F;
+  // Roll balance off: the lowering fall first appeared in the build that added it,
+  // and it held a -9..-12 mm leg height difference (HANDOFF 5.45). SET roll 1
+  // turns it on (and the 12 mm roll start reserve applies). rollvff stays off: it
+  // made the side legs hunt (SET rollvff 1).
+  ctrl_.config().roll.enabled = false;
+  // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
+  // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
+  ctrl_.config().lqr_lead_adaptive = true;
+  ctrl_.config().lqr_lead_tall_s = 0.05F;
+  ctrl_.config().lqr_lead_low_s = 0.09F;
+  // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
+  // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
+  // the fixed deadband, SET tsus 0 turns the suspension off (HANDOFF 5.47).
+  ctrl_.config().tier.sus_adaptive = true;
+  // Balance angle from the measured ground acceleration (trim follows
+  // theta_v - atan(a/g) with 3 s) so a height change does not leave the robot
+  // drifting for ~25 s. SET ttrimacc 0 reverts, SET ttrimtau <s> retunes (5.46).
+  ctrl_.config().trim_acc = true;
+  // Gyro damping of the body through the hips, gated by the disturbance weight
+  // (ungated 0.08 rings tall, >= 0.15 rings crouched). SET tbdamp <s> (5.46).
+  ctrl_.config().tier.body_damping_s = 0.08F;
+  // Height changes at 15 mm/s, 50 mm/s2 with a 200 mm/s3 jerk limit: the biggest
+  // body kicks came when the legs STOP. SET hrate 25 / haccel 70 / hjerk 500
+  // restores the faster profile.
+  ctrl_.config().height.rate_m_s = 0.015F;
+  ctrl_.config().height.accel_m_s2 = 0.05F;
+  ctrl_.config().height.jerk_m_s3 = 0.20F;
+  // Crouched, theta_v_rate takes 0.7 of the joint-rate term (1.0 tall): the
+  // rotor-side hip rates lead the link under the crouched load and corrupt the
+  // balancer's D channel (HANDOFF 5.36-5.37). SET tvglow -1 = off.
   ctrl_.config().tier.joint_rate_gain_low = 0.7F;
-  // rollvff stays off: with it the side legs hunted on the robot (SET rollvff 1).
+  // Not shipped: SET tlsrc 1 (lead from the body gyro instead of the hip encoder
+  // rate) and SET tgate 1 (reflex gate) are sim-validated alternatives for the
+  // standing hip chatter, off until A/B-tested on the robot (HANDOFF 5.41-5.42).
   printTunables();
   const std::uint64_t now_us = nowUs();
   next_control_us_ = now_us;
@@ -422,17 +434,6 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     }
     legs_.setMode(line[8] == 'P' ? LegLock::Mode::Position : LegLock::Mode::Mit);
     printTunables();
-  } else if (std::strcmp(line, "SET vmc 1") == 0 || std::strcmp(line, "SET vmc 0") == 0) {
-    // Knee VMC switches the knee drivers' input mode: only with the legs free.
-    if (ctrl_.state() != V3Controller::State::Idle &&
-        ctrl_.state() != V3Controller::State::Fault) {
-      out_.println("V3 SET vmc refused: DISABLE first (knee driver mode changes at the next leg lock)");
-      return;
-    }
-    const bool on = line[8] == '1';
-    ctrl_.config().vmc.enabled = on;
-    legs_.setKneeMit(on);
-    printTunables();
   } else if (std::strncmp(line, "SET ", 4U) == 0) {
     char key[20]{};
     float v = 0.0F;
@@ -444,8 +445,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "trim_max")) lqr.setBalanceTrimMax(std::clamp(v, 0.0F, 0.35F));
     else if (!std::strcmp(key, "trim")) lqr.setBalanceTrim(v);
     else if (!std::strcmp(key, "margin")) lqr.setCommandTrackingMargin(std::clamp(v, 0.0F, 1.0F));
-    // 0.2-10: the default is 8 m/s^2 (defaultV3Config); the old 2.0 cap
-    // silently cut the LQR's push-recovery authority 4x.
+    // 0.2-10 m/s^2; the default is 8 (defaultV3Config). A low cap cuts the LQR's
+    // push-recovery authority.
     else if (!std::strcmp(key, "accel")) lqr.setMaxGroundAccel(std::clamp(v, 0.2F, 10.0F));
     else if (!std::strcmp(key, "pitch_scale")) lqr.setWheelPitchFeedbackScale(std::clamp(v, 0.3F, 1.0F));
     else if (!std::strcmp(key, "balance")) ctrl_.setBalanceAngle(true, std::clamp(v, -0.5F, 0.5F));
@@ -453,7 +454,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "kd")) ctrl_.config().pid.kd = std::clamp(v, 0.0F, 30.0F);
     else if (!std::strcmp(key, "kv")) ctrl_.config().pid.kv = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "height")) {
-      // Hip-to-axle height in mm (v3.1); clamped to the planner's range.
+      // Hip-to-axle height in mm; clamped to the planner's range.
       height_request_m_ = std::clamp(v * 0.001F, tap_fw::v3::LegHeight::minHeight(),
                                      tap_fw::v3::LegHeight::maxHeight());
       if (ctrl_.state() != V3Controller::State::Balancing) {
@@ -480,22 +481,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tenv")) ctrl_.config().tier.envelope = v >= 0.5F;
     else if (!std::strcmp(key, "khold")) ctrl_.config().tier.knee_hold = v >= 0.5F;
     else if (!std::strcmp(key, "tplanfull")) ctrl_.config().tier.plan_full = v >= 0.5F;
-    // Knee VMC tunables (live; SET vmc 0/1 above).
     else if (!std::strcmp(key, "leash")) ctrl_.config().drive_leash_m = std::clamp(v, 0.0F, 2.0F);
-    else if (!std::strcmp(key, "vprog")) ctrl_.config().vmc.progressive = v >= 0.5F;
-    else if (!std::strcmp(key, "vplo")) ctrl_.config().vmc.prog_lo_m = std::clamp(v, 0.0F, 50.0F) * 1.0e-3F;
-    else if (!std::strcmp(key, "vphi")) ctrl_.config().vmc.prog_hi_m = std::clamp(v, 1.0F, 80.0F) * 1.0e-3F;
-    else if (!std::strcmp(key, "vpratio")) ctrl_.config().vmc.prog_ratio = std::clamp(v, 1.0F, 10.0F);
-    else if (!std::strcmp(key, "vadapt")) ctrl_.config().vmc.adapt = v >= 0.5F;
-    else if (!std::strcmp(key, "vrlo")) ctrl_.config().vmc.rough_lo_m_s = std::clamp(v, 0.0F, 500.0F) * 1.0e-3F;
-    else if (!std::strcmp(key, "vrhi")) ctrl_.config().vmc.rough_hi_m_s = std::clamp(v, 1.0F, 1000.0F) * 1.0e-3F;
-    else if (!std::strcmp(key, "vfreq")) ctrl_.config().vmc.freq_hz = std::clamp(v, 1.0F, 20.0F);
-    else if (!std::strcmp(key, "vzeta")) ctrl_.config().vmc.zeta = std::clamp(v, 0.1F, 2.0F);
-    else if (!std::strcmp(key, "vsky")) ctrl_.config().vmc.sky_n_s_m = std::clamp(v, 0.0F, 300.0F);
-    else if (!std::strcmp(key, "vki")) ctrl_.config().vmc.ki_s = std::clamp(v, 0.05F, 10.0F);
-    else if (!std::strcmp(key, "vgrav")) ctrl_.config().vmc.grav_scale = std::clamp(v, 0.0F, 1.5F);
-    else if (!std::strcmp(key, "vstiff")) ctrl_.config().vmc.kp_stiff = std::clamp(v, 5.0F, 120.0F);
-    else if (!std::strcmp(key, "vtmax")) ctrl_.config().vmc.tau_max_nm = std::clamp(v, 0.5F, 10.0F);
     else if (!std::strcmp(key, "roll")) ctrl_.config().roll.enabled = v >= 0.5F;
     else if (!std::strcmp(key, "rolltau")) ctrl_.config().roll.tau_s = std::clamp(v, 0.05F, 5.0F);
     else if (!std::strcmp(key, "rollmax")) ctrl_.config().roll.max_dh_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
@@ -505,7 +491,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "rollyaw")) ctrl_.config().roll.yaw_accel_rad_s2 = std::clamp(v, 0.0F, 50.0F);
     else if (!std::strcmp(key, "rollsign")) ctrl_.config().roll.sign = v < 0.0F ? -1.0F : 1.0F;
     else if (!std::strcmp(key, "rollkp")) ctrl_.config().roll.kp = std::clamp(v, 0.0F, 3.0F);
-    else if (!std::strcmp(key, "lqrlead")) ctrl_.config().lqr_lead_s = std::clamp(v, 0.0F, 0.2F);
+    else if (!std::strcmp(key, "ttrimacc")) ctrl_.config().trim_acc = v >= 0.5F;
+    else if (!std::strcmp(key, "ttrimtau")) ctrl_.config().trim_acc_tau_s = std::clamp(v, 0.5F, 20.0F);
+    else if (!std::strcmp(key, "lqrlead")) {
+      ctrl_.config().lqr_lead_s = std::clamp(v, 0.0F, 0.2F);
+      ctrl_.config().lqr_lead_adaptive = false;  // a fixed value pins the lead
+    }
+    else if (!std::strcmp(key, "lqradapt")) ctrl_.config().lqr_lead_adaptive = v >= 0.5F;
+    else if (!std::strcmp(key, "lqrleadtall")) ctrl_.config().lqr_lead_tall_s = std::clamp(v, 0.0F, 0.2F);
+    else if (!std::strcmp(key, "lqrleadlow")) ctrl_.config().lqr_lead_low_s = std::clamp(v, 0.0F, 0.2F);
     else if (!std::strcmp(key, "wpred")) ctrl_.config().wheel_pred.enabled = v >= 0.5F;
     else if (!std::strcmp(key, "wbpred")) ctrl_.config().wheel_pred.with_wb = v >= 0.5F;
     else if (!std::strcmp(key, "wpdelay")) ctrl_.config().wheel_pred.act_delay_s = std::clamp(v, 0.0F, 200.0F) * 1.0e-3F;
@@ -528,7 +522,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                           : v >= 0.5F ? V3Controller::Algo::Pid
                                       : V3Controller::Algo::Lqr;
     }
-    // v3.3 tiers (V3Controller::Tier). vpitch changes the balancer's state,
+    // Tiers (V3Controller::Tier). vpitch changes the balancer's state,
     // so it only switches outside Balancing; trunk ramps in and out anytime.
     else if (!std::strcmp(key, "vpitch")) {
       if (ctrl_.state() == V3Controller::State::Balancing) {
@@ -548,6 +542,13 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tshare")) ctrl_.config().tier.lean_share = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tlead")) ctrl_.config().tier.lead_s = std::clamp(v, 0.0F, 0.15F);
     else if (!std::strcmp(key, "tleadexp")) ctrl_.config().tier.lead_exp = std::clamp(v, 0.0F, 2.0F);
+    else if (!std::strcmp(key, "tlsrc")) ctrl_.config().tier.lead_gyro_only = v >= 0.5F;
+    else if (!std::strcmp(key, "tgate")) ctrl_.config().tier.reflex_gate = v >= 0.5F;
+    else if (!std::strcmp(key, "tglo")) ctrl_.config().tier.reflex_rate_lo = std::clamp(v, 0.0F, 2.0F);
+    else if (!std::strcmp(key, "tghi")) ctrl_.config().tier.reflex_rate_hi = std::clamp(v, 0.01F, 3.0F);
+    else if (!std::strcmp(key, "tgllo")) ctrl_.config().tier.reflex_lean_lo = std::clamp(v, 0.0F, 0.2F);
+    else if (!std::strcmp(key, "tglhi")) ctrl_.config().tier.reflex_lean_hi = std::clamp(v, 0.005F, 0.3F);
+    else if (!std::strcmp(key, "tgrel")) ctrl_.config().tier.reflex_release_s = std::clamp(v, 0.05F, 5.0F);
     else if (!std::strcmp(key, "tmax")) ctrl_.config().tier.max_rad = std::clamp(v, 0.0F, 0.30F);
     else if (!std::strcmp(key, "trate")) ctrl_.config().tier.rate_rad_s = std::clamp(v, 0.1F, 6.0F);
     else if (!std::strcmp(key, "texp")) ctrl_.config().tier.height_exp = std::clamp(v, 0.0F, 4.0F);
@@ -556,8 +557,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "timu")) ctrl_.config().tier.imu_kinematic = v >= 0.5F;
     else if (!std::strcmp(key, "tvg")) ctrl_.config().tier.joint_rate_gain = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tvglow")) ctrl_.config().tier.joint_rate_gain_low = v < 0.0F ? -1.0F : std::clamp(v, 0.0F, 1.0F);
-    // Wheel/leg coordination pieces added after b4b6d4a (2026-10-01), for
-    // bisecting the crouched fall on the robot (HANDOFF 5.36).
+    // Wheel/leg coordination pieces added after the b4b6d4a build, switchable for
+    // A/B runs on the robot (SET legacy 1 sets them all back).
     else if (!std::strcmp(key, "tcarrier")) {
       ctrl_.config().tier.wheel_carrier_gain = std::clamp(v, 0.0F, 1.0F);
       ctrl_.config().tier.wheel_carrier_compensation = v > 0.0F;
@@ -585,6 +586,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "hcap")) ctrl_.config().held_wheel_cap_m_s = std::clamp(v, 0.0F, 0.8F);
     // Knee suspension (needs vpitch).
     else if (!std::strcmp(key, "tsus")) ctrl_.config().tier.suspension = v >= 0.5F;
+    else if (!std::strcmp(key, "tsusad")) ctrl_.config().tier.sus_adaptive = v >= 0.5F;
+    else if (!std::strcmp(key, "tsusk")) ctrl_.config().tier.sus_noise_k = std::clamp(v, 0.0F, 10.0F);
+    else if (!std::strcmp(key, "tsusdelay")) ctrl_.config().tier.sus_engage_delay_s = std::clamp(v, 0.0F, 60.0F);
     else if (!std::strcmp(key, "tsusg")) ctrl_.config().tier.sus_gain = std::clamp(v, 0.0F, 5.0F);
     else if (!std::strcmp(key, "tsusmax")) ctrl_.config().tier.sus_max_m = std::clamp(v * 0.001F, 0.0F, 0.015F);
     // Whole-body LQR (SET algo 2).
@@ -717,12 +721,22 @@ void AppV3::printTunables() noexcept {
               ctrl_.config().height.startup_jerk_m_s3 * 1000.0F,
               tier.sus_startup_settle_s, tier.sus_startup_ramp_s);
   out_.printf("V3 TUNE tiers: vpitch=%d trunk=%d (LQR only) tshare=%.2f disturbance_share=%.2f trunk_feedback=virtual thpf=%.1f "
-                "tlead=%.3f tleadexp=%.2f tplanfull=%d tmax=%.3f trate=%.1f texp=%.2f texpt=%.2f cdx=%.1f mm timu=%d tvg=%.2f tvglow=%.2f\n",
+                "tlead=%.3f tleadexp=%.2f tlsrc=%d tplanfull=%d tmax=%.3f trate=%.1f texp=%.2f texpt=%.2f cdx=%.1f mm timu=%d tvg=%.2f tvglow=%.2f\n",
                 tier.virtual_pitch ? 1 : 0, tier.trunk ? 1 : 0, tier.lean_share, tier.disturbance_share,
-                tier.hpf_s, tier.lead_s, tier.lead_exp, tier.plan_full ? 1 : 0, tier.max_rad, tier.rate_rad_s,
+                tier.hpf_s, tier.lead_s, tier.lead_exp, tier.lead_gyro_only ? 1 : 0, tier.plan_full ? 1 : 0, tier.max_rad, tier.rate_rad_s,
                 tier.height_exp, tier.height_exp_tall,
                 tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain,
                 tier.joint_rate_gain_low);
+  out_.printf("V3 TUNE suspension: tsus=%d adaptive=%d (SET tsusad) k=%.1f (tsusk) engage delay %.1f s (tsusdelay) deadband in use %.1f mm/s\n",
+              ctrl_.config().tier.suspension ? 1 : 0, ctrl_.config().tier.sus_adaptive ? 1 : 0,
+              ctrl_.config().tier.sus_noise_k, ctrl_.config().tier.sus_engage_delay_s,
+              ctrl_.suspensionDeadband() * 1000.0F);
+  out_.printf("V3 TUNE lqr lead: adaptive=%d (SET lqradapt) tall=%.3f low=%.3f s (lqrleadtall/lqrleadlow) fixed=%.3f s (SET lqrlead pins it)\n",
+              ctrl_.config().lqr_lead_adaptive ? 1 : 0, ctrl_.config().lqr_lead_tall_s,
+              ctrl_.config().lqr_lead_low_s, ctrl_.config().lqr_lead_s);
+  out_.printf("V3 TUNE reflex gate: tgate=%d (SET tgate 0/1) rate %.2f-%.2f rad/s (tglo/tghi) lean %.3f-%.3f rad (tgllo/tglhi) release %.2f s (tgrel)\n",
+              tier.reflex_gate ? 1 : 0, tier.reflex_rate_lo, tier.reflex_rate_hi,
+              tier.reflex_lean_lo, tier.reflex_lean_hi, tier.reflex_release_s);
   out_.printf("V3 TUNE calm: sleash=%.2f m sfrom=%.2f sret=%.2f m/s srel=%.1f s tdb=%.4f rad tsatm=%.2f\n",
               ctrl_.config().stand_leash_m, ctrl_.config().stand_leash_from,
               ctrl_.config().stand_return_m_s, ctrl_.config().stand_leash_release_s,
@@ -748,17 +762,6 @@ void AppV3::printTunables() noexcept {
     out_.printf("V3 TUNE wheel predictor: wpred=%d wbpred=%d wpdelay=%.0f ms wptau=%.0f ms wpmeas=%.0f ms\n",
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
-  }
-  {
-    const auto& vm = ctrl_.config().vmc;
-    out_.printf("V3 TUNE knee vmc: vmc=%d (legs %s) vfreq=%.1f Hz vzeta=%.2f vsky=%.0f N s/m vki=%.2f s "
-                "vgrav=%.2f vstiff=%.0f vkpmax=%.0f vtmax=%.1f N m vprog=%d (%.0f-%.0f mm x%.1f) vadapt=%d (%.0f-%.0f mm/s) "
-                "rough=%.0f mm/s\n",
-                vm.enabled ? 1 : 0, legs_.config().knee_mit ? "knee MIT" : "POS", vm.freq_hz, vm.zeta,
-                vm.sky_n_s_m, vm.ki_s, vm.grav_scale, vm.kp_stiff, tap_fw::board::kLegMaxKpNmPerRad,
-                vm.tau_max_nm, vm.progressive ? 1 : 0,
-                vm.prog_lo_m * 1000.0F, vm.prog_hi_m * 1000.0F, vm.prog_ratio, vm.adapt ? 1 : 0,
-                vm.rough_lo_m_s * 1000.0F, vm.rough_hi_m_s * 1000.0F, ctrl_.vmcRoughness() * 1000.0F);
   }
   out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
@@ -797,10 +800,10 @@ void AppV3::updateImu(std::uint64_t now_us) noexcept {
   const bool quiet = std::abs(std::sqrt(accel_sq) - kGravity) < 0.35F &&
       std::sqrt(gyro_sq) < 0.12F;
   // Pure IMU: no wheel-kinematic acceleration compensation (see BoardConfig).
-  // v3.3: while balancing free with the virtual pitch, the controller hands
-  // the kinematic velocity of the IMU point (last tick) so a sustained
-  // acceleration does not tilt the estimate (Tier::imu_kinematic); invalid
-  // (pure IMU, as before) otherwise.
+  // While balancing free with the virtual pitch, the controller hands over the
+  // kinematic velocity of the IMU point (last tick) so a sustained acceleration
+  // does not tilt the estimate (Tier::imu_kinematic); otherwise it is invalid
+  // and the estimate is a pure IMU one.
   const auto kv = ctrl_.imuVelocity();
   const auto out = estimator_.update(body_.accel_m_s2, body_.gyro_rad_s, dt_s,
                                      static_cast<float>(now_us) * 1.0e-6F, 0.0F,
@@ -1047,7 +1050,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
   in.leg_chain_rad = legChainRad();
-  // v3.3: measured joints per side, core frame (LegLock order LH LK RH RK).
+  // Measured joints per side, core frame (LegLock order LH LK RH RK).
   {
     const auto legs = tap_fw::board::MotorIds{}.leg_can;
     for (std::size_t side = 0; side < 2U; ++side) {
@@ -1141,8 +1144,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   if (out.legs_locked) {
     const bool stand = rec_active_ && recStand();
     if (stand) rec_cmd_ = recExcitation(now_us);
-    // v3.3: the height pose plus the tier-2 hip offset (0 unless trunk is
-    // on and balancing); the stand tests drive the bare pose.
+    // The height pose plus the tier-2 hip offset (0 unless trunk is on and
+    // balancing); the stand tests drive the bare pose.
     hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
     knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
@@ -1154,16 +1157,6 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,
                               out.leg_roll_hip_rate, out.leg_roll_knee_rate);
-    // Knee VMC: per-side MIT gains; LegLock holds the last set when the
-    // controller skips a tick (fault, held re-zero).
-    if (out.knee_mit_valid && !stand) {
-      std::array<LegLock::KneeMit, 2> km{};
-      for (std::size_t sd = 0; sd < 2U; ++sd) {
-        km[sd] = {out.knee_mit[sd].kp, out.knee_mit[sd].kd, out.knee_mit[sd].tff_nm,
-                  out.knee_mit[sd].vel_rad_s};
-      }
-      legs_.setKneeImpedance(km);
-    }
     (void)legs_.update(now_us, transport_);
   } else if (legs_.engaged()) {
     (void)legs_.release(transport_);
@@ -1223,7 +1216,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     next_trace_us_ = now_us + kTraceUs;
     // Same text as the former printf (tools parse it), built without
     // printf's float conversion (FastFormat.hpp: that was most of the tick).
-    static char line[640];
+    static char line[832];
     tap_fw::LineBuf b(line, sizeof line);
     b.str("TR t=").u32(static_cast<std::uint32_t>((now_us - state_since_us_) / 1000U))
         .str(" mode=").str(tap_fw::v3::toString(out.state))
@@ -1258,12 +1251,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" vz=").fix(ctrl_.bodyVerticalSpeed(), 3, true)
         .str(" roll=").fix(ctrl_.rollEstimate(), 4, true)
         .str(" rdh=").fix(ctrl_.rollSideHeight() * 1000.0F, 1, true)
-        .str(" ktq=").fix(0.5F * (feedback_.legEffort(1) + feedback_.legEffort(4)), 2, true)
-        .str(" kff=").fix(0.5F * (legs_.kneeImpedance()[0].tff_nm + legs_.kneeImpedance()[1].tff_nm), 2, true)
-        .str(" kkp=").fix(0.5F * (legs_.kneeImpedance()[0].kp + legs_.kneeImpedance()[1].kp), 1)
-        .str(" rgh=").fix(ctrl_.vmcRoughness() * 1000.0F, 1)
         .str(" anc=").fix(ctrl_.lqrAnchorOffset() * 1000.0F, 0, true)
-        .str(" sgv=").fix(ctrl_.standGive() * 1000.0F, 0, true);
+        .str(" sgv=").fix(ctrl_.standGive() * 1000.0F, 0, true)
+        .str(" rg=").fix(ctrl_.reflexGate(), 2)
+        .str(" ql=").fix(ctrl_.lqrLeadEffective(), 3)
+        .str(" sdb=").fix(ctrl_.suspensionDeadband() * 1000.0F, 1);
     out_.println(line);
     prof(3, nowUs() - p5);
   }

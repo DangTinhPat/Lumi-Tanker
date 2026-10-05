@@ -83,127 +83,10 @@ int main() {
   WholeBodyStanceController pitch_task(pitch_task_config);
   const auto pitch_task_output = pitch_task.update(
       body_pitch_state, base, pitch_centered_body, true, 0.01F,
-      true, false);
+      true);
   check(finiteTarget(pitch_task_output.target) &&
             std::abs(pitch_task_output.target[0] - base[0]) > 1.0e-6F,
         "enabled leg pitch task produces a bounded axle correction");
-
-  WholeBodyStanceController::Config vmc_config = config;
-  vmc_config.vmc_enabled = true;
-  vmc_config.vmc_max_torque_nm = 0.8F;
-  WholeBodyStanceController vmc(vmc_config);
-  WholeBodyModel::Result vmc_body = natural;
-  vmc_body.com_line_angle_rad = 0.05F;
-  RobotState vmc_state = state;
-  vmc_state.imu.pitch_rad = 0.20F;
-  vmc_state.imu.pitch_rate_rad_s = 0.10F;
-  const auto vmc_output = vmc.update(vmc_state, base, vmc_body, true, 0.002F);
-  check(vmc_output.vmc_pitch_torque_nm < 0.0F &&
-            std::abs(vmc_output.vmc_pitch_torque_nm) <=
-                vmc_config.vmc_max_torque_nm + 1.0e-6F,
-        "VMC spring-damper opposes pitch error within its safety ceiling");
-  bool finite_vmc_torque = true;
-  for (const auto joint : {0U, 1U, 3U, 4U}) {
-    finite_vmc_torque = finite_vmc_torque &&
-        std::isfinite(vmc_output.vmc_torque_nm[joint]) &&
-        std::abs(vmc_output.vmc_torque_nm[joint]) <=
-            vmc_config.vmc_max_torque_nm + 1.0e-6F;
-  }
-  check(finite_vmc_torque, "VMC J-transpose torque allocation stays bounded");
-  const auto neutral_leg = WholeBodyModel::legHeight(base[0], base[1]);
-  const float expected_vmc_scale = 0.5F *
-      vmc_output.vmc_pitch_torque_nm / vmc_body.com_above_axle_m;
-  check(std::abs(vmc_output.vmc_torque_nm[0] -
-                     (-expected_vmc_scale * neutral_leg.d_x_d_hip)) < 1.0e-5F &&
-            std::abs(vmc_output.vmc_torque_nm[1] -
-                     (-expected_vmc_scale * neutral_leg.d_x_d_knee)) < 1.0e-5F &&
-            std::abs(vmc_output.vmc_torque_nm[3] -
-                     (-expected_vmc_scale * neutral_leg.d_x_d_hip)) < 1.0e-5F &&
-            std::abs(vmc_output.vmc_torque_nm[4] -
-                     (-expected_vmc_scale * neutral_leg.d_x_d_knee)) < 1.0e-5F,
-        "stance VMC uses contact-to-body -J-transpose sign");
-
-  // The slow static-trim gate may close during a pitch-rate transient, but
-  // that must not remove active suspension authority from the same sample.
-  const auto gated_vmc_output = vmc.update(
-      vmc_state, base, vmc_body, false, 0.002F, false, true);
-  check(gated_vmc_output.active &&
-            gated_vmc_output.vmc_pitch_torque_nm < 0.0F,
-        "VMC remains active while static stance trim is gated");
-
-  // A zero VMC spring ratio must retain a real damping term. A joint motion
-  // changes the COM-line rate while body pitch remains outside this loop.
-  WholeBodyStanceController::Config damper_config = vmc_config;
-  damper_config.vmc_stiffness_ratio = 0.0F;
-  WholeBodyStanceController damper(damper_config);
-  WholeBodyModel::Result centered_body = natural;
-  centered_body.com_offset_x_m = 0.0F;
-  centered_body.com_line_angle_rad = 0.0F;
-  RobotState damper_state = state;
-  damper_state.joints.velocity_rad_s[0] = 0.10F;
-  damper_state.joints.velocity_rad_s[3] = 0.10F;
-  damper_state.imu.pitch_rate_rad_s = 0.10F;
-  const auto damper_output = damper.update(
-      damper_state, base, centered_body, true, 0.002F);
-  check(std::abs(damper_output.vmc_pitch_torque_nm) > 1.0e-4F,
-        "zero VMC stiffness retains COM-line damping");
-
-  // Crossing the independent VMC safety latch must release torque gradually,
-  // not inject a one-sample step into the leg servo.
-  WholeBodyStanceController guarded_vmc(vmc_config);
-  const auto guarded_start = guarded_vmc.update(
-      vmc_state, base, vmc_body, true, 0.002F);
-  // Trigger the independent CoM-line-rate safety gate. Body pitch rate alone
-  // must not release a VMC loop that no longer owns body pitch.
-  vmc_state.joints.velocity_rad_s[0] = 4.0F;
-  vmc_state.joints.velocity_rad_s[3] = 4.0F;
-  auto guarded_end = guarded_start;
-  for (int i = 0; i < 40; ++i) {
-    guarded_end = guarded_vmc.update(
-        vmc_state, base, vmc_body, true, 0.002F);
-  }
-  check(std::abs(guarded_start.vmc_pitch_torque_nm) >
-            std::abs(guarded_end.vmc_pitch_torque_nm) + 1.0e-4F &&
-            std::abs(guarded_end.vmc_pitch_torque_nm) < 1.0e-4F,
-        "VMC safety latch ramps torque to zero");
-
-  // The leg VMC owns the body-frame CoM-line band. A centered CoM line must
-  // therefore stay quiet even when the IMU body pitch is non-zero; LQR owns
-  // that separate state through the wheels.
-  WholeBodyModel::Result line_balanced = natural;
-  line_balanced.com_above_axle_m = 0.200F;
-  line_balanced.com_offset_x_m = 0.0F;
-  line_balanced.com_line_angle_rad = 0.0F;
-  RobotState line_state = state;
-  line_state.imu.pitch_rad = 0.05F;
-  line_state.imu.pitch_rate_rad_s = 0.0F;
-  WholeBodyStanceController line_vmc(vmc_config);
-  const auto line_output = line_vmc.update(
-      line_state, base, line_balanced, true, 0.002F);
-  check(std::abs(line_output.vmc_pitch_torque_nm) < 1.0e-4F,
-        "VMC stays quiet when body pitch is non-zero but COM line is centered");
-
-  // The leg-side damper responds to CoM-line rate, not body-pitch rate.
-  RobotState rate_state = line_state;
-  rate_state.imu.pitch_rate_rad_s = 0.40F;
-  rate_state.joints.velocity_rad_s[0] = 0.10F;
-  rate_state.joints.velocity_rad_s[3] = 0.10F;
-  WholeBodyStanceController rate_vmc(vmc_config);
-  const auto rate_output = rate_vmc.update(
-      rate_state, base, line_balanced, true, 0.002F);
-  check(rate_output.vmc_pitch_torque_nm < 0.0F,
-        "VMC damps COM-line rate independently of body-pitch rate");
-
-  line_balanced.com_offset_x_m = -0.010F;
-  line_balanced.com_line_angle_rad = std::atan2(
-      line_balanced.com_offset_x_m, line_balanced.com_above_axle_m);
-  RobotState line_error_state = line_state;
-  line_error_state.imu.pitch_rad = 0.0F;
-  line_error_state.imu.pitch_rate_rad_s = 0.0F;
-  const auto line_error_output = line_vmc.update(
-      line_error_state, base, line_balanced, true, 0.002F);
-  check(line_error_output.vmc_pitch_torque_nm > 0.0F,
-        "VMC opposes COM-line error when body pitch is centered");
 
   // The leg speed loop is an explicit Drive owner. A velocity error alone
   // must not make a stationary height/station update move the legs.
@@ -213,17 +96,17 @@ int main() {
   speed_config.speed_loop_max_rate_rad_s = 10.0F;
   WholeBodyStanceController speed_controller(speed_config);
   const auto speed_disabled = speed_controller.update(
-      state, base, natural, true, 0.01F, true, false, 0.20F);
+      state, base, natural, true, 0.01F, true, 0.20F);
   check(std::abs(speed_disabled.speed_loop_hip_rad) < 1.0e-7F &&
             std::abs(speed_disabled.speed_loop_com_m) < 1.0e-7F,
         "leg speed loop stays disabled without explicit Drive ownership");
   const auto speed_enabled = speed_controller.update(
-      state, base, natural, true, 0.01F, true, false, 0.20F, true);
+      state, base, natural, true, 0.01F, true, 0.20F, true);
   check(std::abs(speed_enabled.speed_loop_hip_rad) > 1.0e-6F &&
             std::abs(speed_enabled.speed_loop_com_m) > 1.0e-6F,
         "leg speed loop engages only when explicitly owned");
   const auto speed_released = speed_controller.update(
-      state, base, natural, true, 0.01F, true, false, 0.20F, false);
+      state, base, natural, true, 0.01F, true, 0.20F, false);
   check(std::abs(speed_released.speed_loop_hip_rad) <
             std::abs(speed_enabled.speed_loop_hip_rad),
         "leg speed correction releases smoothly after Drive ownership ends");

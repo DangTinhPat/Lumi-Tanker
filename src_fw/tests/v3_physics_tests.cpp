@@ -22,7 +22,7 @@ using robot_control::ImuStateEstimator;
 using tap_fw::v3::V3Controller;
 
 struct Case {
-  // v3.1: height request during balancing (0 = none): lower to height_low_m
+  // height request during balancing (0 = none): lower to height_low_m
   // at 5 s, back to the hang height at height_up_s. The true balance angle
   // shifts by eq_delta_scale x the CAD model's prediction (model error).
   double height_low_m = 0.0;
@@ -406,7 +406,7 @@ int main() {
     report("T9 wheel deadband", c, r);
     assert(!r.fell && r.th_rms < 0.0015);
   }
-  // T10 (v3.1): balancing at the hang height, lower to 150 mm at 5 s, back
+  // T10: balancing at the hang height, lower to 150 mm at 5 s, back
   // up at 25 s, CAD balance feed-forward off (default). The true balance
   // angle shift is -0.5 x the CAD prediction (2026-09-27 robot: -0.025 rad
   // at 110 mm vs CAD +0.054), plus 0 and +0.5 for margin; wheel deadband
@@ -427,7 +427,7 @@ int main() {
     assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
     assert(r.held_resets == 0);
   }
-  // v3.2 (LQR path). T11: same balance-angle/seed-error/wheel-lag grid as T2,
+  // LQR path. T11: same balance-angle/seed-error/wheel-lag grid as T2,
   // now on algo=Lqr with position_anchor_hold - must hold position and find
   // the balance angle exactly like the proven PID path.
   for (double tau : {0.08, 0.12}) {

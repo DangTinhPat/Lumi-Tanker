@@ -6,9 +6,7 @@
 namespace robot_control {
 
 // Whole-body stance control for the wheel-legged body.  The slow COM/roll
-// trim owns geometry; the optional VMC path is the fast active suspension:
-// the body-frame COM-line angle/rate become a virtual damper torque and are
-// mapped through the live leg Jacobian into hip/knee feedforward torque.
+// trim owns geometry (no joint torque feed-forward is produced here).
 class WholeBodyStanceController {
  public:
   struct Config {
@@ -91,18 +89,8 @@ class WholeBodyStanceController {
     // loop with the controller it is helping.
     float speed_loop_release_pitch_rad = 0.06F;
     float speed_loop_release_span_rad = 0.09F;
-    // Adaptive virtual model control. The spring ratio is relative to the
-    // live body gravitational stiffness M*g*h; damping is sized from that
-    // physical reference and the live pitch inertia, so ratio=0 remains a
-    // pure damper. Natural and squat poses do not share fixed Nm gains. The
-    // torque clamp is an actuator-safety ceiling.
-    bool vmc_enabled = false;
-    float vmc_stiffness_ratio = 0.35F;
-    float vmc_damping_ratio = 0.90F;
-    float vmc_max_torque_nm = 0.80F;
-    float vmc_max_pitch_rad = 0.25F;
-    float vmc_max_pitch_rate_rad_s = 1.50F;
-    float vmc_release_time_s = 0.05F;
+    // The leg COM task stays allowed up to this body pitch rate [rad/s].
+    float max_pitch_rate_for_trim_rad_s = 1.50F;
     float gravity_m_s2 = 9.81F;
     float com_deadband_m = 0.0003F;
     float axle_height_deadband_m = 0.001F;
@@ -118,8 +106,6 @@ class WholeBodyStanceController {
     bool active = false;
     float com_error_m = 0.0F;
     float com_target_pitch_rad = 0.0F;
-    float vmc_pitch_torque_nm = 0.0F;
-    JointArray vmc_torque_nm{};
     float axle_height_error_m = 0.0F;
     float symmetric_trim_norm_rad = 0.0F;
     float differential_trim_norm_rad = 0.0F;
@@ -140,7 +126,6 @@ class WholeBodyStanceController {
                               bool allow,
                               float dt_s,
                               bool allow_static_com = true,
-                              bool allow_vmc = true,
                               float velocity_error_m_s = 0.0F,
                               bool allow_speed_loop = false) noexcept;
 
@@ -164,7 +149,6 @@ class WholeBodyStanceController {
   float previous_velocity_error_m_s_ = 0.0F;
   float velocity_error_rate_m_s2_ = 0.0F;
   float speed_loop_integral_m_ = 0.0F;
-  float vmc_safety_scale_ = 0.0F;
   Output last_output_{};
 };
 

@@ -11,7 +11,7 @@ int main() {
   // Dormant parameters must be unable to affect the original control path.
   cfg.split.posture_tau_s=13; cfg.split.lean_threshold_rad=.0001F;
 #endif
-  cfg.engage.immediate=true; cfg.roll.enabled=true; cfg.vmc.enabled=true;
+  cfg.engage.immediate=true; cfg.roll.enabled=true;
   V3Controller c(cfg);
   V3Controller::Input in{};V3Controller::Command cmd{};
   in.legs_measured=in.legs_ready=true;
@@ -37,13 +37,11 @@ int main() {
       double(o.leg_hip_offset_rad),double(o.leg_knee_offset_rad),double(c.balanceRef()),
       double(c.trunkHip()),double(c.virtualPitch()),double(c.virtualPitchRate()),
       double(c.groundPosition()),o.fault ? o.fault : "-");
-    std::printf("flags %d %d %d\n",o.engage_legs,o.knee_mit_valid,o.legs_moving);
+    std::printf("flags %d %d\n",o.engage_legs,o.legs_moving);
     for(unsigned side=0;side<2;++side) {
-      const auto m=o.knee_mit[side];
-      std::printf("side %u %a %a %a %a %a %a %a %a\n",side,
+      std::printf("side %u %a %a %a %a\n",side,
         double(o.leg_roll_hip_rad[side]),double(o.leg_roll_knee_rad[side]),
-        double(o.leg_roll_hip_rate[side]),double(o.leg_roll_knee_rate[side]),
-        double(m.kp),double(m.kd),double(m.tff_nm),double(m.vel_rad_s));
+        double(o.leg_roll_hip_rate[side]),double(o.leg_roll_knee_rate[side]));
     }
 
   }

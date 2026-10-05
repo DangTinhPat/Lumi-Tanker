@@ -241,7 +241,7 @@ class TapSerialControlApp:
         tiers.pack(fill="x", padx=10, pady=(0, 8))
         ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
 
-        # Measurements for the hardware sessions (docs/V3.3_HANDOFF.md §6):
+        # Measurements for the hardware sessions (docs/V3.3_HANDOFF.md §7):
         # recorded at 250 Hz in the firmware, dumped as RC lines into the log.
         measure = ttk.LabelFrame(self.root, text="Đo đạc (ghi 250 Hz, tự đổ vào log)", padding=10)
         measure.pack(fill="x", padx=10, pady=(0, 8))

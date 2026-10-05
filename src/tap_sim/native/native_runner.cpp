@@ -678,7 +678,7 @@ class NativeRunner {
     // The fake driver has a steady-state load sag near the straight-leg and
     // natural branches; settle within 25 mm after the quiet-rate dwell.
     cfg.height_reached_tolerance_m = 0.025F;
-    // LQR owns measured body pitch through the wheels. WBC/VMC owns only the
+    // LQR owns measured body pitch through the wheels. WBC owns only the
     // body-frame COM line through the leg Jacobian.
     cfg.whole_body_compensation = false;
     cfg.whole_body_pitch_gain = 1.0F;
@@ -688,27 +688,10 @@ class NativeRunner {
     // are scheduled from the live COM height inside the stance controller;
     // the wheel MPC remains the capture loop for translation.
     cfg.whole_body_stance.enabled = true;
-    cfg.whole_body_stance.vmc_enabled = true;
-    // Leave gravity to the wheel MPC. VMC is damping-only until the two
-    // loops have separate physical state variables and model contracts.
-    cfg.whole_body_stance.vmc_stiffness_ratio = 0.20F;
-    // Keep the COM-line damper below the saturation-prone old profile.
-    cfg.whole_body_stance.vmc_damping_ratio = 0.70F;
-    // Give the fast leg damper most of the provisional joint envelope.  The
-    // inner position servo and gravity feed-forward still retain 20% headroom;
-    // a 40% VMC cap was reached before the wheels could catch a real transient.
-    cfg.whole_body_stance.vmc_max_torque_nm =
-        0.80F * cfg.leg_max_torque_nm;
-    // Keep the low-gain leg damper alive through a real rolling transient;
-    // its independent 1.2 N.m clamp remains the actuator safety boundary.
-    // Keep the leg damper alive through the first wheel-capture transient.
-    // Keep the damper available through the bounded pre-fall capture window;
-    // the independent fall detector still owns the final stop. These are
-    // bounded safety limits, not a second angle owner, and release remains
-    // ramped instead of becoming a one-sample cut.
-    cfg.whole_body_stance.vmc_max_pitch_rad = 0.80F;
-    cfg.whole_body_stance.vmc_max_pitch_rate_rad_s = 10.0F;
-    cfg.whole_body_stance.vmc_release_time_s = 0.15F;
+    // Leg COM trim stays allowed through a fast rolling transient and the
+    // bounded pre-fall capture window; the independent fall detector
+    // still owns the final stop.
+    cfg.whole_body_stance.max_pitch_rate_for_trim_rad_s = 10.0F;
     cfg.whole_body_stance.gravity_m_s2 = cfg.lqr.gravity_m_s2;
     cfg.whole_body_stance.com_position_gain = 3.00F;
     cfg.whole_body_stance.com_velocity_damping_s = 0.02F;
@@ -1784,9 +1767,6 @@ class NativeRunner {
               << "|wb_com_line_angle=" << whole_body.com_line_angle_rad
               << "|wb_com_error=" << stance.com_error_m
               << "|wb_com_target_pitch=" << stance.com_target_pitch_rad
-              << "|wb_vmc_pitch_torque=" << stance.vmc_pitch_torque_nm
-              << "|wb_vmc_hip_torque=" << stance.vmc_torque_nm[0]
-              << "|wb_vmc_knee_torque=" << stance.vmc_torque_nm[1]
               << "|leg_ff_lh=" << output.feedforward_nm[0]
               << "|leg_ff_lk=" << output.feedforward_nm[1]
               << "|leg_ff_rh=" << output.feedforward_nm[3]

@@ -73,7 +73,7 @@ def main() -> int:
                             "-R", "^(v3_tests|v3_physics_tests|v3_tier_tests|v3_coordination_tests|leg_height_tests)$"], {})
         results["ctest_passed"] = "100% tests passed" in log
     # Standard sagittal regression keeps roll off; also check AppV3's boot
-    # configuration (roll on, velocity FF off, VMC off) on the lateral proxy.
+    # configuration (roll on, velocity FF off) on the lateral proxy.
     for label, path in [("before", args.baseline), ("after", args.binary),
                         ("after_boot", args.binary)]:
         if path is None:
@@ -87,7 +87,7 @@ def main() -> int:
         path = snapshot
         entry = {"binary": str(path), "original_binary": str(original),
                  "sha256": fingerprint(path), "press": {},
-                 "roll_enabled": label == "after_boot", "vmc_enabled": False}
+                 "roll_enabled": label == "after_boot"}
         configuration = {"TR_ROLL": "1"} if label == "after_boot" else {}
         for force in (3, 6):
             log = run(f"{label}_{force}n", [str(path)],
