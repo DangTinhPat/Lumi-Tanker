@@ -83,6 +83,31 @@ behavior.update(VisionTarget(42, image_width_px, time.monotonic()))
 # On target loss, call behavior.update(None) to stop.
 ```
 
+## Shared command gateway for voice and vision
+
+The hardware GUI now routes voice envelopes, vision setpoints and manual
+movement through `RobotCommandRouter`. The voice envelope contract is checked
+in at [`config/robot_command_tree.json`](config/robot_command_tree.json). A
+voice component in the GUI process can submit one JSON line through
+`TapSerialControlApp.execute_robot_command(payload)`; its source is set to
+`luvox`, and the router returns the command status. The method queues calls
+from a voice worker thread for execution on the Tk thread.
+
+The router applies the schema priorities: ESTOP cancels everything, active
+follow blocks basic movement, and a new basic command replaces the previous
+one. It validates types and ranges, then clamps movement rates to the hardware
+GUI limits (`0.20 m/s`, `0.40 rad/s`). Height targets are restricted to the
+firmware's `0.078–0.1886 m` range. The GUI accepts one pending voice
+request; a queued ESTOP replaces that pending request. Finite move/turn requests
+use fresh ESP odometry (`TR axle_x`, `wheel_lx`, and `wheel_rx`) through
+`MotionAPI`; their requested distances and angles are odometry based, while the
+derived duration is used only as a timeout estimate. The firmware telemetry
+provides normalized left/right wheel positions so the GUI does not reconstruct
+them from driver-frame leg angles. Height requests map to firmware `SET height`;
+relative height uses fresh `TR h` telemetry. No voice recognizer is
+included yet: it should call this command entry point once it produces the
+envelope.
+
 For the integrated camera path, install OpenCV and calibrate the external webcam:
 
 ```bash
@@ -92,7 +117,7 @@ python3 blue_object_vision/calibrate_camera.py
 
 Capture at least 12 checkerboard views and press `c` to save its calibration.
 Then start the native dashboard,
-start SIM, ENABLE, and press **Theo dõi vật thể xanh**. The dashboard starts
+start SIM, ENABLE, and press **Theo dõi người**. The dashboard starts
 the tracker on `/dev/video4`, maps fresh visible JSONL records into `VisionTarget`,
 and calls the same `MotionAPI` used by operator controls. The native simulator
 tracking path only rotates; forward speed remains zero. Target loss sends STOP
@@ -112,14 +137,18 @@ python3 tools/tap_serial_control_gui.py
 ```
 
 Connect and start the firmware session as usual. Once the status panel says
-`Balancing`, press **Theo dõi vật thể xanh**. The follower uses the laptop
-camera (`/dev/video4`) and opens a camera window showing the center line and
-detected target. It uses the detector's raw `area_fraction` to hold the apparent
-target size captured when the target first enters the centered sector. A 0.35 s
-low-pass filter smooths area measurements. Forward or backward motion starts
-only after the log size error crosses 0.10; it releases inside 0.04, creating a
-hysteresis band that prevents direction chatter. Speed grows with size error,
-is capped at `0.12 m/s`, and ramps at `0.5 m/s²`. Translation is enabled only
+`Balancing`, press **Theo dõi người**. The follower uses the laptop camera
+(`/dev/video4`) and runs the local YOLOv5 person checkpoint at 640 pixels on
+the YOLO virtual environment interpreter. It opens a camera window showing the
+center line and detected person. Processing is capped at 15 FPS. It uses the
+detector's raw `area_fraction` to hold the apparent
+target size captured when the target first enters the centered sector. A median
+of three fresh log-area samples and a 0.18 s low-pass filter smooth the size
+estimate. Forward or backward motion starts only after the log size error stays
+beyond 0.10 for 0.15 s; it releases inside 0.04. While active, speed is at least
+`0.10 m/s`, scales up with larger errors, and is capped at `0.18 m/s`; it ramps
+at `0.7 m/s²`. After braking it waits 0.25 s before allowing a direction
+reversal. Translation is enabled only
 within `0.20 rad` (about 11°) of image center; outside that sector it rotates to
 recenter and pauses forward/backward motion. The `APPROACHING`/`RECEDING` label
 remains a display diagnostic and does not directly command translation. This
@@ -140,9 +169,9 @@ zero drive. The joystick and W/S keys provide the same forward/backward input.
 The hardware GUI uses an approximate 60° horizontal FOV because this mini-test
 only needs image centering, not range or metric positioning. Positive pixel
 error maps to positive `DRIVE` yaw, which the firmware documents as turning
-right. The tracker rejects regions smaller than `max(300 px, 0.2% of the
-processed frame)`. A lost/stale camera feed sends `STOP`; reacquisition resumes
-centering.
+right. The tracker rejects person boxes smaller than `max(200 px, 0.05% of the
+processed frame)`. A single YOLO miss may use a predicted box for up to 0.15 s;
+a longer lost/stale camera feed sends `STOP`, and reacquisition resumes centering.
 
 `MotionAPI` defaults to `0.20 m/s` and `0.50 rad/s`; its limits are configurable
 but cannot exceed the runner clamps (`1.0 m/s`, `0.8 rad/s`). The dashboard
@@ -150,7 +179,7 @@ retains its existing higher UI envelope. Vision behavior requires a calibrated
 horizontal camera FOV, filters observations with a `0.12 s` time constant,
 uses `0.025/0.055 rad` enter/exit center thresholds, limits yaw to `0.35 rad/s`
 and yaw acceleration to `1.0 rad/s²`, and stops for target loss or observations
-older than `0.25 s`. Forward approach defaults to zero because pixel offset
+older than `0.18 s`. Forward approach defaults to zero because pixel offset
 alone does not give ball range; a fixed approach speed can be enabled, but it
 cannot maintain a safe standoff distance without range data.
 

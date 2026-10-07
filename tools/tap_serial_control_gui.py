@@ -4,13 +4,14 @@
 Run with: python3 tools/tap_serial_control_gui.py
 Requires pyserial and Tkinter. The GUI sends START / DRIVE / STOP / DISABLE /
 ESTOP commands to the firmware console and displays its serial diagnostics.
-The blue-target follower is a GUI toggle that sends DRIVE/STOP over the same
+The person follower is a GUI toggle that sends DRIVE/STOP over the same
 serial link and leaves the balance session active when tracking stops.
 """
 
 from __future__ import annotations
 
 import glob
+import json
 import math
 import os
 import queue
@@ -26,8 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "gui"))
 
 from gui.motion_api import MotionAPI, MotionLimits
+from gui.command_router import CommandResult, RobotCommandRouter
 from gui.vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
-from gui.vision_process import BlueVisionProcess
+from gui.vision_process import PersonVisionProcess
 
 try:
     import serial
@@ -54,8 +56,13 @@ MODE_RE = re.compile(r"CONTROL mode=(\S+) enable=(\d+)")
 ALGO_RE = re.compile(r"V3 TUNE algo=(LQR|PID|WB)\b")
 SENS_RE = re.compile(
     r"SENS .*?can_legs=(\d+) uart_wheels=(\d+) homed=(\d+) "
-    r"joint_q=\[[^]]+\] pitch=([+-]?[\d.]+) pitch_rate=([+-]?[\d.]+)"
+    r"joint_q=\[([^]]+)\] pitch=([+-]?[\d.]+) pitch_rate=([+-]?[\d.]+)"
 )
+CONTROL_MODE_RE = re.compile(r"CONTROL mode=(\S+)")
+AXLE_X_RE = re.compile(r"\baxle_x=([+-]?[\d.]+)")
+HEIGHT_RE = re.compile(r"\bh=([0-9.]+).*?\bhtgt=([0-9.]+)")
+WHEEL_POS_RE = re.compile(
+    r"\bwheel_lx=([+-]?[\d.]+)\s+wheel_rx=([+-]?[\d.]+)")
 
 
 class SerialLink:
@@ -69,6 +76,8 @@ class SerialLink:
         self.reader_thread: threading.Thread | None = None
         self.log_file = None
         self.log_start = time.monotonic()
+        self.telemetry: dict[str, str] = {}
+        self.telemetry_received_monotonic_s = 0.0
 
     def _log(self, text: str) -> None:
         if self.log_file is not None:
@@ -77,9 +86,17 @@ class SerialLink:
             except OSError:
                 pass
 
+    def log_event(self, text: str) -> None:
+        """Write an application diagnostic into the active serial session log."""
+        self._log(f"[event] {text}")
+
     @property
     def connected(self) -> bool:
         return self.port is not None and self.port.is_open
+
+    @property
+    def running(self) -> bool:
+        return self.connected
 
     def open(self, device: str) -> None:
         if serial is None:
@@ -96,6 +113,8 @@ class SerialLink:
         path = os.path.join(LOG_DIR, time.strftime("tap_%Y%m%d_%H%M%S.log"))
         self.log_file = open(path, "a", buffering=1, encoding="utf-8")
         self.log_start = time.monotonic()
+        self.telemetry.clear()
+        self.telemetry_received_monotonic_s = 0.0
         self.incoming.put(f"[log] {path}")
         self.stop_event.clear()
         self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -114,11 +133,14 @@ class SerialLink:
                 self.incoming.put(f"[serial write error] {exc}")
                 return False
 
-    def command_drive(self, velocity: float, yaw_rate: float) -> None:
-        self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
+    def command_drive(self, velocity: float, yaw_rate: float) -> bool:
+        return self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
 
-    def command_stop(self) -> None:
-        self.send("STOP")
+    def command_stop(self) -> bool:
+        return self.send("STOP")
+
+    def command_estop(self) -> bool:
+        return self.send("ESTOP")
 
     def close(self) -> None:
         self.stop_event.set()
@@ -151,7 +173,23 @@ class SerialLink:
             if raw:
                 line = raw.decode("utf-8", errors="replace").rstrip()
                 self._log(line)
+                self._update_telemetry(line)
                 self.incoming.put(line)
+
+    def _update_telemetry(self, line: str) -> None:
+        now = time.monotonic()
+        if match := CONTROL_MODE_RE.search(line):
+            mode = match.group(1)
+            self.telemetry["mode"] = "Balance" if mode == "Balancing" else mode
+        if match := AXLE_X_RE.search(line):
+            self.telemetry["wheel_position"] = match.group(1)
+        if match := WHEEL_POS_RE.search(line):
+            self.telemetry["wheel_left_position"] = match.group(1)
+            self.telemetry["wheel_right_position"] = match.group(2)
+            self.telemetry_received_monotonic_s = now
+        if match := HEIGHT_RE.search(line):
+            self.telemetry["height_m"] = str(float(match.group(1)) * 0.001)
+            self.telemetry["height_target_m"] = str(float(match.group(2)) * 0.001)
 
 
 class TapSerialControlApp:
@@ -162,7 +200,14 @@ class TapSerialControlApp:
         root.minsize(760, 600)
 
         self.incoming: queue.Queue[str] = queue.Queue()
+        # One pending voice call at most: the command tree explicitly forbids
+        # replaying a backlog of stale robot actions after the GUI stalls.
+        self.voice_commands: queue.Queue[tuple[dict | str, queue.Queue[dict]]] = queue.Queue(maxsize=1)
+        self.pending_voice: dict[str, dict] = {}
+        self.pending_voice_lock = threading.Lock()
+        self._tk_thread_id = threading.get_ident()
         self.link = SerialLink(self.incoming)
+        self.last_vision_diag_log_s = 0.0
         self.port_var = tk.StringVar()
         self.connection_var = tk.StringVar(value="Chưa kết nối")
         self.mode_var = tk.StringVar(value="—")
@@ -186,9 +231,22 @@ class TapSerialControlApp:
         self.last_hmove_sent = 0.0
         self.height_var = tk.StringVar(value="Chiều cao: —")
         self.tier_var = tk.StringVar(value="Tầng 2: —")
-        self.vision_process = BlueVisionProcess(ROOT / "blue_object_vision")
-        self.vision_motion = MotionAPI(
-            self.link, limits=MotionLimits(max_linear_m_s=0.20, max_yaw_rad_s=0.40))
+        self.vision_process = PersonVisionProcess(ROOT / "blue_object_vision")
+        self.motion = MotionAPI(
+            self.link,
+            limits=MotionLimits(max_linear_m_s=0.20, max_yaw_rad_s=0.40),
+            require_station_capture=False,
+        )
+        self._follow_stop_status = "Vision: đã dừng"
+        self.command_router = RobotCommandRouter(
+            self.motion,
+            can_control=self._can_control,
+            set_follow=self._set_follow_state,
+            send_console=self._send,
+            emergency_stop=self._send_estop,
+            on_result=self._on_command_result,
+        )
+        self.vision_motion = self.command_router.motion_source("tracking")
         self.vision_behavior: Vbc | None = None
         self.vision_record: dict | None = None
         self.vision_status_var = tk.StringVar(value="Vision: tắt")
@@ -263,7 +321,7 @@ class TapSerialControlApp:
         self._direction_button(actions, "▲ TIẾN (giữ)", "up", 3, 0, columnspan=2)
         self._direction_button(actions, "▼ LÙI (giữ)", "down", 3, 3, columnspan=2)
         self.vision_button = ttk.Button(
-            actions, text="Theo dõi vật thể xanh", command=self.toggle_vision)
+            actions, text="Theo dõi người", command=self.toggle_vision)
         self.vision_button.grid(row=4, column=0, columnspan=5, padx=4, pady=(8, 2),
                                 sticky="ew")
         ttk.Label(actions, textvariable=self.vision_status_var).grid(
@@ -413,11 +471,12 @@ class TapSerialControlApp:
             f"Đã mở {device} @ {BAUD}; chờ SENS sau boot rồi mới cho START.")
         self._send("GET")  # read-only: show the active balancer in the status panel
 
-    def _send(self, command: str) -> None:
+    def _send(self, command: str) -> bool:
         if not self.link.send(command):
             self._append_log("Không gửi được: chưa kết nối serial.")
-            return
+            return False
         self._append_log(f">> {command}")
+        return True
 
     def start(self) -> None:
         if not self.link.connected:
@@ -452,19 +511,23 @@ class TapSerialControlApp:
     def stop_drive(self) -> None:
         self.stop_vision("Vision: đã dừng")
         self._clear_drive_inputs()
-        self._send("STOP")
+        self.command_router.stop_all()
 
     def disable(self) -> None:
         self.stop_vision("Vision: dừng do DISABLE")
         self._clear_drive_inputs()
+        self.command_router.stop_all()
         self.session_active = False
         self._send("DISABLE")
 
     def estop(self) -> None:
-        self.stop_vision("Vision: dừng do ESTOP")
-        self._clear_drive_inputs()
-        self.session_active = False
-        self._send("ESTOP")
+        self._follow_stop_status = "Vision: dừng do ESTOP"
+        self.command_router.execute({
+            "command_id": f"gui-estop-{time.time_ns()}",
+            "source": "manual_ui",
+            "action": "emergency_stop",
+            "args": {"reason": "operator pressed ESTOP"},
+        })
 
     def clear_estop(self) -> None:
         self.session_active = False
@@ -533,7 +596,7 @@ class TapSerialControlApp:
         if direction:
             self._release(direction)
 
-    def _drive_command(self) -> str:
+    def _drive_values(self) -> tuple[float, float]:
         if self.joy_active:
             fwd_in, turn_in = self.joy_y, self.joy_x
         else:
@@ -542,11 +605,18 @@ class TapSerialControlApp:
         forward = self.speed_var.get() * fwd_in
         # On the robot (2026-09-28) a positive DRIVE yaw turns it right.
         yaw = self.yaw_var.get() * turn_in
+        return forward, yaw
+
+    def _drive_command(self) -> str:
+        forward, yaw = self._drive_values()
         return f"DRIVE {forward:.3f} {yaw:.3f}"
 
     def _publish_drive(self) -> None:
         command = self._drive_command()
-        self._send(command)
+        forward, yaw = self._drive_values()
+        if not self.command_router.command_velocity("manual_ui", forward, yaw):
+            if forward != 0.0 or yaw != 0.0:
+                self._append_log("Lệnh tay bị chặn: ESP chưa Balance hoặc follower đang ưu tiên.")
         self.last_drive_cmd = command
         self.last_drive_sent = time.monotonic()
 
@@ -589,39 +659,199 @@ class TapSerialControlApp:
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _can_control(self) -> bool:
+        return (self.link.connected and self.session_active and
+                self.mode_var.get() == "Balancing")
+
+    def _on_command_result(self, result: CommandResult) -> None:
+        self._append_log(
+            f"[command {result.status}] {result.command_id} "
+            f"{result.source}:{result.action} — {result.message}")
+
+    def execute_robot_command(self, command: dict | str) -> dict:
+        """Thread-safe voice/tool entry point for one JSON command envelope."""
+        if threading.get_ident() != self._tk_thread_id:
+            response: queue.Queue[dict] = queue.Queue(maxsize=1)
+            command_id, action = self._voice_command_identity(command)
+            item = (command, response)
+            queued = {
+                "command_id": command_id,
+                "status": "accepted",
+                "message": "command queued for GUI arbitration",
+            }
+            if command_id:
+                with self.pending_voice_lock:
+                    if command_id in self.pending_voice:
+                        return {
+                            "command_id": command_id,
+                            "status": "rejected",
+                            "message": "command_id is already pending in the GUI queue",
+                        }
+                    self.pending_voice[command_id] = queued
+            try:
+                self.voice_commands.put_nowait(item)
+            except queue.Full:
+                if action != "emergency_stop":
+                    if command_id:
+                        with self.pending_voice_lock:
+                            self.pending_voice.pop(command_id, None)
+                    return {
+                        "command_id": command_id,
+                        "status": "rejected",
+                        "message": "voice command queue is full; no command was queued",
+                    }
+                # ESTOP may replace a basic call that has not reached the GUI
+                # arbiter yet. Complete that caller as cancelled, then queue
+                # ESTOP as the only pending request.
+                try:
+                    pending_command, pending_response = self.voice_commands.get_nowait()
+                    pending_id, _ = self._voice_command_identity(pending_command)
+                    if pending_id:
+                        with self.pending_voice_lock:
+                            self.pending_voice.pop(pending_id, None)
+                    pending_response.put_nowait({
+                        "command_id": pending_id,
+                        "status": "cancelled",
+                        "message": "replaced by queued emergency_stop",
+                    })
+                except queue.Empty:
+                    pass
+                try:
+                    self.voice_commands.put_nowait(item)
+                except queue.Full:
+                    if command_id:
+                        with self.pending_voice_lock:
+                            self.pending_voice.pop(command_id, None)
+                    return {
+                        "command_id": command_id,
+                        "status": "rejected",
+                        "message": "could not prioritize emergency_stop in GUI queue",
+                    }
+            try:
+                return response.get(timeout=2.0)
+            except queue.Empty:
+                return {
+                    "command_id": command_id,
+                    "status": "accepted",
+                    "message": "command remains queued for GUI arbitration",
+                }
+        return self._execute_robot_command_on_gui(command)
+
+    @staticmethod
+    def _voice_command_identity(command: dict | str) -> tuple[str, str]:
+        try:
+            envelope = json.loads(command) if isinstance(command, str) else command
+        except (TypeError, json.JSONDecodeError):
+            return "", ""
+        if not isinstance(envelope, dict):
+            return "", ""
+        return str(envelope.get("command_id", "")), str(envelope.get("action", ""))
+
+    def get_robot_command_status(self, command_id: str) -> dict | None:
+        """Query the latest status after a voice command returned running/active."""
+        result = self.command_router.status(command_id)
+        if result is not None:
+            return result
+        with self.pending_voice_lock:
+            return self.pending_voice.get(command_id)
+
+    def _execute_robot_command_on_gui(self, command: dict | str) -> dict:
+        if isinstance(command, str):
+            result = self.command_router.submit_json_line(command, source_override="luvox")
+            self._append_log(f"[voice result] {result['status']}: {result['message']}")
+        else:
+            envelope = {**command, "source": "luvox"}
+            result = self.command_router.execute(envelope).as_dict()
+        if result.get("status") in ("running", "active", "completed"):
+            if result.get("action") in ("move", "turn", "set_height", "follow", "emergency_stop"):
+                self._clear_drive_inputs()
+                self.height_dir = 0
+        return result
+
+    def _send_estop(self) -> bool:
+        self._clear_drive_inputs()
+        self.height_dir = 0
+        self.session_active = False
+        return self.link.command_estop()
+
+    def _set_follow_state(self, enabled: bool) -> bool:
+        if enabled:
+            return self._start_vision_local()
+        self._stop_vision_local(self._follow_stop_status)
+        return True
+
     def toggle_vision(self) -> None:
-        if self.vision_process.running:
-            self.stop_vision("Vision: đã dừng")
-            return
-        if (not self.link.connected or not self.session_active or
-                self.mode_var.get() != "Balancing"):
-            self.vision_status_var.set("Vision cần ESP kết nối và đang Balance")
-            return
-        if self.held or self.joy_active:
+        enabled = not self.command_router.follow_active
+        if enabled and (self.held or self.joy_active):
             self.vision_status_var.set("Thả điều khiển tay trước khi bật Vision")
             return
+        self._follow_stop_status = "Vision: đã dừng"
+        result = self.command_router.execute({
+            "command_id": f"gui-follow-{time.time_ns()}",
+            "source": "manual_ui",
+            "action": "follow",
+            "args": {"enabled": enabled},
+        })
+        if result.status == "rejected" or result.status == "blocked":
+            self.vision_status_var.set(result.message)
+
+    def _start_vision_local(self) -> bool:
         try:
             self.vision_behavior = Vbc(
                 self.vision_motion,
                 VisionBehaviorConfig(
                     horizontal_fov_rad=VISION_HORIZONTAL_FOV_RAD,
-                    yaw_gain_s_inv=2.0,
+                    # The person tracker already applies a median + One Euro
+                    # filter to the box center. Keep this second filter short
+                    # so it does not add enough lag to miss a moving person.
+                    filter_time_constant_s=0.06,
+                    center_enter_rad=0.045,
+                    center_exit_rad=0.09,
+                    center_reacquire_confirm_s=0.10,
+                    yaw_gain_s_inv=2.2,
+                    yaw_derivative_time_s=0.18,
+                    bearing_rate_filter_time_constant_s=0.12,
+                    max_bearing_rate_rad_s=1.5,
                     max_yaw_rad_s=0.40,
-                    max_yaw_accel_rad_s2=1.8,
-                    approach_accel_m_s2=0.5,
+                    max_yaw_accel_rad_s2=1.5,
+                    approach_accel_m_s2=0.7,
                     yaw_sign=1.0,
-                    approach_speed_m_s=0.12,
+                    approach_speed_m_s=0.18,
+                    max_observation_age_s=0.18,
+                    range_filter_time_constant_s=0.08,
+                    range_rate_filter_time_constant_s=0.10,
+                    range_predict_time_s=0.18,
+                    max_range_rate_log_s=0.8,
+                    range_enter_error=0.035,
+                    range_exit_error=0.012,
+                    range_confirm_s=0.08,
+                    range_stop_dwell_s=0.10,
+                    range_min_speed_m_s=0.10,
                 ),
             )
             self.vision_record = None
             self.vision_process.start(source=VISION_CAMERA_SOURCE, show_window=True)
-            self.vision_status_var.set("Vision: mở camera, chờ vật thể xanh…")
+            self.vision_status_var.set("Vision: mở camera, chờ nhận diện người…")
+            return True
         except Exception as exc:
             self.vision_behavior = None
             self.vision_status_var.set(f"Vision lỗi: {exc}")
             self._append_log(f"[vision error] {exc}")
+            return False
 
     def stop_vision(self, status: str = "Vision: tắt") -> None:
+        self._follow_stop_status = status
+        if self.command_router.follow_active:
+            self.command_router.execute({
+                "command_id": f"gui-follow-off-{time.time_ns()}",
+                "source": "system",
+                "action": "follow",
+                "args": {"enabled": False},
+            })
+        else:
+            self._stop_vision_local(status)
+
+    def _stop_vision_local(self, status: str) -> None:
         self.vision_process.stop()
         if self.vision_behavior is not None:
             self.vision_behavior.update(None)
@@ -635,7 +865,7 @@ class TapSerialControlApp:
                 detail = (self.vision_process.errors[-1]
                           if self.vision_process.errors else "camera tracker đã thoát")
                 self.stop_vision(f"Vision lỗi: {detail}")
-            self.vision_button.configure(text="Theo dõi vật thể xanh")
+            self.vision_button.configure(text="Theo dõi người")
             return
         self.vision_button.configure(text="Dừng theo dõi")
         if self.mode_var.get() != "Balancing" or not self.session_active:
@@ -646,6 +876,29 @@ class TapSerialControlApp:
             self.vision_record = record
         target = self._vision_target(self.vision_record)
         usable = self.vision_behavior.update(target)
+        now = time.monotonic()
+        if self.vision_record is not None:
+            record_time = float(self.vision_record.get(
+                "timestamp_monotonic_s", now))
+            frame_age_ms = max(0.0, (now - record_time) * 1000.0)
+            processing_fps = self.vision_record.get("processing_fps")
+            inference_ms = self.vision_record.get("inference_ms")
+            offset_px = self.vision_record.get("horizontal_offset_px")
+            diagnostics = (
+                f"VISION track={self.vision_record.get('track_id')} "
+                f"state={self.vision_record.get('state')} "
+                f"dx_px={offset_px} fps={processing_fps} "
+                f"infer_ms={inference_ms} age_ms={frame_age_ms:.0f} "
+                f"bearing={self.vision_behavior.bearing_estimate_rad} "
+                f"bearing_rate={self.vision_behavior.bearing_rate_rad_s:+.3f} "
+                f"range_err={self.vision_behavior.range_error_log:+.3f} "
+                f"range_rate={self.vision_behavior.range_rate_log_s:+.3f} "
+                f"range_pred={self.vision_behavior.predicted_range_error_log:+.3f} "
+                f"linear={self.vision_behavior.linear_command_m_s:+.3f} "
+                f"yaw={self.vision_behavior.yaw_command_rad_s:+.3f}")
+            if now - self.last_vision_diag_log_s >= 0.20:
+                self.link.log_event(diagnostics)
+                self.last_vision_diag_log_s = now
         if usable:
             linear = self.vision_behavior.linear_command_m_s
             if linear > 0.0:
@@ -660,9 +913,18 @@ class TapSerialControlApp:
                 detail = "kích thước gần mốc — giảm tốc lùi"
             else:
                 detail = "đã ở vùng kích thước mục tiêu — giữ tiến/lùi"
-            self.vision_status_var.set(f"Vision: {detail}")
+            if self.vision_record is not None:
+                self.vision_status_var.set(
+                    f"Vision: {detail} · dx {offset_px:+.0f}px · "
+                    f"{float(processing_fps or 0.0):.1f} FPS · "
+                    f"age {frame_age_ms:.0f}ms · "
+                    f"yaw {self.vision_behavior.yaw_command_rad_s:+.2f}")
+            else:
+                self.vision_status_var.set(f"Vision: {detail}")
         else:
-            self.vision_status_var.set("Vision: mất dấu / frame cũ — đã gửi STOP")
+            self.vision_status_var.set(
+                "Vision: mất dấu / frame cũ — đã gửi STOP" if self.vision_record is None
+                else f"Vision: frame cũ {frame_age_ms:.0f}ms — đã gửi STOP")
 
     def _joy_release(self, _event: tk.Event) -> None:
         c = JOY_SIZE / 2
@@ -674,11 +936,32 @@ class TapSerialControlApp:
     def _height_hold(self, direction: int) -> None:
         if direction == self.height_dir:
             return
+        if direction and self.vision_process.running:
+            self.stop_vision("Vision: dừng để nhận điều khiển tay")
         self.height_dir = direction
-        self._send(f"HMOVE {direction}")
+        if not self.command_router.height_hold(direction):
+            self._append_log("Không thể nâng/hạ: cần ESP đang Balance và follower đã dừng.")
         self.last_hmove_sent = time.monotonic()
 
     def _tick(self) -> None:
+        while True:
+            try:
+                command, response = self.voice_commands.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                result = self._execute_robot_command_on_gui(command)
+                command_id, _ = self._voice_command_identity(command)
+                if command_id:
+                    with self.pending_voice_lock:
+                        self.pending_voice.pop(command_id, None)
+                response.put_nowait(result)
+            except Exception as exc:
+                command_id, _ = self._voice_command_identity(command)
+                if command_id:
+                    with self.pending_voice_lock:
+                        self.pending_voice.pop(command_id, None)
+                response.put_nowait({"status": "rejected", "message": str(exc)})
         while True:
             try:
                 line = self.incoming.get_nowait()
@@ -700,18 +983,20 @@ class TapSerialControlApp:
             if self.joy_active or self.held:
                 command = self._drive_command()
                 if (command != self.last_drive_cmd or now - self.last_drive_sent >= 0.2):
-                    self.link.send(command)
+                    forward, yaw = self._drive_values()
+                    self.command_router.command_velocity("manual_ui", forward, yaw)
                     self.last_drive_cmd = command
                     self.last_drive_sent = now
             # Height hold-to-run: the firmware stops if not refreshed in 0.3 s.
             if self.height_dir and now - self.last_hmove_sent >= HMOVE_REPEAT_S:
-                self.link.send(f"HMOVE {self.height_dir}")
+                self.command_router.height_hold(self.height_dir)
                 self.last_hmove_sent = now
         if self.link.connected and self.session_active and now - self.last_heartbeat >= HEARTBEAT_S:
             self.link.send("HEARTBEAT")
             self.last_heartbeat = now
         self._tick_vision()
-        self.root.after(50, self._tick)
+        self.command_router.update(now)
+        self.root.after(33, self._tick)
 
     def _parse_status(self, line: str) -> None:
         if line.startswith("TR "):
@@ -747,6 +1032,9 @@ class TapSerialControlApp:
             mode = match.group(1)
             self.mode_var.set(mode)
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")
+            if mode != "Balancing" and self.command_router.active_level > 0:
+                self.command_router.stop_all()
+                self._clear_drive_inputs()
             if mode != "Balancing" and (self.held or self.joy_active):
                 self._clear_drive_inputs()
                 self._send("STOP")
@@ -764,8 +1052,8 @@ class TapSerialControlApp:
                 f"UART bánh: {'OK' if match.group(2) == '1' else '—'}   "
                 f"Zero chân: {'OK' if match.group(3) == '1' else '—'}")
             self.imu_var.set(
-                f"IMU pitch: {float(match.group(4)):+.3f} rad   "
-                f"pitch rate: {float(match.group(5)):+.3f} rad/s")
+                f"IMU pitch: {float(match.group(5)):+.3f} rad   "
+                f"pitch rate: {float(match.group(6)):+.3f} rad/s")
 
     def _append_log(self, text: str) -> None:
         self.log.configure(state="normal")
@@ -778,6 +1066,7 @@ class TapSerialControlApp:
 
     def close(self) -> None:
         self.stop_vision("Vision: giao diện đóng")
+        self.command_router.stop_all()
         if self.link.connected and self.session_active:
             self.link.send("DISABLE")
         self.link.close()

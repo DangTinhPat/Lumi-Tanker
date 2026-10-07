@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detect and track blue regions from a webcam or video using OpenCV."""
+"""Detect and track people in a webcam or video using Ultralytics YOLO."""
 
 import argparse
 from collections import deque
@@ -10,35 +10,34 @@ import time
 
 import cv2
 import numpy as np
-from vision_tracker import ApparentAreaTrendFilter, BlueTargetTracker
+from vision_tracker import ApparentAreaTrendFilter, SingleTargetTracker
+
+
+DEFAULT_MODEL = Path(__file__).resolve().parents[1] / "yolov8n_1(1).onnx"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Detect and track blue-colored regions from a webcam/video."
+        description="Detect and track people with a local Ultralytics YOLO model."
     )
     parser.add_argument(
         "--source", default="/dev/video4",
         help="Camera device/path or video file (default: external webcam /dev/video4)."
     )
-    parser.add_argument("--min-area", type=float, default=300,
-                        help="Absolute minimum blue component area in pixels (default: 300).")
-    parser.add_argument("--min-area-fraction", type=float, default=0.002,
-                        help=("Relative minimum component area as a fraction of the processed "
-                              "frame (default: 0.002 = 0.2%%). The larger absolute/relative "
-                              "threshold is used."))
-    parser.add_argument("--hue-low", type=int, default=100,
-                        help="Lower OpenCV hue bound for blue, 0-179 (default: 100).")
-    parser.add_argument("--hue-high", type=int, default=132,
-                        help="Upper OpenCV hue bound for blue, 0-179 (default: 132).")
-    parser.add_argument("--min-saturation", type=int, default=110,
-                        help="Minimum saturation for blue pixels, 0-255 (default: 110).")
-    parser.add_argument("--min-value", type=int, default=20,
-                        help="Minimum brightness for blue pixels, 0-255 (default: 20).")
-    parser.add_argument("--max-value", type=int, default=190,
-                        help="Maximum brightness for dark blue pixels, 0-255 (default: 190).")
-    parser.add_argument("--lost-seconds", type=float, default=0.6,
-                        help="Keep a prediction briefly after detection is lost (default: 0.6).")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL,
+                        help="Ultralytics model file (default: local YOLOv8n ONNX).")
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="Square YOLO inference size; lower values are faster (default: 640).")
+    parser.add_argument("--confidence", type=float, default=0.20,
+                        help="Lowest person confidence kept for tracking (default: 0.20).")
+    parser.add_argument("--iou", type=float, default=0.45,
+                        help="NMS IoU threshold (default: 0.45).")
+    parser.add_argument("--min-area", type=float, default=200,
+                        help="Minimum person bounding-box area in pixels (default: 200).")
+    parser.add_argument("--min-area-fraction", type=float, default=0.0005,
+                        help="Minimum person box fraction of frame (default: 0.0005).")
+    parser.add_argument("--lost-seconds", type=float, default=0.8,
+                        help="Retain a track across brief detection gaps (default: 0.8).")
     parser.add_argument("--association-gate", type=float, default=75,
                         help="Base association distance in pixels for the tracker (default: 75).")
     parser.add_argument("--width", type=int, default=640,
@@ -47,8 +46,8 @@ def parse_args():
                         help="Maximum processing height in pixels (default: 480).")
     parser.add_argument("--fps", type=int, default=60,
                         help="Requested camera frame rate (default: 60).")
-    parser.add_argument("--process-fps", type=float, default=60.0,
-                        help="Maximum frames processed per second (default: 60).")
+    parser.add_argument("--process-fps", type=float, default=30.0,
+                        help="Maximum frames processed per second (default: 30).")
     parser.add_argument("--motion-window", type=float, default=0.8,
                         help="Seconds used to judge approach/recede from apparent area (default: 0.8).")
     parser.add_argument("--motion-threshold", type=float, default=0.10,
@@ -62,39 +61,68 @@ def parse_args():
     return parser.parse_args()
 
 
-def find_candidates(frame, min_area, hue_low, hue_high, min_saturation, min_value, max_value):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_blue = np.array([hue_low, min_saturation, min_value], dtype=np.uint8)
-    upper_blue = np.array([hue_high, 255, max_value], dtype=np.uint8)
-    color_mask = cv2.inRange(hsv, lower_blue, upper_blue)
-    mask = cv2.medianBlur(color_mask, 3)
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    # Close small gaps in a textured blue target before removing isolated specks.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
+class PersonDetector:
+    """Run Ultralytics YOLO once per frame and return only person detections."""
 
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
-    candidates = []
-    for label in range(1, count):
-        x, y, width, height, area = stats[label]
-        if area < min_area:
-            continue
-        center = tuple(np.round(centroids[label]).astype(int))
-        local_labels = labels[y:y + height, x:x + width]
-        component_mask = (local_labels == label).astype(np.uint8)
-        mean_saturation = cv2.mean(hsv[y:y + height, x:x + width, 1],
-                                   mask=component_mask)[0]
-        saturation_strength = np.clip(
-            (mean_saturation - min_saturation) / max(255 - min_saturation, 1), 0.0, 1.0
-        )
-        size_strength = min(float(area) / max(min_area * 4.0, 1.0), 1.0)
-        confidence = float(0.45 + 0.35 * saturation_strength + 0.20 * size_strength)
-        candidates.append({"box": (int(x), int(y), int(width), int(height)),
-                           "center": center, "area": int(area),
-                           "mean_saturation": float(mean_saturation),
-                           "confidence": confidence})
-    return candidates, mask
+    def __init__(self, model_path, image_size, confidence, iou):
+        model_path = Path(model_path).expanduser().resolve()
+        if not model_path.is_file():
+            raise FileNotFoundError(f"YOLO model not found: {model_path}")
+        if image_size <= 0 or image_size % 32:
+            raise ValueError("--imgsz must be a positive multiple of 32")
+        if not 0.0 < confidence < 1.0 or not 0.0 < iou < 1.0:
+            raise ValueError("--confidence and --iou must be between 0 and 1")
+
+        import torch
+        from ultralytics import YOLO
+
+        torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+        self.model = YOLO(str(model_path), task="detect")
+        self.confidence = confidence
+        self.iou = iou
+        self.image_size = image_size
+        names = self.model.names
+        self.person_ids = {
+            int(class_id) for class_id, name in names.items()
+            if str(name).strip().lower() == "person"
+        }
+        if not self.person_ids:
+            raise ValueError(f"Model has no 'person' class: {names}")
+        # Warm up so the first live frame does not include one-time setup cost.
+        self.model.predict(np.zeros((image_size, image_size, 3), dtype=np.uint8),
+                           imgsz=image_size, conf=confidence, iou=iou,
+                           classes=sorted(self.person_ids), device="cpu",
+                           verbose=False)
+
+    def __call__(self, frame, min_area):
+        result = self.model.predict(
+            frame, imgsz=self.image_size, conf=self.confidence, iou=self.iou,
+            classes=sorted(self.person_ids), device="cpu", verbose=False,
+        )[0]
+        candidates = []
+        boxes = result.boxes
+        if boxes is None:
+            return candidates
+        coordinates = boxes.xyxy.cpu().numpy()
+        confidences = boxes.conf.cpu().numpy()
+        class_ids = boxes.cls.cpu().numpy()
+        for (x1, y1, x2, y2), confidence, class_id in zip(
+                coordinates, confidences, class_ids):
+            if int(class_id) not in self.person_ids:
+                continue
+            x1, y1 = max(0, int(x1)), max(0, int(y1))
+            x2, y2 = min(frame.shape[1], int(x2)), min(frame.shape[0], int(y2))
+            width, height = x2 - x1, y2 - y1
+            area = width * height
+            if width <= 0 or height <= 0 or area < min_area:
+                continue
+            candidates.append({
+                "box": (x1, y1, width, height),
+                "center": (x1 + width // 2, y1 + height // 2),
+                "area": area,
+                "confidence": float(confidence),
+            })
+        return candidates
 
 
 def report(args, message):
@@ -102,7 +130,8 @@ def report(args, message):
 
 
 def emit_jsonl(timestamp, tracking, frame_size, motion_status, area_change,
-               horizontal_fov_rad=None):
+               horizontal_fov_rad=None, processing_fps=None,
+               inference_ms=None, frame_age_ms=None):
     height, width = frame_size
     visible = tracking["visible"]
     detection = tracking["detection"]
@@ -131,17 +160,15 @@ def emit_jsonl(timestamp, tracking, frame_size, motion_status, area_change,
         "depth_trend": motion_status if visible else "UNKNOWN",
         "area_change_fraction": area_change if visible else None,
         "age_since_seen_s": tracking["age_since_seen_s"],
+        "processing_fps": processing_fps,
+        "inference_ms": inference_ms,
+        "frame_age_ms": frame_age_ms,
     }
     print(json.dumps(record, separators=(",", ":")), flush=True)
 
 
 def main():
     args = parse_args()
-    if not (0 <= args.hue_low <= args.hue_high <= 179):
-        sys.exit("--hue-low and --hue-high must satisfy 0 <= low <= high <= 179")
-    if (not 0 <= args.min_saturation <= 255
-            or not 0 <= args.min_value <= args.max_value <= 255):
-        sys.exit("Require 0 <= --min-saturation <= 255 and 0 <= --min-value <= --max-value <= 255")
     if args.min_area < 0:
         sys.exit("--min-area must be non-negative")
     if not 0.0 <= args.min_area_fraction <= 1.0:
@@ -156,6 +183,8 @@ def main():
         sys.exit("--lost-seconds must be positive")
     if args.association_gate <= 0:
         sys.exit("--association-gate must be positive")
+
+    detector = PersonDetector(args.model, args.imgsz, args.confidence, args.iou)
 
     source = int(args.source) if args.source.isdecimal() else args.source
     is_v4l2_device = isinstance(source, str) and source.startswith("/dev/video")
@@ -187,7 +216,7 @@ def main():
         camera_matrix = dist_coeffs = None
         report(args, f"No calibration file at {calibration}; displaying uncorrected camera image.")
 
-    tracker = BlueTargetTracker(max_lost_s=args.lost_seconds,
+    tracker = SingleTargetTracker(max_lost_s=args.lost_seconds,
                                 base_gate_px=args.association_gate)
     area_history = deque()
     trend_filter = ApparentAreaTrendFilter(
@@ -203,27 +232,31 @@ def main():
     fps_window_start = time.monotonic()
     fps_window_frames = 0
     displayed_fps = 0.0
-    report(args, "Press q or Esc in the video window to quit.")
+    report(args, f"YOLO person detector ready: {args.model} @ {args.imgsz}px; "
+                  "press q or Esc to quit.")
 
     try:
         while True:
             ok, frame = capture.read()
             if not ok:
                 break
-            now = time.monotonic()
-            if now - last_processed_at < 1.0 / args.process_fps:
+            # Timestamp at acquisition, before resize/model/tracker work. Using
+            # inference completion time here hides model latency from VBC's
+            # stale-observation guard and makes filters lag behind the image.
+            timestamp = time.monotonic()
+            if timestamp - last_processed_at < 1.0 / args.process_fps:
                 continue
-            last_processed_at = now
+            last_processed_at = timestamp
             frame_count += 1
             fps_window_frames += 1
-            fps_elapsed = now - fps_window_start
+            fps_elapsed = timestamp - fps_window_start
             if fps_elapsed >= 0.5:
                 displayed_fps = fps_window_frames / fps_elapsed
-                fps_window_start = now
+                fps_window_start = timestamp
                 fps_window_frames = 0
 
             # Some cameras ignore requested capture dimensions. Resize while
-            # preserving the image aspect ratio before color processing.
+            # preserving the image aspect ratio before person detection.
             height, width = frame.shape[:2]
             scale = min(1.0, args.width / width, args.height / height)
             if scale < 1.0:
@@ -254,15 +287,11 @@ def main():
                     )
                 frame = cv2.remap(frame, map_x, map_y, interpolation=cv2.INTER_LINEAR)
 
-            min_area_px = max(
-                args.min_area,
-                int(np.ceil(frame.shape[0] * frame.shape[1] * args.min_area_fraction)),
-            )
-            candidates, mask = find_candidates(
-                frame, min_area_px, args.hue_low, args.hue_high,
-                args.min_saturation, args.min_value, args.max_value
-            )
-            timestamp = time.monotonic()
+            min_area_px = max(args.min_area, int(np.ceil(
+                frame.shape[0] * frame.shape[1] * args.min_area_fraction)))
+            inference_started = time.monotonic()
+            candidates = detector(frame, min_area_px)
+            inference_ms = (time.monotonic() - inference_started) * 1000.0
             tracking = tracker.update(candidates, timestamp)
             target = tracking["detection"]
             height, width = frame.shape[:2]
@@ -285,24 +314,32 @@ def main():
                     motion_status = "MEASURING"
                     trend_filter.reset()
 
-                cv2.rectangle(frame, (x, y), (x + box_width, y + box_height), (0, 255, 0), 2)
+                box_color = (0, 165, 255) if tracking["state"] == "COASTING" else (0, 255, 0)
+                cv2.rectangle(frame, (x, y), (x + box_width, y + box_height), box_color, 2)
                 cv2.line(frame, (frame_center[0], tracked[1]), tracked, (255, 100, 0), 2)
                 dx, dy = tracked[0] - frame_center[0], tracked[1] - frame_center[1]
                 distance_x = abs(dx)
-                cv2.putText(frame, f"BLUE TARGET  dx={dx:+} px  distance={distance_x} px",
+                cv2.putText(frame, f"PERSON  dx={dx:+} px  distance={distance_x} px",
                             (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0), 2)
                 cv2.putText(frame, f"Depth trend: {motion_status}  area change={area_change:+.0%}",
                             (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 255), 2)
-                cv2.putText(frame, f"track={tracking['track_id']} confidence={tracking['confidence']:.2f}",
+                state_label = "brief prediction" if tracking["state"] == "COASTING" else "tracking"
+                cv2.putText(frame, f"{state_label} id={tracking['track_id']} "
+                            f"confidence={tracking['confidence']:.2f}",
                             (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 2)
                 if args.output_format == "jsonl":
-                    emit_jsonl(timestamp, tracking, (height, width), motion_status,
-                               area_change, horizontal_fov_rad)
+                    emit_jsonl(
+                        timestamp, tracking, (height, width), motion_status,
+                        area_change, horizontal_fov_rad, displayed_fps,
+                        inference_ms, (time.monotonic() - timestamp) * 1000.0)
                 elif frame_count % 10 == 0:
                     print(f"center_x={tracked[0]} center_y={tracked[1]} "
                           f"horizontal_offset_px={dx} horizontal_distance_px={distance_x} "
+                          f"state={tracking['state']} "
                           f"depth_trend={motion_status} area_change={area_change:+.1%} "
-                          f"confidence={tracking['confidence']:.2f}", flush=True)
+                          f"confidence={tracking['confidence']:.2f} "
+                          f"fps={displayed_fps:.1f} inference_ms={inference_ms:.1f}",
+                          flush=True)
             else:
                 area_history.clear()
                 trend_filter.reset()
@@ -310,7 +347,7 @@ def main():
                     x, y, box_width, box_height = target["box"]
                     cv2.rectangle(frame, (x, y), (x + box_width, y + box_height),
                                   (0, 200, 255), 1)
-                    cv2.putText(frame, "Confirming blue target...", (10, 28),
+                    cv2.putText(frame, "Confirming person...", (10, 28),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 200, 255), 2)
                 elif tracking["state"] == "COASTING":
                     cv2.putText(frame, "TARGET LOST - reacquiring", (10, 28),
@@ -318,23 +355,26 @@ def main():
                 else:
                     motion_status = "SEARCHING"
                     area_change = 0.0
-                    cv2.putText(frame, "Blue target not found", (10, 28),
+                    cv2.putText(frame, "Person not found", (10, 28),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if args.output_format == "jsonl":
-                    emit_jsonl(timestamp, tracking, (height, width), motion_status,
-                               area_change, horizontal_fov_rad)
+                    emit_jsonl(
+                        timestamp, tracking, (height, width), motion_status,
+                        area_change, horizontal_fov_rad, displayed_fps,
+                        inference_ms, (time.monotonic() - timestamp) * 1000.0)
                 elif frame_count % 10 == 0:
                     print(f"target_visible=false state={tracking['state']} "
                           f"age_since_seen_s={tracking['age_since_seen_s']}", flush=True)
 
             if not args.no_window:
-                cv2.putText(frame, f"Processing: {displayed_fps:.0f} FPS",
+                cv2.putText(frame, f"Processing: {displayed_fps:.0f} FPS  "
+                            f"YOLO: {inference_ms:.0f} ms",
                             (max(10, width - 190), 28), cv2.FONT_HERSHEY_SIMPLEX,
                             0.58, (255, 255, 255), 2)
-                cv2.putText(frame, f"Min area: {min_area_px}px",
+                cv2.putText(frame, f"YOLO input: {args.imgsz}px; min box: {min_area_px}px",
                             (10, max(20, height - 12)), cv2.FONT_HERSHEY_SIMPLEX,
                             0.52, (255, 255, 255), 2)
-                cv2.imshow("Blue color tracking", frame)
+                cv2.imshow("YOLOv8n person tracking", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
                     break

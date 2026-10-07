@@ -52,9 +52,11 @@ class MotionLimits:
 class MotionAPI:
     """Velocity commands plus nonblocking encoder-odometry motion actions."""
 
-    def __init__(self, backend, limits: MotionLimits = MotionLimits()):
+    def __init__(self, backend, limits: MotionLimits = MotionLimits(),
+                 require_station_capture: bool = True):
         self.backend = backend
         self.limits = limits
+        self.require_station_capture = require_station_capture
         self.action_status = ActionStatus.IDLE
         self._action_kind = ""
         self._action_start_s = 0.0
@@ -85,8 +87,9 @@ class MotionAPI:
                      min(self.limits.max_linear_m_s, linear_m_s))
         yaw = max(-self.limits.max_yaw_rad_s,
                   min(self.limits.max_yaw_rad_s, yaw_rad_s))
-        self.backend.command_drive(linear, yaw)
-        return True
+        # Hardware backends return False when the serial write fails. Native
+        # simulation backends historically return None, which means success.
+        return self.backend.command_drive(linear, yaw) is not False
 
     def forward(self, speed_m_s: float = 0.10,
                 distance_m: float | None = None,
@@ -146,12 +149,12 @@ class MotionAPI:
                 angle_rad, abs(yaw_rate_rad_s), tolerance_rad, timeout_s, 0.80)
         return self.command_velocity(0.0, yaw_rate_rad_s)
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         """Request the native runner's stationary stop behavior."""
         if self.action_status == ActionStatus.RUNNING:
             self.action_status = ActionStatus.CANCELLED
         self._action_kind = ""
-        self.backend.command_stop()
+        return self.backend.command_stop() is not False
 
     def _start_distance_action(self, distance_m: float, speed_m_s: float,
                                tolerance_m: float,
@@ -254,18 +257,20 @@ class MotionAPI:
         speed = min(self._action_max_rate,
                     math.sqrt(2.0 * self._action_decel * abs(remaining)))
         signed_speed = math.copysign(speed, remaining)
-        if self._action_kind == "distance":
-            self._send_velocity(signed_speed, 0.0)
-        else:
-            self._send_velocity(0.0, signed_speed)
+        sent = (self._send_velocity(signed_speed, 0.0)
+                if self._action_kind == "distance"
+                else self._send_velocity(0.0, signed_speed))
+        if not sent:
+            self._end_action(ActionStatus.REJECTED)
         return self.action_status
 
-    def cancel_action(self) -> None:
+    def cancel_action(self) -> bool:
         """Cancel an active finite action and request a stationary stop."""
         if self.action_status == ActionStatus.RUNNING:
             self.action_status = ActionStatus.CANCELLED
             self._action_kind = ""
-            self.backend.command_stop()
+            return self.backend.command_stop() is not False
+        return True
 
     def _begin_action(self, kind: str, target: float, tolerance: float,
                       max_rate: float, decel: float, timeout: float,
@@ -293,8 +298,9 @@ class MotionAPI:
             return None
         if fields.get("mode") != "Balance":
             return None
-        if (fields.get("station_eligible") != "1" or
-                fields.get("station_capture_ready") != "1"):
+        if (self.require_station_capture and
+                (fields.get("station_eligible") != "1" or
+                 fields.get("station_capture_ready") != "1")):
             return None
         try:
             values = {key: float(fields[key]) for key in keys}
@@ -313,6 +319,8 @@ class MotionAPI:
         return False
 
     def _end_action(self, status: ActionStatus) -> None:
-        self.backend.command_stop()
+        stopped = self.backend.command_stop() is not False
+        if status == ActionStatus.COMPLETED and not stopped:
+            status = ActionStatus.REJECTED
         self._action_kind = ""
         self.action_status = status

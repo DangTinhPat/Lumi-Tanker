@@ -1,21 +1,28 @@
-"""Subprocess bridge from the standalone blue-target tracker to the dashboard."""
+"""Subprocess bridge from the YOLOv8 person detector to the dashboard."""
 
 from __future__ import annotations
 
 from collections import deque
 import json
 import math
+import os
 from pathlib import Path
 import queue
 import subprocess
-import sys
 import threading
 from typing import Optional
+
+
+DEFAULT_MODEL = Path(__file__).resolve().parents[3] / "yolov8n_1(1).onnx"
+DEFAULT_VISION_PYTHON = (
+    Path.home() / "Downloads/yolov5-master/yolov5-master/.venv/bin/python"
+)
 
 
 def calibrated_horizontal_fov(calibration_path: Path) -> float:
     """Load rectified horizontal FOV from the camera calibration archive."""
     import cv2
+    import numpy as np
 
     with np.load(calibration_path) as calibration:
         if "horizontal_fov_rad" in calibration:
@@ -33,11 +40,15 @@ def calibrated_horizontal_fov(calibration_path: Path) -> float:
     return fov
 
 
-class BlueVisionProcess:
-    """Own one tracker child and expose its latest JSONL measurement."""
+class PersonVisionProcess:
+    """Own one person detector child and expose its latest JSONL measurement."""
 
     def __init__(self, vision_dir: Path):
         self.vision_dir = Path(vision_dir)
+        self.python_executable = Path(os.environ.get(
+            "LUMI_VISION_PYTHON", DEFAULT_VISION_PYTHON)).expanduser()
+        self.model = Path(os.environ.get(
+            "LUMI_PERSON_MODEL", DEFAULT_MODEL)).expanduser()
         self.process: Optional[subprocess.Popen[str]] = None
         self.records: queue.Queue[dict] = queue.Queue(maxsize=4)
         self.errors = deque(maxlen=20)
@@ -53,9 +64,17 @@ class BlueVisionProcess:
         script = self.vision_dir / "track_black_square.py"
         if not script.is_file():
             raise RuntimeError(f"vision tracker is missing: {script}")
+        if not self.python_executable.is_file():
+            raise RuntimeError(
+                f"YOLO Python interpreter not found: {self.python_executable}; "
+                "set LUMI_VISION_PYTHON to an environment with ultralytics and onnxruntime")
+        if not self.model.is_file():
+            raise RuntimeError(
+                f"YOLO model not found: {self.model}; set LUMI_PERSON_MODEL to the model file")
         self.records = queue.Queue(maxsize=4)
         self.errors = deque(maxlen=20)
-        command = [sys.executable, str(script), "--source", source,
+        command = [str(self.python_executable), str(script), "--source", source,
+                   "--model", str(self.model),
                    "--output-format", "jsonl"]
         if not show_window:
             command.append("--no-window")

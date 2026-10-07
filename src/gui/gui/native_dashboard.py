@@ -12,7 +12,7 @@ from tkinter import ttk
 from .native_backend import NativeBackend
 from .motion_api import MotionAPI, MotionLimits
 from .vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
-from .vision_process import BlueVisionProcess, calibrated_horizontal_fov
+from .vision_process import PersonVisionProcess, calibrated_horizontal_fov
 
 BG = "#16181d"
 CARD = "#22252e"
@@ -77,7 +77,7 @@ class NativeDashboard:
         # including ball following, use the lower conservative API defaults.
         self.motion = MotionAPI(
             backend, limits=MotionLimits(max_linear_m_s=1.0, max_yaw_rad_s=0.8))
-        self.vision_process = BlueVisionProcess(
+        self.vision_process = PersonVisionProcess(
             self.backend.root / "blue_object_vision")
         self.vision_behavior = None
         self.vision_last_record = None
@@ -178,7 +178,7 @@ class NativeDashboard:
         ttk.Button(drive, text="Reset mô phỏng", command=self.reset).pack(
             fill="x", pady=(4, 0))
         self.vision_button = ttk.Button(
-            drive, text="Theo dõi vật thể xanh", command=self.toggle_vision,
+            drive, text="Theo dõi người", command=self.toggle_vision,
             state="disabled")
         self.vision_button.pack(fill="x", pady=(6, 0))
         self.vision_status = tk.StringVar(value="Vision: tắt")
@@ -774,7 +774,7 @@ class NativeDashboard:
                    else "disabled"))
         self.vision_button.configure(
             text="Dừng theo dõi" if self.vision_process.running
-            else "Theo dõi vật thể xanh",
+            else "Theo dõi người",
             state=("normal" if self.backend.running and self.enabled and not self.estop
                    else "disabled"))
         self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop") else WARN)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Follow a visible blue target through an existing ESP32 serial FIFO."""
+"""Follow a visible person through an existing ESP32 serial FIFO."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src" / "gui"))
 from gui.fifo_motion_backend import FifoMotionBackend
 from gui.motion_api import MotionAPI, MotionLimits
 from gui.vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
-from gui.vision_process import BlueVisionProcess, calibrated_horizontal_fov
+from gui.vision_process import PersonVisionProcess, calibrated_horizontal_fov
 
 
 def parse_args(argv=None):
@@ -80,12 +80,22 @@ def main(argv=None):
             yaw_gain_s_inv=2.0,
             max_yaw_rad_s=0.40,
             max_yaw_accel_rad_s2=1.8,
-            approach_accel_m_s2=0.5,
-            approach_speed_m_s=0.12,
+            approach_accel_m_s2=0.7,
+            approach_speed_m_s=0.18,
+            max_observation_age_s=0.18,
+            range_filter_time_constant_s=0.08,
+            range_rate_filter_time_constant_s=0.10,
+            range_predict_time_s=0.18,
+            max_range_rate_log_s=0.8,
+            range_enter_error=0.035,
+            range_exit_error=0.012,
+            range_confirm_s=0.08,
+            range_stop_dwell_s=0.10,
+            range_min_speed_m_s=0.10,
             yaw_sign=args.yaw_sign,
         ),
     )
-    vision = BlueVisionProcess(ROOT / "blue_object_vision")
+    vision = PersonVisionProcess(ROOT / "blue_object_vision")
     vision.start(source=args.camera_source)
     print("Vision following active; it sends bounded DRIVE only and never START/GO.")
     print("Press Ctrl-C to send STOP and exit.", flush=True)
