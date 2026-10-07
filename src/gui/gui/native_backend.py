@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from typing import Dict, Optional
 
 
@@ -30,6 +31,7 @@ class NativeBackend:
         self.process: Optional[subprocess.Popen[str]] = None
         self.lines: queue.Queue[str] = queue.Queue()
         self.telemetry: Dict[str, str] = {}
+        self.telemetry_received_monotonic_s = 0.0
         self.view: Dict[str, str] = {}
         self.log = deque(maxlen=200)
         self._reader: Optional[threading.Thread] = None
@@ -155,6 +157,7 @@ class NativeBackend:
             count += 1
             if line.startswith("STATE|"):
                 self.telemetry = self._parse(line)
+                self.telemetry_received_monotonic_s = time.monotonic()
             elif line.startswith("VIEW|"):
                 self.view = self._parse(line)
                 self._sync_mujoco_viewer()

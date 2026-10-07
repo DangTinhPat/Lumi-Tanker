@@ -10,6 +10,9 @@ import tkinter as tk
 from tkinter import ttk
 
 from .native_backend import NativeBackend
+from .motion_api import MotionAPI, MotionLimits
+from .vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
+from .vision_process import BlueVisionProcess, calibrated_horizontal_fov
 
 BG = "#16181d"
 CARD = "#22252e"
@@ -70,6 +73,15 @@ class NativeDashboard:
     def __init__(self, root: tk.Tk, backend: NativeBackend):
         self.root = root
         self.backend = backend
+        # Retain this dashboard's existing command envelope. Other callers,
+        # including ball following, use the lower conservative API defaults.
+        self.motion = MotionAPI(
+            backend, limits=MotionLimits(max_linear_m_s=1.0, max_yaw_rad_s=0.8))
+        self.vision_process = BlueVisionProcess(
+            self.backend.root / "blue_object_vision")
+        self.vision_behavior = None
+        self.vision_last_record = None
+        self.vision_fov_rad = None
         self.enabled = False
         self.estop = False
         self.drive = (0.0, 0.0)
@@ -165,6 +177,13 @@ class NativeDashboard:
                  length=150).pack(fill="x")
         ttk.Button(drive, text="Reset mô phỏng", command=self.reset).pack(
             fill="x", pady=(4, 0))
+        self.vision_button = ttk.Button(
+            drive, text="Theo dõi vật thể xanh", command=self.toggle_vision,
+            state="disabled")
+        self.vision_button.pack(fill="x", pady=(6, 0))
+        self.vision_status = tk.StringVar(value="Vision: tắt")
+        ttk.Label(drive, textvariable=self.vision_status,
+                  style="Card.TLabel").pack(anchor="w", pady=(3, 0))
 
         posture = ttk.LabelFrame(toolbar, text="Chiều cao thân", style="Card.TLabelframe", padding=10)
         posture.grid(row=0, column=1, sticky="nsew")
@@ -336,6 +355,7 @@ class NativeDashboard:
     def toggle(self):
         try:
             if self.backend.running:
+                self.stop_vision("Vision: mô phỏng đã dừng")
                 self.stop_skill()
                 self.backend.stop()
                 self.enabled = False
@@ -373,6 +393,7 @@ class NativeDashboard:
             self.enable()
 
     def disable(self):
+        self.stop_vision("Vision: robot đã disable")
         self._cancel_pending_posture()
         self.stop_skill()
         self.backend.send("DISABLE")
@@ -381,6 +402,7 @@ class NativeDashboard:
         self.stop_drive()
 
     def reset(self):
+        self.stop_vision("Vision: reset")
         self._cancel_pending_posture()
         self.stop_skill()
         was_enabled = self.enabled and not self.estop
@@ -393,6 +415,7 @@ class NativeDashboard:
             self.enabled = True
 
     def emergency_stop(self):
+        self.stop_vision("Vision: ESTOP")
         self._cancel_pending_posture()
         self.stop_skill()
         self.backend.send("ESTOP")
@@ -401,9 +424,10 @@ class NativeDashboard:
 
     def stand_up(self):
         if self.backend.running and not self.estop:
+            self.stop_vision("Vision: stand up")
             self._cancel_pending_posture()
             self.stop_skill()
-            self.backend.command_drive(0.0, 0.0)
+            self.motion.command_velocity(0.0, 0.0)
             self.backend.send("STAND_UP")
 
     def clear_estop(self):
@@ -415,6 +439,8 @@ class NativeDashboard:
         self.speed_readout.set(f"{float(self.speed.get()):.2f} m/s")
 
     def set_drive(self, forward: float, yaw: float):
+        if (forward != 0.0 or yaw != 0.0) and self.vision_process.running:
+            self.stop_vision("Vision: dừng để nhận điều khiển tay")
         if self.enabled and not self.estop:
             fields = self.backend.telemetry
             drive_ready = (fields.get("mode") == "Balance" and
@@ -428,6 +454,104 @@ class NativeDashboard:
         if forward != 0.0 or yaw != 0.0:
             self._drive_stop_latched = False
         self.drive = (forward * float(self.speed.get()), yaw * float(self.yaw.get()))
+
+    def toggle_vision(self):
+        if self.vision_process.running:
+            self.stop_vision("Vision: đã dừng")
+            return
+        if not self.backend.running or not self.enabled or self.estop:
+            self.vision_status.set("Vision cần SIM đang chạy và robot ENABLE")
+            return
+        fields = self.backend.telemetry
+        ready = (fields.get("mode") == "Balance" and
+                 fields.get("station_eligible") == "1" and
+                 fields.get("station_capture_ready") == "1" and
+                 time.monotonic() - self.backend.telemetry_received_monotonic_s < 0.25)
+        if not ready:
+            self.vision_status.set("Vision chờ Balance và station capture sẵn sàng")
+            return
+
+        calibration = (self.backend.root / "blue_object_vision" /
+                       "camera_calibration.npz")
+        if not calibration.is_file():
+            self.vision_status.set(
+                "Thiếu FOV: python3 blue_object_vision/calibrate_camera.py")
+            return
+        try:
+            self.vision_fov_rad = calibrated_horizontal_fov(calibration)
+            self.vision_behavior = Vbc(
+                self.motion,
+                VisionBehaviorConfig(horizontal_fov_rad=self.vision_fov_rad),
+            )
+            self.stop_skill()
+            self.vision_process.start(source="/dev/video4")
+        except (ImportError, OSError, RuntimeError, ValueError, KeyError) as exc:
+            self.vision_behavior = None
+            self.vision_status.set(f"Vision lỗi: {exc}")
+            self.backend.log.append(f"ERROR|vision={exc}")
+            return
+
+        self.vision_last_record = None
+        self._drive_button_active = False
+        self._drive_stop_latched = True
+        self.drive = (0.0, 0.0)
+        self.motion.stop()
+        self.vision_status.set("Vision: mở camera, chờ mục tiêu...")
+
+    def stop_vision(self, status="Vision: tắt"):
+        self.vision_process.stop()
+        if self.vision_behavior is not None:
+            self.vision_behavior.update(None)
+        self.vision_behavior = None
+        self.vision_last_record = None
+        self.vision_status.set(status)
+
+    def _tick_vision(self):
+        if not self.vision_process.running:
+            if self.vision_behavior is not None:
+                error = (self.vision_process.errors[-1]
+                         if self.vision_process.errors else "process đã thoát")
+                self.stop_vision(f"Vision lỗi: {error}")
+            return
+        fields = self.backend.telemetry
+        telemetry_age = time.monotonic() - self.backend.telemetry_received_monotonic_s
+        if (not self.enabled or self.estop or not self.backend.running or
+                fields.get("mode") not in ("Balance", "Drive") or
+                telemetry_age < 0.0 or telemetry_age > 0.25):
+            self.stop_vision("Vision dừng: robot hoặc telemetry không sẵn sàng")
+            return
+
+        record = self.vision_process.read_latest()
+        if not self.vision_process.running:
+            error = (self.vision_process.errors[-1]
+                     if self.vision_process.errors else "process đã thoát")
+            self.stop_vision(f"Vision lỗi: {error}")
+            return
+        if record is not None:
+            self.vision_last_record = record
+        record = self.vision_last_record
+        target = None
+        if record is not None and record.get("target_visible") is True:
+            try:
+                target = VisionTarget(
+                    horizontal_error_px=float(record["horizontal_offset_px"]),
+                    image_width_px=float(record["image_width_px"]),
+                    observed_at_s=float(record["timestamp_monotonic_s"]),
+                    horizontal_fov_rad=float(record["horizontal_fov_rad"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                target = None
+        usable = self.vision_behavior.update(target)
+        if usable:
+            self.vision_status.set(
+                f"Vision: đang căn giữa · lệch {target.horizontal_error_px:+.0f} px")
+        elif record is None:
+            self.vision_status.set("Vision: chờ frame đầu tiên...")
+        elif record.get("target_visible") is False:
+            self.vision_status.set(
+                f"Vision: chưa thấy mục tiêu ({record.get('state', 'SEARCHING')})")
+        else:
+            self.vision_status.set("Vision: dữ liệu lỗi hoặc đã cũ; robot đã dừng")
 
     def _drive_press(self, forward: float, yaw: float):
         self._drive_button_active = True
@@ -443,7 +567,7 @@ class NativeDashboard:
         self.stop_skill()
         self.drive = (0.0, 0.0)
         self._drive_stop_latched = True
-        self.backend.command_stop()
+        self.motion.stop()
 
     def _posture_capture_ready(self):
         fields = self.backend.telemetry
@@ -594,6 +718,8 @@ class NativeDashboard:
             self.show_started_s = None
 
     def stop_skill(self):
+        if self.vision_process.running:
+            self.stop_vision("Vision: dừng do lệnh operator")
         if self.dance_active:
             self.backend.command_dance_stop()
             self.dance_active = False
@@ -603,6 +729,7 @@ class NativeDashboard:
     def start_dance(self, direction=1.0):
         if not self.backend.running or not self.enabled or self.estop:
             return
+        self.stop_vision("Vision: dừng do lệnh dance")
         self._cancel_pending_posture()
         self.show_started_s = None
         self.drive = (0.0, 0.0)
@@ -629,6 +756,7 @@ class NativeDashboard:
 
     def tick(self):
         self.backend.drain()
+        self._tick_vision()
         fields = self.backend.telemetry
         if (self._posture_last_sent_height is not None and
                 (fields.get("height_rejected") == "1" or
@@ -643,6 +771,11 @@ class NativeDashboard:
         self.enable_button.configure(
             text="DISABLE" if self.enabled and not self.estop else "ENABLE",
             state=("normal" if self.backend.running and not self.estop
+                   else "disabled"))
+        self.vision_button.configure(
+            text="Dừng theo dõi" if self.vision_process.running
+            else "Theo dõi vật thể xanh",
+            state=("normal" if self.backend.running and self.enabled and not self.estop
                    else "disabled"))
         self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop") else WARN)
         self.viewer_status.set(
@@ -665,12 +798,15 @@ class NativeDashboard:
         if self.show_started_s is not None and self.backend.running and self.enabled and not self.estop:
             pose = self._show_pose(time.monotonic() - self.show_started_s)
             self.backend.command_pose(*pose)
+        elif (self.vision_process.running):
+            pass
         elif (self.enabled and self.backend.running and not self.estop and
               not self.dance_active and not self._drive_stop_latched):
-            self.backend.command_drive(*self.drive)
+            self.motion.command_velocity(*self.drive)
         self.root.after(20, self.tick)
 
     def close(self):
+        self.stop_vision("Vision: dashboard đóng")
         self.disable()
         self.backend.stop()
         self.root.destroy()

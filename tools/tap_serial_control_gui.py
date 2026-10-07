@@ -4,18 +4,30 @@
 Run with: python3 tools/tap_serial_control_gui.py
 Requires pyserial and Tkinter. The GUI sends START / DRIVE / STOP / DISABLE /
 ESTOP commands to the firmware console and displays its serial diagnostics.
+The blue-target follower is a GUI toggle that sends DRIVE/STOP over the same
+serial link and leaves the balance session active when tracking stops.
 """
 
 from __future__ import annotations
 
 import glob
+import math
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src" / "gui"))
+
+from gui.motion_api import MotionAPI, MotionLimits
+from gui.vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
+from gui.vision_process import BlueVisionProcess
 
 try:
     import serial
@@ -34,6 +46,10 @@ HMOVE_REPEAT_S = 0.10   # firmware stops a height move not refreshed in 0.3 s
 JOY_SIZE = 180          # joystick canvas [px]
 JOY_KNOB = 18           # knob radius [px]
 JOY_DEADZONE = 0.08
+VISION_CAMERA_SOURCE = "/dev/video4"
+# Approximate FOV is sufficient for a small image-centering test; it is not a
+# distance or camera pose measurement.
+VISION_HORIZONTAL_FOV_RAD = math.radians(60.0)
 MODE_RE = re.compile(r"CONTROL mode=(\S+) enable=(\d+)")
 ALGO_RE = re.compile(r"V3 TUNE algo=(LQR|PID|WB)\b")
 SENS_RE = re.compile(
@@ -97,6 +113,12 @@ class SerialLink:
             except (OSError, serial.SerialException) as exc:
                 self.incoming.put(f"[serial write error] {exc}")
                 return False
+
+    def command_drive(self, velocity: float, yaw_rate: float) -> None:
+        self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
+
+    def command_stop(self) -> None:
+        self.send("STOP")
 
     def close(self) -> None:
         self.stop_event.set()
@@ -164,6 +186,12 @@ class TapSerialControlApp:
         self.last_hmove_sent = 0.0
         self.height_var = tk.StringVar(value="Chiều cao: —")
         self.tier_var = tk.StringVar(value="Tầng 2: —")
+        self.vision_process = BlueVisionProcess(ROOT / "blue_object_vision")
+        self.vision_motion = MotionAPI(
+            self.link, limits=MotionLimits(max_linear_m_s=0.20, max_yaw_rad_s=0.40))
+        self.vision_behavior: Vbc | None = None
+        self.vision_record: dict | None = None
+        self.vision_status_var = tk.StringVar(value="Vision: tắt")
 
         self._build_ui()
         self.root.bind("<KeyPress>", self._key_press)
@@ -204,7 +232,7 @@ class TapSerialControlApp:
         ttk.Label(status, textvariable=self.feedback_var).grid(
             row=3, column=0, columnspan=4, sticky="w", pady=(5, 0))
 
-        actions = ttk.LabelFrame(self.root, text="Khởi động và dừng", padding=10)
+        actions = ttk.LabelFrame(self.root, text="Khởi động, dừng và di chuyển", padding=10)
         actions.pack(fill="x", padx=10, pady=8)
         self.start_button = ttk.Button(actions, text="▶ START / RELEASE",
                                        command=self.start, state="disabled")
@@ -232,6 +260,14 @@ class TapSerialControlApp:
             button.bind("<ButtonRelease-1>", lambda _e: self._height_hold(0))
         ttk.Label(actions, textvariable=self.height_var).grid(
             row=2, column=4, padx=4, pady=3, sticky="w")
+        self._direction_button(actions, "▲ TIẾN (giữ)", "up", 3, 0, columnspan=2)
+        self._direction_button(actions, "▼ LÙI (giữ)", "down", 3, 3, columnspan=2)
+        self.vision_button = ttk.Button(
+            actions, text="Theo dõi vật thể xanh", command=self.toggle_vision)
+        self.vision_button.grid(row=4, column=0, columnspan=5, padx=4, pady=(8, 2),
+                                sticky="ew")
+        ttk.Label(actions, textvariable=self.vision_status_var).grid(
+            row=5, column=0, columnspan=5, padx=4, pady=(0, 3), sticky="w")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
 
@@ -295,8 +331,7 @@ class TapSerialControlApp:
         self.joy.bind("<ButtonRelease-1>", self._joy_release)
         ttk.Label(drive, text="Kéo joystick bằng chuột (thả ra là dừng). Phím W/A/S/D vẫn dùng "
                               "được; R/F giữ để nâng/hạ chiều cao.").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
-
+            row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
         warning = ttk.Label(
             self.root,
             text="START yêu cầu firmware enable motor; nếu build đang khóa Enable, lý do sẽ hiện "
@@ -322,9 +357,10 @@ class TapSerialControlApp:
         return result
 
     def _direction_button(self, parent: ttk.Frame, text: str, direction: str,
-                          row: int, column: int) -> None:
+                          row: int, column: int, columnspan: int = 1) -> None:
         button = ttk.Button(parent, text=text, width=16)
-        button.grid(row=row, column=column, padx=4, pady=3, ipadx=6, ipady=6)
+        button.grid(row=row, column=column, columnspan=columnspan,
+                    padx=4, pady=3, ipadx=6, ipady=6, sticky="ew")
         button.bind("<ButtonPress-1>",
                     lambda _event, key=direction: self._hold(key))
         button.bind("<ButtonRelease-1>",
@@ -414,16 +450,19 @@ class TapSerialControlApp:
         self.last_heartbeat = time.monotonic()
 
     def stop_drive(self) -> None:
-        self.held.clear()
+        self.stop_vision("Vision: đã dừng")
+        self._clear_drive_inputs()
         self._send("STOP")
 
     def disable(self) -> None:
-        self.held.clear()
+        self.stop_vision("Vision: dừng do DISABLE")
+        self._clear_drive_inputs()
         self.session_active = False
         self._send("DISABLE")
 
     def estop(self) -> None:
-        self.held.clear()
+        self.stop_vision("Vision: dừng do ESTOP")
+        self._clear_drive_inputs()
         self.session_active = False
         self._send("ESTOP")
 
@@ -432,6 +471,12 @@ class TapSerialControlApp:
         self._send("CLEAR_ESTOP")
 
     def _hold(self, direction: str) -> None:
+        if (not self.link.connected or not self.session_active or
+                self.mode_var.get() != "Balancing"):
+            self._append_log("Chỉ điều khiển tiến/lùi khi ESP đang Balance.")
+            return
+        if self.vision_process.running:
+            self.stop_vision("Vision: dừng để nhận điều khiển tay")
         if direction not in self.held:
             self.held.add(direction)
             self._publish_drive()
@@ -442,11 +487,18 @@ class TapSerialControlApp:
 
     def _release_all(self) -> None:
         if self.held or self.joy_active:
-            self.held.clear()
-            self.joy_active = False
-            self.joy_x = self.joy_y = 0.0
+            self._clear_drive_inputs()
             self._publish_drive()
         self._height_hold(0)
+
+    def _clear_drive_inputs(self) -> None:
+        self.held.clear()
+        self.joy_active = False
+        self.joy_x = self.joy_y = 0.0
+        if hasattr(self, "joy"):
+            c = JOY_SIZE / 2
+            self.joy.coords(self.joy_knob, c - JOY_KNOB, c - JOY_KNOB,
+                            c + JOY_KNOB, c + JOY_KNOB)
 
     def send_console(self) -> None:
         text = self.command_var.get().strip()
@@ -499,6 +551,8 @@ class TapSerialControlApp:
         self.last_drive_sent = time.monotonic()
 
     def _joy_move(self, event: tk.Event) -> None:
+        if self.vision_process.running:
+            self.stop_vision("Vision: dừng để nhận điều khiển tay")
         c = JOY_SIZE / 2
         r = JOY_SIZE / 2 - 6 - JOY_KNOB
         dx, dy = event.x - c, event.y - c
@@ -512,6 +566,103 @@ class TapSerialControlApp:
         self.joy_x = 0.0 if abs(x) < JOY_DEADZONE else x
         self.joy_y = 0.0 if abs(y) < JOY_DEADZONE else y
         self.joy_active = True
+
+    @staticmethod
+    def _vision_target(record: dict | None) -> VisionTarget | None:
+        if record is None or record.get("target_visible") is not True:
+            return None
+        try:
+            fov_value = record.get("horizontal_fov_rad")
+            return VisionTarget(
+                horizontal_error_px=float(record["horizontal_offset_px"]),
+                image_width_px=float(record["image_width_px"]),
+                observed_at_s=float(record["timestamp_monotonic_s"]),
+                horizontal_fov_rad=(None if fov_value is None else float(fov_value)),
+                depth_trend=str(record.get("depth_trend", "UNKNOWN")),
+                area_change_fraction=(
+                    None if record.get("area_change_fraction") is None
+                    else float(record["area_change_fraction"])),
+                area_fraction=(
+                    None if record.get("area_fraction") is None
+                    else float(record["area_fraction"])),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def toggle_vision(self) -> None:
+        if self.vision_process.running:
+            self.stop_vision("Vision: đã dừng")
+            return
+        if (not self.link.connected or not self.session_active or
+                self.mode_var.get() != "Balancing"):
+            self.vision_status_var.set("Vision cần ESP kết nối và đang Balance")
+            return
+        if self.held or self.joy_active:
+            self.vision_status_var.set("Thả điều khiển tay trước khi bật Vision")
+            return
+        try:
+            self.vision_behavior = Vbc(
+                self.vision_motion,
+                VisionBehaviorConfig(
+                    horizontal_fov_rad=VISION_HORIZONTAL_FOV_RAD,
+                    yaw_gain_s_inv=2.0,
+                    max_yaw_rad_s=0.40,
+                    max_yaw_accel_rad_s2=1.8,
+                    approach_accel_m_s2=0.5,
+                    yaw_sign=1.0,
+                    approach_speed_m_s=0.12,
+                ),
+            )
+            self.vision_record = None
+            self.vision_process.start(source=VISION_CAMERA_SOURCE, show_window=True)
+            self.vision_status_var.set("Vision: mở camera, chờ vật thể xanh…")
+        except Exception as exc:
+            self.vision_behavior = None
+            self.vision_status_var.set(f"Vision lỗi: {exc}")
+            self._append_log(f"[vision error] {exc}")
+
+    def stop_vision(self, status: str = "Vision: tắt") -> None:
+        self.vision_process.stop()
+        if self.vision_behavior is not None:
+            self.vision_behavior.update(None)
+        self.vision_behavior = None
+        self.vision_record = None
+        self.vision_status_var.set(status)
+
+    def _tick_vision(self) -> None:
+        if not self.vision_process.running:
+            if self.vision_behavior is not None:
+                detail = (self.vision_process.errors[-1]
+                          if self.vision_process.errors else "camera tracker đã thoát")
+                self.stop_vision(f"Vision lỗi: {detail}")
+            self.vision_button.configure(text="Theo dõi vật thể xanh")
+            return
+        self.vision_button.configure(text="Dừng theo dõi")
+        if self.mode_var.get() != "Balancing" or not self.session_active:
+            self.stop_vision("Vision: dừng vì robot không còn Balance")
+            return
+        record = self.vision_process.read_latest()
+        if record is not None:
+            self.vision_record = record
+        target = self._vision_target(self.vision_record)
+        usable = self.vision_behavior.update(target)
+        if usable:
+            linear = self.vision_behavior.linear_command_m_s
+            if linear > 0.0:
+                detail = f"kích thước nhỏ hơn mốc — tiến {linear:.2f} m/s"
+            elif linear < 0.0:
+                detail = f"kích thước lớn hơn mốc — lùi {abs(linear):.2f} m/s"
+            elif self.vision_behavior.reference_area_fraction is None:
+                detail = "đang căn giữa để lấy mốc kích thước"
+            elif self.vision_behavior.range_motion_state > 0:
+                detail = "kích thước gần mốc — giảm tốc tiến"
+            elif self.vision_behavior.range_motion_state < 0:
+                detail = "kích thước gần mốc — giảm tốc lùi"
+            else:
+                detail = "đã ở vùng kích thước mục tiêu — giữ tiến/lùi"
+            self.vision_status_var.set(f"Vision: {detail}")
+        else:
+            self.vision_status_var.set("Vision: mất dấu / frame cũ — đã gửi STOP")
 
     def _joy_release(self, _event: tk.Event) -> None:
         c = JOY_SIZE / 2
@@ -543,8 +694,10 @@ class TapSerialControlApp:
 
         now = time.monotonic()
         if self.link.connected:
-            # Joystick: send when it changes (>=50 ms apart) or refresh 5 Hz.
-            if self.joy_active:
+            # Held buttons and joystick both refresh at 5 Hz while active. This
+            # keeps the same command alive over serial and avoids depending on
+            # a single press event for a long manual move.
+            if self.joy_active or self.held:
                 command = self._drive_command()
                 if (command != self.last_drive_cmd or now - self.last_drive_sent >= 0.2):
                     self.link.send(command)
@@ -557,6 +710,7 @@ class TapSerialControlApp:
         if self.link.connected and self.session_active and now - self.last_heartbeat >= HEARTBEAT_S:
             self.link.send("HEARTBEAT")
             self.last_heartbeat = now
+        self._tick_vision()
         self.root.after(50, self._tick)
 
     def _parse_status(self, line: str) -> None:
@@ -590,8 +744,14 @@ class TapSerialControlApp:
                     text += "   [đang bị giữ/nhấc: bánh giới hạn]"
                 self.tier_var.set(text)
         if match := MODE_RE.search(line):
-            self.mode_var.set(match.group(1))
+            mode = match.group(1)
+            self.mode_var.set(mode)
             self.enable_var.set("Bật" if match.group(2) == "1" else "Tắt")
+            if mode != "Balancing" and (self.held or self.joy_active):
+                self._clear_drive_inputs()
+                self._send("STOP")
+            if mode != "Balancing" and self.vision_process.running:
+                self.stop_vision("Vision: dừng vì robot không còn Balance")
         if match := ALGO_RE.search(line):
             self.algorithm_var.set(match.group(1))
         if match := SENS_RE.search(line):
@@ -617,6 +777,7 @@ class TapSerialControlApp:
         self.log.configure(state="disabled")
 
     def close(self) -> None:
+        self.stop_vision("Vision: giao diện đóng")
         if self.link.connected and self.session_active:
             self.link.send("DISABLE")
         self.link.close()

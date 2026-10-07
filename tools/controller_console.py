@@ -16,7 +16,9 @@ from a named pipe so another shell can send them:
     echo "SET trim_gain 0.4" > /tmp/tap_console
 
 Opening the port resets the ESP32 (auto-reset circuit), so start the console
-before pressing Start, never during a balance run.
+before pressing Start, never during a balance run. While connected, the console
+sends HEARTBEAT independently of follower commands so stopping a GUI feature can
+stop DRIVE without ending the firmware's balance session.
 """
 
 import argparse
@@ -27,6 +29,9 @@ import sys
 import time
 
 import serial
+
+
+HEARTBEAT_PERIOD_S = 0.10
 
 
 def default_port():
@@ -63,6 +68,7 @@ def main():
     rx = b""
     fifo_buf = b""
     start = time.monotonic()
+    last_heartbeat = start
 
     def send(text):
         text = text.strip()
@@ -82,7 +88,9 @@ def main():
                 watch.append(sys.stdin.fileno())
             if fifo_fd is not None:
                 watch.append(fifo_fd)
-            ready, _, _ = select.select(watch, [], [], 0.2)
+            until_heartbeat = max(
+                0.0, HEARTBEAT_PERIOD_S - (time.monotonic() - last_heartbeat))
+            ready, _, _ = select.select(watch, [], [], min(0.2, until_heartbeat))
             if link.fileno() in ready:
                 rx += link.read(4096)
                 *lines, rx = rx.split(b"\n")
@@ -104,6 +112,10 @@ def main():
                 *commands, fifo_buf = fifo_buf.split(b"\n")
                 for command in commands:
                     send(command.decode(errors="replace"))
+            now = time.monotonic()
+            if now - last_heartbeat >= HEARTBEAT_PERIOD_S:
+                link.write(b"HEARTBEAT\n")
+                last_heartbeat = now
     except KeyboardInterrupt:
         pass
     finally:
