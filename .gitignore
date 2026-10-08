@@ -1,9 +1,7 @@
 build/
 .pio/
-install/
 log/
 __pycache__/
-.reference/
 
 # Large CAD/mesh binaries. Kept out of git deliberately: the STEP assembly is
 # 111 MB (over GitHub's hard 100 MB per-file limit, so a push containing it is

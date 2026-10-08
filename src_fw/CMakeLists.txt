@@ -2,15 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 add_library(tap_fw STATIC
   src/BusTransport.cpp
-  src/BleCommandEndpoint.cpp
-  src/DabbleGamepadMapper.cpp
   src/MotorFeedback.cpp
-  src/ControllerActuatorBridge.cpp
-  src/FirmwareControlLoop.cpp
-  src/FirmwareProfile.cpp
-  src/ImpulseStartupSequencer.cpp
-  src/SerialTuning.cpp
-  src/LegHoming.cpp
   src/v3/LegLock.cpp
   src/v3/V3Controller.cpp
   src/v3/LegHeight.cpp)
@@ -28,26 +20,6 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-  add_executable(controller_actuator_bridge_tests
-    tests/controller_actuator_bridge_tests.cpp)
-  target_link_libraries(controller_actuator_bridge_tests PRIVATE tap_fw)
-  if(MSVC)
-    target_compile_options(controller_actuator_bridge_tests PRIVATE /UNDEBUG)
-  else()
-    target_compile_options(controller_actuator_bridge_tests PRIVATE -UNDEBUG)
-  endif()
-  add_test(NAME controller_actuator_bridge_tests
-           COMMAND controller_actuator_bridge_tests)
-  add_executable(ble_command_endpoint_tests
-    tests/ble_command_endpoint_tests.cpp)
-  target_link_libraries(ble_command_endpoint_tests PRIVATE tap_fw)
-  if(MSVC)
-    target_compile_options(ble_command_endpoint_tests PRIVATE /UNDEBUG)
-  else()
-    target_compile_options(ble_command_endpoint_tests PRIVATE -UNDEBUG)
-  endif()
-  add_test(NAME ble_command_endpoint_tests
-           COMMAND ble_command_endpoint_tests)
   add_executable(motor_feedback_tests tests/motor_feedback_tests.cpp)
   target_link_libraries(motor_feedback_tests PRIVATE tap_fw)
   if(MSVC)
@@ -56,14 +28,6 @@ if(BUILD_TESTING)
     target_compile_options(motor_feedback_tests PRIVATE -UNDEBUG)
   endif()
   add_test(NAME motor_feedback_tests COMMAND motor_feedback_tests)
-  add_executable(firmware_profile_tests tests/firmware_profile_tests.cpp)
-  target_link_libraries(firmware_profile_tests PRIVATE tap_fw)
-  if(MSVC)
-    target_compile_options(firmware_profile_tests PRIVATE /UNDEBUG)
-  else()
-    target_compile_options(firmware_profile_tests PRIVATE -UNDEBUG)
-  endif()
-  add_test(NAME firmware_profile_tests COMMAND firmware_profile_tests)
   add_executable(imu_mount_tests tests/imu_mount_tests.cpp)
   target_link_libraries(imu_mount_tests PRIVATE tap_fw)
   if(MSVC)
@@ -72,14 +36,6 @@ if(BUILD_TESTING)
     target_compile_options(imu_mount_tests PRIVATE -UNDEBUG)
   endif()
   add_test(NAME imu_mount_tests COMMAND imu_mount_tests)
-  add_executable(impulse_startup_sequencer_tests tests/impulse_startup_sequencer_tests.cpp)
-  target_link_libraries(impulse_startup_sequencer_tests PRIVATE tap_fw)
-  if(MSVC)
-    target_compile_options(impulse_startup_sequencer_tests PRIVATE /UNDEBUG)
-  else()
-    target_compile_options(impulse_startup_sequencer_tests PRIVATE -UNDEBUG)
-  endif()
-  add_test(NAME impulse_startup_sequencer_tests COMMAND impulse_startup_sequencer_tests)
   add_executable(v3_tests tests/v3_tests.cpp)
   target_link_libraries(v3_tests PRIVATE tap_fw)
   if(MSVC)

@@ -1,5 +1,6 @@
-// Dabble GamePad, declared only: FirmwareApp.cpp (same build) defines the
-// GamePad object with CUSTOM_SETTINGS; without it the header emits extern.
+// CUSTOM_SETTINGS makes <DabbleESP32.h> define the GamePad object here; without it the
+// header only emits an extern.
+#define CUSTOM_SETTINGS
 #define INCLUDE_GAMEPAD_MODULE
 #include "tap_hw/AppV3.hpp"
 
@@ -181,6 +182,15 @@ bool AppV3::begin() noexcept {
   // turns it on (and the 12 mm roll start reserve applies). rollvff stays off: it
   // made the side legs hunt (SET rollvff 1).
   ctrl_.config().roll.enabled = false;
+  // Layered roll response, used once SET roll 1 (docs/ROLL_REDESIGN_20261005.md): level
+  // reference learned in place (not a fixed -0.040), turn lean-in from the commanded yaw,
+  // a latch that fades the loop out if it cannot level the body, and the loop belongs to the
+  // gimbal (mechanism 2): it opens and freezes with the pitch level loop. rolldamp (gyro
+  // damping) stays 0: it changed a 8 mm bump's peak by < 20 % in the sim.
+  ctrl_.config().roll.learn_ref = true;
+  ctrl_.config().roll.cmd_preview = true;
+  ctrl_.config().roll.latch = true;
+  ctrl_.config().roll.gimbal_link = true;  // roll = lateral axis of the gimbal (Tier::level)
   // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
   // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
   ctrl_.config().lqr_lead_adaptive = true;
@@ -190,6 +200,10 @@ bool AppV3::begin() noexcept {
   // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
   // the fixed deadband, SET tsus 0 turns the suspension off (HANDOFF 5.47).
   ctrl_.config().tier.sus_adaptive = true;
+  // The knee follows the axle-height IK through a 1 Hz low-pass instead of copying
+  // the hip reflex swing (knee grind when the reflex nears max_rad). SET kfhz 0 reverts.
+  ctrl_.config().tier.knee_follow_hz = 1.0F;
+  ctrl_.config().tier.knee_follow_rate_rad_s = 0.6F;
   // Balance angle from the measured ground acceleration (trim follows
   // theta_v - atan(a/g) with 3 s) so a height change does not leave the robot
   // drifting for ~25 s. SET ttrimacc 0 reverts, SET ttrimtau <s> retunes (5.46).
@@ -197,6 +211,10 @@ bool AppV3::begin() noexcept {
   // Gyro damping of the body through the hips, gated by the disturbance weight
   // (ungated 0.08 rings tall, >= 0.15 rings crouched). SET tbdamp <s> (5.46).
   ctrl_.config().tier.body_damping_s = 0.08F;
+  // The damping reads the gyro through a 4.5 Hz low-pass: raw, its gate-open gain plus the
+  // lead drives a 6-8 Hz hip limit cycle once the hip lags +30 ms or more (robot logs 07/10,
+  // sim V42: gyro >5 Hz 0.14 -> 0.05 rad/s at +40 ms, quiet to +60 ms). SET tbdlpf 0 = raw gyro (HANDOFF 5.50).
+  ctrl_.config().tier.body_damp_lpf_hz = 4.5F;
   // Height changes at 15 mm/s, 50 mm/s2 with a 200 mm/s3 jerk limit: the biggest
   // body kicks came when the legs STOP. SET hrate 25 / haccel 70 / hjerk 500
   // restores the faster profile.
@@ -480,6 +498,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "wbsoft")) ctrl_.config().wb_soft_from = std::clamp(v, 0.2F, 1.0F);
     else if (!std::strcmp(key, "tenv")) ctrl_.config().tier.envelope = v >= 0.5F;
     else if (!std::strcmp(key, "khold")) ctrl_.config().tier.knee_hold = v >= 0.5F;
+    else if (!std::strcmp(key, "kfhz")) ctrl_.config().tier.knee_follow_hz = std::clamp(v, 0.0F, 20.0F);
+    else if (!std::strcmp(key, "kfrate")) ctrl_.config().tier.knee_follow_rate_rad_s = std::clamp(v, 0.05F, 20.0F);
     else if (!std::strcmp(key, "tplanfull")) ctrl_.config().tier.plan_full = v >= 0.5F;
     else if (!std::strcmp(key, "leash")) ctrl_.config().drive_leash_m = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "roll")) ctrl_.config().roll.enabled = v >= 0.5F;
@@ -487,7 +507,16 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "rollmax")) ctrl_.config().roll.max_dh_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
     else if (!std::strcmp(key, "rollres")) ctrl_.config().roll.reserve_m = std::clamp(v, 0.0F, 40.0F) * 1.0e-3F;
     else if (!std::strcmp(key, "rollff")) ctrl_.config().roll.turn_ff = std::clamp(v, 0.0F, 2.0F);
-    else if (!std::strcmp(key, "rolltgt")) ctrl_.config().roll.target_rad = std::clamp(v, -0.15F, 0.15F);
+    else if (!std::strcmp(key, "rolltgt")) {  // pins the level target, no learning
+      ctrl_.config().roll.target_rad = std::clamp(v, -0.15F, 0.15F);
+      ctrl_.config().roll.learn_ref = false;
+    }
+    else if (!std::strcmp(key, "rolllearn")) ctrl_.config().roll.learn_ref = v >= 0.5F;
+    else if (!std::strcmp(key, "rollcal")) ctrl_.requestRollRelearn();
+    else if (!std::strcmp(key, "rollpre")) ctrl_.config().roll.cmd_preview = v >= 0.5F;
+    else if (!std::strcmp(key, "rolldamp")) ctrl_.config().roll.damp_s = std::clamp(v, 0.0F, 0.5F);
+    else if (!std::strcmp(key, "rolllatch")) ctrl_.config().roll.latch = v >= 0.5F;
+    else if (!std::strcmp(key, "rollgimbal")) ctrl_.config().roll.gimbal_link = v >= 0.5F;
     else if (!std::strcmp(key, "rollyaw")) ctrl_.config().roll.yaw_accel_rad_s2 = std::clamp(v, 0.0F, 50.0F);
     else if (!std::strcmp(key, "rollsign")) ctrl_.config().roll.sign = v < 0.0F ? -1.0F : 1.0F;
     else if (!std::strcmp(key, "rollkp")) ctrl_.config().roll.kp = std::clamp(v, 0.0F, 3.0F);
@@ -564,6 +593,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().tier.wheel_carrier_compensation = v > 0.0F;
     }
     else if (!std::strcmp(key, "tbdamp")) ctrl_.config().tier.body_damping_s = std::clamp(v, 0.0F, 0.2F);
+    else if (!std::strcmp(key, "tbdlpf")) ctrl_.config().tier.body_damp_lpf_hz = std::clamp(v, 0.0F, 20.0F);
     else if (!std::strcmp(key, "tadapt")) ctrl_.config().tier.adaptive_schedule = v >= 0.5F;
     else if (!std::strcmp(key, "legacy")) setLegacyTier(ctrl_.config(), v >= 0.5F);
     // Push / standing calm (see Config::stand_leash_m, Tier::hip_deadband_rad,
@@ -727,6 +757,10 @@ void AppV3::printTunables() noexcept {
                 tier.height_exp, tier.height_exp_tall,
                 tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain,
                 tier.joint_rate_gain_low);
+  out_.printf("V3 TUNE body damping: tbdamp=%.3f s tbdlpf=%.1f Hz (0 = raw gyro)\n",
+              ctrl_.config().tier.body_damping_s, ctrl_.config().tier.body_damp_lpf_hz);
+  out_.printf("V3 TUNE knee follow: kfhz=%.2f Hz (0 = instant IK knee) kfrate=%.2f rad/s\n",
+              ctrl_.config().tier.knee_follow_hz, ctrl_.config().tier.knee_follow_rate_rad_s);
   out_.printf("V3 TUNE suspension: tsus=%d adaptive=%d (SET tsusad) k=%.1f (tsusk) engage delay %.1f s (tsusdelay) deadband in use %.1f mm/s\n",
               ctrl_.config().tier.suspension ? 1 : 0, ctrl_.config().tier.sus_adaptive ? 1 : 0,
               ctrl_.config().tier.sus_noise_k, ctrl_.config().tier.sus_engage_delay_s,
@@ -756,6 +790,10 @@ void AppV3::printTunables() noexcept {
                   "rolltgt=%+.3f rollyaw=%.1f rollsign=%+.0f rollvff=%d est=%+.4f\n", rl.enabled ? 1 : 0, rl.tau_s, rl.kp,
                   rl.max_dh_m * 1000.0F, rl.reserve_m * 1000.0F, rl.turn_ff, rl.target_rad,
                   rl.yaw_accel_rad_s2, rl.sign, rl.vel_ff ? 1 : 0, ctrl_.rollEstimate());
+    out_.printf("V3 TUNE roll layers: learn=%d (SET rolllearn; SET rollcal re-learns; SET rolltgt pins) ref=%+.4f "
+                  "preview=%d (rollpre) damp=%.3f s (rolldamp) latch=%d (rolllatch) gimbal=%d (rollgimbal) mode=%d\n",
+                  rl.learn_ref ? 1 : 0, ctrl_.rollReference(), rl.cmd_preview ? 1 : 0, rl.damp_s,
+                  rl.latch ? 1 : 0, rl.gimbal_link ? 1 : 0, ctrl_.rollMode());
   }
   {
     const auto& wp = ctrl_.config().wheel_pred;
@@ -1224,6 +1262,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" wcmd=[").fix(last_wheel_cmd_[0], 2, true).chr(' ').fix(last_wheel_cmd_[1], 2, true)
         .str("] wmeas=[").fix(in.wheel_rad_s[0], 2, true).chr(' ').fix(in.wheel_rad_s[1], 2, true)
         .str("] axle_v=").fix(ctrl_.groundVelocity(), 3, true).str(" axle_x=").fix(ctrl_.groundPosition(), 3, true)
+        .str(" wheel_lx=").fix(state_.wheel.left_position_m, 3, true)
+        .str(" wheel_rx=").fix(state_.wheel.right_position_m, 3, true)
         .str(" trim=").fix(ctrl_.balanceRef(), 4, true)
         .str(" legs=[").fix(legJointRad(0), 3, true).chr(' ').fix(legJointRad(1), 3, true).chr(' ')
         .fix(legJointRad(2), 3, true).chr(' ').fix(legJointRad(3), 3, true)
@@ -1255,7 +1295,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" sgv=").fix(ctrl_.standGive() * 1000.0F, 0, true)
         .str(" rg=").fix(ctrl_.reflexGate(), 2)
         .str(" ql=").fix(ctrl_.lqrLeadEffective(), 3)
-        .str(" sdb=").fix(ctrl_.suspensionDeadband() * 1000.0F, 1);
+        .str(" sdb=").fix(ctrl_.suspensionDeadband() * 1000.0F, 1)
+        .str(" rref=").fix(ctrl_.rollReference(), 4, true)
+        .str(" rm=").i32(ctrl_.rollMode());
     out_.println(line);
     prof(3, nowUs() - p5);
   }

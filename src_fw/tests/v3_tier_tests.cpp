@@ -199,7 +199,17 @@ struct Case {
   // measured -0.040, which Config::Roll::target_rad carries.
   double imu_roll_mount = -0.040;
   int roll_vff = -1;                 // Config::Roll::vel_ff (-1: default)
+  // Layered roll (docs/ROLL_REDESIGN_20261005.md); -1 / negative: struct default.
+  int roll_learn = -1, roll_pre = -1, roll_latch = -1, roll_gimbal = -1;
+  double roll_damp = -1.0;
+  double slope_t0 = 0.0;             // > 0: the cross slope ramps in over 2 s from here
+  double roll_noise_scale = 1.0;     // roll gyro / accelerometer noise
+  double roll_servo_scale = 1.0;     // side-leg servo bandwidth (x knee_kp)
   int knee_hold = -1, knee_hold_wb = -1;  // Tier::knee_hold / knee_hold_wb
+  double knee_follow_hz = -1.0, knee_follow_rate = -1.0;  // Tier::knee_follow_* (-1: default)
+  double body_damping = -1.0;       // Tier::body_damping_s (-1: default)
+  double body_damp_lpf = -1.0;      // Tier::body_damp_lpf_hz (-1: default)
+  int boot_like = 0;                // 1: the AppV3 boot tier/LQR overrides (HANDOFF section 3)
 };
 
 struct Result {
@@ -256,6 +266,17 @@ struct Result {
   double roll_world_max = 0.0;     // max |body roll vs gravity| after 2 s
   double wheel_load_min = 0.5;     // smaller wheel's share of the load (0 = lifts)
   double roll_dh_max = 0.0;        // max |side height offset| commanded [m]
+  double knee_cmd_rate_rms = 0.0;  // IK knee-term (dknee) rate rms after 12 s [rad/s]
+  double knee_cmd_rate_peak = 0.0; // its peak [rad/s]
+  double knee_cmd_range = 0.0;     // dknee max - min after 12 s [rad]
+  double axle_depth_err_max = 0.0; // max |hip-axle depth - nominal pose| from the commanded joints [m]
+  double gyro_hf_rms = 0.0;        // controller gyro input above 5 Hz, rms after 2 s [rad/s]
+  double dhip_hf_rms = 0.0;        // tier-2 hip command above 5 Hz, rms after 2 s [rad]
+  double roll_dh_end = 0.0;        // mean |side height offset| over the last 4 s [m]
+  double roll_phi_end = 0.0;       // mean body roll vs gravity over the last 4 s [rad]
+  double roll_ref_end = 0.0;       // learned level reference at the end
+  int roll_mode_end = 0;           // 0 off/learning, 1 active, 2 latched
+  double roll_dh_rev_s = 0.0;      // side offset direction reversals per second (> 0.3 mm)
   double roll_t_first = -1.0, roll_t_last = -1.0;  // first / last time |roll vs apparent| > 0.005 (after 2 s)
   double roll_t_half = -1.0;       // first time back under half its peak after the peak
   double update_us_sum = 0.0, update_us_max = 0.0;  // host time in V3Controller::update
@@ -497,6 +518,19 @@ Result simulate(const Case& c) {
 
   if (c.lean_share >= 0) cfg.tier.lean_share = static_cast<float>(c.lean_share);
   if (c.tier_lead >= 0) cfg.tier.lead_s = static_cast<float>(c.tier_lead);
+  if (c.boot_like != 0) {
+    cfg.tier.height_exp = 0.15F;
+    cfg.lqr_lead_adaptive = true; cfg.lqr_lead_tall_s = 0.05F; cfg.lqr_lead_low_s = 0.09F;
+    cfg.trim_acc = true;
+    cfg.tier.body_damping_s = 0.08F;
+    cfg.tier.joint_rate_gain_low = 0.7F;
+    cfg.tier.sus_adaptive = true;
+    cfg.tier.knee_follow_hz = 1.0F; cfg.tier.knee_follow_rate_rad_s = 0.6F;
+    cfg.height.rate_m_s = 0.015F; cfg.height.accel_m_s2 = 0.05F; cfg.height.jerk_m_s3 = 0.20F;
+  }
+  if (c.body_damping >= 0) cfg.tier.body_damping_s = static_cast<float>(c.body_damping);
+  if (c.body_damp_lpf >= 0) cfg.tier.body_damp_lpf_hz = static_cast<float>(c.body_damp_lpf);
+  if (const char* v = std::getenv("TR_TBDLPF")) cfg.tier.body_damp_lpf_hz = static_cast<float>(std::atof(v));
   if (c.tier_max >= 0) cfg.tier.max_rad = static_cast<float>(c.tier_max);
   if (c.tier_exp >= 0) cfg.tier.height_exp = cfg.tier.height_exp_tall = static_cast<float>(c.tier_exp);
   if (const char* v = std::getenv("TIER_EXP_TALL")) cfg.tier.height_exp_tall = static_cast<float>(std::atof(v));
@@ -517,6 +551,7 @@ Result simulate(const Case& c) {
   if (const char* v = std::getenv("TR_LQRLEADTALL")) cfg.lqr_lead_tall_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_LQRLEADLOW")) cfg.lqr_lead_low_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SUSAD")) cfg.tier.sus_adaptive = std::atoi(v) != 0;
+  if (const char* v = std::getenv("TR_KFHZ")) cfg.tier.knee_follow_hz = float(std::atof(v));
   if (const char* v = std::getenv("TR_SUSK")) cfg.tier.sus_noise_k = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SUSDELAY")) cfg.tier.sus_engage_delay_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_RGATE")) cfg.tier.reflex_gate = std::atoi(v) != 0;
@@ -584,10 +619,23 @@ Result simulate(const Case& c) {
   if (std::getenv("TR_WPDELAY")) cfg.wheel_pred.act_delay_s = static_cast<float>(std::atof(std::getenv("TR_WPDELAY")));
   if (std::getenv("TR_WPMEAS")) cfg.wheel_pred.meas_delay_s = static_cast<float>(std::atof(std::getenv("TR_WPMEAS")));
   if (c.roll_vff >= 0) cfg.roll.vel_ff = c.roll_vff != 0;
+  if (c.roll_learn >= 0) cfg.roll.learn_ref = c.roll_learn != 0;
+  if (c.roll_pre >= 0) cfg.roll.cmd_preview = c.roll_pre != 0;
+  if (c.roll_latch >= 0) cfg.roll.latch = c.roll_latch != 0;
+  if (c.roll_gimbal >= 0) cfg.roll.gimbal_link = c.roll_gimbal != 0;
+  if (std::getenv("TR_ROLLLAYERED")) {  // the firmware's layered roll settings for any suite
+    cfg.roll.learn_ref = cfg.roll.cmd_preview = cfg.roll.latch = cfg.roll.gimbal_link = true;
+  }
+  if (std::getenv("TR_ROLLLAYERED")) {  // the firmware's layered roll settings for any suite
+    cfg.roll.learn_ref = cfg.roll.cmd_preview = cfg.roll.latch = cfg.roll.gimbal_link = true;
+  }
+  if (c.roll_damp >= 0.0) cfg.roll.damp_s = static_cast<float>(c.roll_damp);
   if (std::getenv("RS_VFF")) cfg.roll.vel_ff = true;
   if (const char* v = std::getenv("TR_ROLLEST")) cfg.roll.est_tau_s = static_cast<float>(std::atof(v));
   if (c.knee_hold >= 0) cfg.tier.knee_hold = c.knee_hold != 0;
   if (c.knee_hold_wb >= 0) cfg.tier.knee_hold_wb = c.knee_hold_wb != 0;
+  if (c.knee_follow_hz >= 0.0) cfg.tier.knee_follow_hz = float(c.knee_follow_hz);
+  if (c.knee_follow_rate >= 0.0) cfg.tier.knee_follow_rate_rad_s = float(c.knee_follow_rate);
   if (const char* v = std::getenv("TR_PLANFULL")) cfg.tier.plan_full = std::atoi(v) != 0;
   if (const char* v = std::getenv("TR_KHOLD")) cfg.tier.knee_hold = cfg.tier.knee_hold_wb = std::atoi(v) != 0;
   if (c.suspension >= 0) cfg.tier.suspension = c.suspension != 0;
@@ -711,6 +759,11 @@ Result simulate(const Case& c) {
     if (hold[1] != 0.0) mk += std::copysign(0.5 * c.knee_backlash + std::abs(hold[1]) / kpk, hold[1]);
   }
   double hip_zoh = 0.0, knee_zoh = s[3] - c.knee_zero_err, next_hip_cmd = 0.0;
+  double knee_cmd_prev = 0.0, knee_rate_sq = 0.0, knee_cmd_lo = 1.0e9, knee_cmd_hi = -1.0e9;
+  double hf_g_lp = 0.0, hf_d_lp = 0.0, hf_g_sq = 0.0, hf_d_sq = 0.0;
+  long hf_n = 0;
+  bool knee_cmd_prev_valid = false;
+  long knee_rate_n = 0;
   double s_acc[LegPlant::kDof] = {};
   double dv_sq = 0.0, dp_sq = 0.0;
   int dv_n = 0;
@@ -734,8 +787,11 @@ Result simulate(const Case& c) {
   double all_body_sq = 0.0, all_lean_sq = 0.0, all_body_lp = 0.0, all_lean_lp = 0.0, drive_z0 = 0.0;
   std::deque<double> roll_cmd_q;
   std::mt19937 roll_rng(11);
-  std::normal_distribution<double> roll_n_gyr(0, 0.005), roll_n_acc(0, 0.05 * c.acc_noise_scale);
+  std::normal_distribution<double> roll_n_gyr(0, 0.005 * c.roll_noise_scale),
+      roll_n_acc(0, 0.05 * c.acc_noise_scale * c.roll_noise_scale);
   double roll_dh_act = 0.0, roll_phi_prev = 0.0, roll_app_sum = 0.0, yaw_act = 0.0, roll_t_peak = 0.0;
+  double roll_dh_abs_sum = 0.0, roll_phi_sum = 0.0, roll_dh_ext = 0.0, roll_dh_dir = 0.0;
+  long roll_dh_n = 0, roll_dh_revs = 0;
   double roll_cmd_prev = 0.0;
   long roll_app_n = 0;
   double body_mean_sum = 0.0;
@@ -826,9 +882,11 @@ Result simulate(const Case& c) {
       // position loop's lag.
       const double vff = ctrl.config().roll.vel_ff ? (dh_cmd - roll_cmd_prev) / dt_c : 0.0;
       roll_cmd_prev = dh_cmd;
-      roll_dh_act += dt_c * (c.knee_kp * (dh_cmd - roll_dh_act) + vff);
-      const double zl = half * std::tan(c.cross_slope) + (c.bump_left_only ? bump_profile(s[0]) : 0.0);
-      const double zr = -half * std::tan(c.cross_slope);
+      roll_dh_act += dt_c * (c.knee_kp * c.roll_servo_scale * (dh_cmd - roll_dh_act) + vff);
+      const double slope = c.slope_t0 > 0.0
+          ? c.cross_slope * std::clamp((t - c.slope_t0) / 2.0, 0.0, 1.0) : c.cross_slope;
+      const double zl = half * std::tan(slope) + (c.bump_left_only ? bump_profile(s[0]) : 0.0);
+      const double zr = -half * std::tan(slope);
       const double phi = std::atan(((zl + roll_dh_act + 0.5 * c.leg_side_err_m) -
                                     (zr - roll_dh_act - 0.5 * c.leg_side_err_m)) / (2.0 * half));
       const double phi_rate = k > 0 ? (phi - roll_phi_prev) / dt_c : 0.0;
@@ -853,7 +911,21 @@ Result simulate(const Case& c) {
         const double lam_l = 0.5 + (yc - H * a_lat / kG) / (2.0 * half);
         r.wheel_load_min = std::min({r.wheel_load_min, lam_l, 1.0 - lam_l});
         r.roll_dh_max = std::max(r.roll_dh_max, std::abs(double(ctrl.rollSideHeight())));
-        if (t > duration_s - 4.0) { roll_app_sum += app; ++roll_app_n; }
+        if (t > duration_s - 4.0) {
+          roll_app_sum += app; ++roll_app_n;
+          roll_dh_abs_sum += std::abs(double(ctrl.rollSideHeight())); roll_phi_sum += phi; ++roll_dh_n;
+        }
+        {  // direction reversals of the commanded side offset (hunting)
+          const double dhc = double(ctrl.rollSideHeight());
+          if (roll_dh_dir == 0.0) { roll_dh_dir = 1.0; roll_dh_ext = dhc; }
+          else if (roll_dh_dir > 0.0) {
+            if (dhc > roll_dh_ext) roll_dh_ext = dhc;
+            else if (roll_dh_ext - dhc > 3.0e-4) { roll_dh_dir = -1.0; roll_dh_ext = dhc; ++roll_dh_revs; }
+          } else {
+            if (dhc < roll_dh_ext) roll_dh_ext = dhc;
+            else if (dhc - roll_dh_ext > 3.0e-4) { roll_dh_dir = 1.0; roll_dh_ext = dhc; ++roll_dh_revs; }
+          }
+        }
         if (std::getenv("GV_TRACE") && k % 50 == 0) {
           std::printf("GV t=%.2f plant_v=%+.4f ctrl_v=%+.4f wheel_meas=%+.3f R*(w+th'+q'+k')=%+.4f\n", t, sd[0],
                       double(ctrl.groundVelocity()), wm, R * (wm + sd[1] + sd[2] + sd[3]));
@@ -908,6 +980,35 @@ Result simulate(const Case& c) {
     knee_q.push_back(knee_zoh);
     if (knee_q.size() > c.hip_delay_ticks) { knee_applied = knee_q.front(); knee_q.pop_front(); }
     r.max_dhip = std::max(r.max_dhip, std::abs(double(ctrl.trunkHip())));
+    if (t > 2.0) {
+      // One-pole 5 Hz high-pass of what the hip loop is fed (gyro) and what it commands.
+      const double a_hf = 2.0 * 3.14159265358979 * 5.0 * dt_c;
+      const double g_in = in.pitch_rate_rad_s, d_in = ctrl.trunkHip();
+      if (hf_n == 0) { hf_g_lp = g_in; hf_d_lp = d_in; }
+      hf_g_lp += a_hf * (g_in - hf_g_lp); hf_d_lp += a_hf * (d_in - hf_d_lp);
+      hf_g_sq += (g_in - hf_g_lp) * (g_in - hf_g_lp);
+      hf_d_sq += (d_in - hf_d_lp) * (d_in - hf_d_lp);
+      ++hf_n;
+    }
+    if (t > 12.0) {  // after every test's height profile and settling
+      const double kc = ctrl.kneeCommand();
+      // The IK coupling term only (what the hip swing adds), not height/suspension.
+      const double kd = kc - ctrl.legPose().knee_offset_rad;
+      if (knee_cmd_prev_valid) {
+        const double kr = (kd - knee_cmd_prev) / dt_c;
+        knee_rate_sq += kr * kr; ++knee_rate_n;
+        r.knee_cmd_rate_peak = std::max(r.knee_cmd_rate_peak, std::abs(kr));
+      }
+      knee_cmd_prev = kd; knee_cmd_prev_valid = true;
+      knee_cmd_lo = std::min(knee_cmd_lo, kd); knee_cmd_hi = std::max(knee_cmd_hi, kd);
+      // Axle depth the COMMANDED joints give (body pitch from the plant) against
+      // the nominal pose's depth: what the knee low-pass costs in height.
+      const auto leg = robot_control::WholeBodyModel::legHeight(
+          LegHeight::hangHipCad() + ctrl.hipCommand(), float(kc));
+      const double depth = -(-std::sin(s[1]) * leg.x_m + std::cos(s[1]) * leg.height_m);
+      r.axle_depth_err_max = std::max(r.axle_depth_err_max,
+          std::abs(depth - ctrl.legPose().axle_below_hip_m * std::cos(s[1])));
+    }
 
     double fx = (t >= push_start_s && t < push_end_s) ? c.push_n : 0.0;
     for (const auto& pp : c.pushes) if (t >= pp.t0 && t < pp.t1) fx += pp.v;
@@ -1276,8 +1377,17 @@ Result simulate(const Case& c) {
   r.x_stop_travel = s[0] - x_stop;
   r.rate_rms_drive = rate_n ? std::sqrt(rate_sq / rate_n) : 0.0;
   r.body_rms_end = body_n ? std::sqrt(body_sq / body_n) : 0.0;
+  r.gyro_hf_rms = hf_n ? std::sqrt(hf_g_sq / hf_n) : 0.0;
+  r.dhip_hf_rms = hf_n ? std::sqrt(hf_d_sq / hf_n) : 0.0;
+  r.knee_cmd_rate_rms = knee_rate_n ? std::sqrt(knee_rate_sq / knee_rate_n) : 0.0;
+  r.knee_cmd_range = knee_cmd_hi > knee_cmd_lo ? knee_cmd_hi - knee_cmd_lo : 0.0;
   r.body_mean_end = body_n ? body_mean_sum / body_n : 0.0;
   r.roll_app_end = roll_app_n ? roll_app_sum / roll_app_n : 0.0;
+  r.roll_dh_end = roll_dh_n ? roll_dh_abs_sum / roll_dh_n : 0.0;
+  r.roll_phi_end = roll_dh_n ? roll_phi_sum / roll_dh_n : 0.0;
+  r.roll_ref_end = ctrl.rollReference();
+  r.roll_mode_end = ctrl.rollMode();
+  r.roll_dh_rev_s = duration_s > 2.0 ? roll_dh_revs / (duration_s - 2.0) : 0.0;
   r.body_rms_all = all_n ? std::sqrt(all_body_sq / all_n) : 0.0;
   r.lean_rms_all = all_n ? std::sqrt(all_lean_sq / all_n) : 0.0;
   r.rest_rate_rms = body_n ? std::sqrt(rest_rate_sq / body_n) : 0.0;
@@ -1745,6 +1855,147 @@ void runAdaptiveSuspensionRegression() {
   assert(ba.body_vacc_bump_peak <= 1.05 * bf.body_vacc_bump_peak);
 }
 
+// V41: the knee must not copy the hip's reflex swing. coordinateTrunkAxle's knee term grows as
+// dhip^2, so without the follow filter the loaded knee is driven by the skateboard reflex
+// (robot knee grind, 07/10). Alternating pushes and a 0.55 m/s drive at three heights over the
+// plant variants: knee command rate rms/peak must drop a lot, the axle depth must stay within a
+// few mm, and the body must not get worse or fall.
+void runKneeFollowRegression() {
+  const double hz = std::getenv("KF_HZ") ? std::atof(std::getenv("KF_HZ")) : 1.0;
+  const double rate = std::getenv("KF_RATE") ? std::atof(std::getenv("KF_RATE")) : 0.6;
+  const bool sweep = std::getenv("KF_SWEEP") != nullptr;
+  // hipForKneeAtX with the IK's own knee must reproduce the IK's hip exactly.
+  double ik_gap = 0.0;
+  for (double depth : {0.185, 0.1766, 0.15, 0.11, 0.084}) {
+    for (double x : {-0.05, -0.02, 0.0, 0.01, 0.03, 0.06}) {
+      for (double pitch : {-0.05, 0.0, 0.08}) {
+        const auto g = LegHeight::forAxleOnPlane(float(x), float(depth), float(pitch));
+        if (!g.ok || g.limited) continue;
+        const float hip = LegHeight::hipForKneeAtX(g.knee_offset_rad, g.x_world_m, float(pitch));
+        ik_gap = std::max(ik_gap, std::abs(double(hip - g.hip_offset_rad)));
+      }
+    }
+  }
+  std::printf("V41 hipForKneeAtX vs forAxleOnPlane hip: max gap %.2e rad\n", ik_gap);
+  assert(ik_gap < 2.0e-4);
+  int episodes = 0, failures = 0;
+  double ratio_sum = 0, worst_body = 0, worst_depth = 0, rms_off = 0, rms_on = 0, pk_off = 0, pk_on = 0;
+  for (double h : {0.1766, 0.110, 0.084}) {
+    for (int scen = 0; scen < 2; ++scen) {
+      for (int vi : {0, 2, 3, 4, 6, 8}) {
+        Result r[2];
+        for (int on = 0; on < 2; ++on) {
+          Case c = withMode(Case{}, 2);
+          c.roll = c.suspension = 1;
+          c.hip_vel_noise = 0.06;
+          if (h < 0.188) c.heights.push_back({1.0, h});
+          c.duration_s = 26;
+          kVariants[vi].apply(c);
+          if (scen == 0) {
+            for (int i = 0; i < 8; ++i) {
+              const double t = 13 + 0.7 * i;
+              c.pushes.push_back({t, t + 0.3, i % 2 == 0 ? 4.5 : -4.5});
+            }
+          } else {
+            c.drive_m_s = 0.55; c.drive_start_s = 13.0; c.drive_end_s = 17.0;
+          }
+          c.knee_follow_hz = on ? hz : 0.0; c.knee_follow_rate = rate;
+          r[on] = simulate(c);
+        }
+        ++episodes;
+        std::printf("V41 h=%3.0f %s %-24s | off: rate rms %.3f peak %.2f range %.3f dhip %.3f body %.4f%s | on: rms %.3f peak %.2f range %.3f dhip %.3f body %.4f depth %.1f mm%s\n",
+                    h * 1000, scen ? "drive" : "push ", kVariants[vi].name,
+                    r[0].knee_cmd_rate_rms, r[0].knee_cmd_rate_peak, r[0].knee_cmd_range, r[0].max_dhip,
+                    r[0].body_dev_all, r[0].fell ? " FELL" : "",
+                    r[1].knee_cmd_rate_rms, r[1].knee_cmd_rate_peak, r[1].knee_cmd_range, r[1].max_dhip,
+                    r[1].body_dev_all, r[1].axle_depth_err_max * 1000, r[1].fell ? " FELL" : "");
+        std::fflush(stdout);
+        rms_off = std::max(rms_off, r[0].knee_cmd_rate_rms); rms_on = std::max(rms_on, r[1].knee_cmd_rate_rms);
+        pk_off = std::max(pk_off, r[0].knee_cmd_rate_peak); pk_on = std::max(pk_on, r[1].knee_cmd_rate_peak);
+        if (!r[1].fell) worst_depth = std::max(worst_depth, r[1].axle_depth_err_max);
+        ratio_sum += r[0].knee_cmd_rate_rms > 1e-9 ? r[1].knee_cmd_rate_rms / r[0].knee_cmd_rate_rms : 1.0;
+        worst_body = std::max(worst_body, r[1].body_dev_all - r[0].body_dev_all);
+        const bool either_fell = r[0].fell || r[1].fell;  // rates mean nothing during a fall
+        if (!sweep && ((r[1].fell && !r[0].fell) || r[1].body_dev_all > r[0].body_dev_all + 0.02 ||
+                       (!either_fell && (r[1].knee_cmd_rate_peak > 0.5 * r[0].knee_cmd_rate_peak + 0.02 ||
+                                         r[1].knee_cmd_rate_rms > 0.5 * r[0].knee_cmd_rate_rms + 0.005)))) ++failures;
+      }
+    }
+  }
+  std::printf("V41 knee follow %.2f Hz / %.2f rad/s: %d episodes, worst-case knee rate rms %.3f -> %.3f rad/s, peak %.2f -> %.2f rad/s, "
+              "mean rms ratio %.2f, worst axle depth error %.1f mm, worst body change %+.4f rad, %d failures\n",
+              hz, rate, episodes, rms_off, rms_on, pk_off, pk_on, ratio_sum / episodes, worst_depth * 1000, worst_body, failures);
+  assert(failures == 0 || sweep);
+  assert(worst_depth < 0.004);
+}
+
+// V42: the tier-2 hip must not buzz at 6-8 Hz after a push-and-brake. The body damping and the
+// lead feed the raw gyro to the hip through ~70 ms of lag: near 7 Hz the loop phase reaches -180 deg
+// and, once the disturbance gate opens the damping, a small limit cycle starts (robot logs 07/10:
+// gyro >5 Hz 0.02 at rest -> 0.17-0.20 rad/s pushed, hip command >5 Hz 0.011 rad, in phase at
+// 6-8 Hz). With the boot damping 0.08 the sim shows it from +30 ms of extra hip lag at 177 mm and
+// the 4.5 Hz damping low-pass (Tier::body_damp_lpf_hz) removes it up to +60 ms at every height.
+// Exploration: HF_FIX=1 (wide delays), HF_DELAYS="27,32", HF_DAMPS="0,0.08", HF_GYRN, HF_QUIET,
+// HF_LPF (corner Hz of the 'on' column, default 4.5), TR_TBDLPF/TR_TLEADLPF; the default run asserts.
+void runHfVibrationRegression() {
+  const bool explore = std::getenv("HF_FIX") || std::getenv("HF_DELAYS") || std::getenv("HF_DAMPS") ||
+      std::getenv("HF_QUIET") || std::getenv("HF_GYRN");
+  std::vector<double> heights{0.1766, 0.110, 0.084};
+  std::vector<std::size_t> delays{2u, 12u, 22u, 27u};  // hip lag +0 / +20 / +40 / +50 ms
+  std::vector<double> dampings{0.08};
+  if (const char* env = std::getenv("HF_DELAYS")) {
+    delays.clear();
+    for (const char* q = env; *q;) { delays.push_back(static_cast<std::size_t>(std::atoi(q))); while (*q && *q != ',') ++q; if (*q) ++q; }
+  }
+  if (const char* env = std::getenv("HF_DAMPS")) {
+    dampings.clear();
+    for (const char* q = env; *q;) { dampings.push_back(std::atof(q)); while (*q && *q != ',') ++q; if (*q) ++q; }
+  }
+  auto runCase = [&](double h, std::size_t delay, double bd, double lpf_hz) {
+    Case c = withMode(Case{}, 2);
+    c.boot_like = 1; c.roll = 0; c.suspension = 1;
+    c.hip_vel_noise = 0.06;
+    c.wheel_delay_ticks = 22; c.wheel_tau = 0.09; c.wheel_meas_delay_ticks = 27;
+    if (h < 0.188) c.heights.push_back({1.0, h});
+    c.duration_s = 26;
+    c.hip_delay_ticks = delay; c.body_damping = bd; c.body_damp_lpf = lpf_hz;
+    if (const char* g = std::getenv("HF_GYRN")) c.gyro_noise = std::atof(g);
+    if (!std::getenv("HF_QUIET")) for (int i = 0; i < 6; ++i) {
+      const double t = 13 + 0.9 * i;
+      c.pushes.push_back({t, t + 0.3, i % 2 == 0 ? 4.0 : -4.0});
+    }
+    return simulate(c);
+  };
+  int failures = 0;
+  double control_tall_50 = 0.0, worst_fix_hf = 0.0, worst_body_cost = -1.0;
+  std::printf("V42 gyro/hip command above 5 Hz after pushes (boot-like tier), lpf off / 4.5 Hz\n");
+  for (double h : heights) for (std::size_t delay : delays) for (double bd : dampings) {
+    const double lpf_on = std::getenv("HF_LPF") ? std::atof(std::getenv("HF_LPF")) : 4.5;
+    const Result off = runCase(h, delay, bd, 0.0), on = runCase(h, delay, bd, lpf_on);
+    const double lag_ms = (double(delay) - 2.0) * 2.0;
+    std::printf("V42 h=%3.0f hip lag +%2.0f ms damping %.2f | off: gyro %.3f dhip %.4f body %.4f%s | lpf: gyro %.3f dhip %.4f body %.4f%s\n",
+                h * 1000, lag_ms, bd, off.gyro_hf_rms, off.dhip_hf_rms, off.body_dev_all, off.fell ? " FELL" : "",
+                on.gyro_hf_rms, on.dhip_hf_rms, on.body_dev_all, on.fell ? " FELL" : "");
+    std::fflush(stdout);
+    if (h > 0.17 && lag_ms >= 49.0 && bd == 0.08) control_tall_50 = off.gyro_hf_rms;
+    if (on.fell && !off.fell) ++failures;
+    worst_body_cost = std::max(worst_body_cost, on.body_dev_all - off.body_dev_all);
+    if (!explore && bd == 0.08 && lag_ms <= 50.0) {
+      worst_fix_hf = std::max(worst_fix_hf, on.gyro_hf_rms);
+      if (on.dhip_hf_rms > 0.011) ++failures;
+      if (lag_ms >= 39.0 && h > 0.17 && on.gyro_hf_rms > 0.6 * off.gyro_hf_rms) ++failures;
+    }
+  }
+  std::printf("V42 summary: control (177 mm, +50 ms, no low-pass) gyro>5Hz %.3f rad/s; with the low-pass worst %.3f; "
+              "worst body cost %+.4f rad; %d failures\n", control_tall_50, worst_fix_hf, worst_body_cost, failures);
+  if (!explore) {
+    assert(control_tall_50 > 0.12);   // the test sees the oscillation the low-pass removes
+    assert(worst_fix_hf < 0.085);
+    assert(worst_body_cost < 0.012);
+    assert(failures == 0);
+  }
+}
+
 void runCoordinatedAdaptiveRegression() {
   int episodes = 0;
   int failures = 0;
@@ -2026,6 +2277,91 @@ WbScore scoreWb(const V3Controller::WbTable& t, bool verbose = false) {
 }
 #endif
 
+// V40: layered roll = the lateral axis of the gimbal (docs/ROLL_REDESIGN_20261005.md). The plant's IMU
+// mount and leg zeros are NOT the controller's constants (the old test shared the -0.040 with the
+// controller and hid a fixed target that held the robot tilted with a permanent 5-11 mm side offset).
+// all_modes prints off / old single loop / layered; the regression checks the layered mode only.
+void runLayeredRoll(bool all_modes) {
+  struct Sc {
+    const char* name;
+    void (*apply)(Case&);
+    double max_dh_end_mm;   // mean |side offset| over the last 4 s
+    double max_phi_end;     // |body roll vs gravity| mean over the last 4 s (< 0: not checked)
+    double max_app;         // peak roll vs the apparent vertical after 2 s
+    double min_load;        // smaller wheel's load share
+    int mode;               // expected final roll mode (0 off/learning, 1 active, 2 latched)
+    double t_settle_s;      // roll_t_last must be below this (< 0: not checked)
+  };
+  const Sc scs[] = {
+      {"flat, mount -0.040", [](Case& c) { c.imu_roll_mount = -0.040; }, 1.0, 0.004, 0.008, 0.49, 1, -1},
+      {"flat, mount -0.013", [](Case& c) { c.imu_roll_mount = -0.013; }, 1.0, 0.004, 0.008, 0.49, 1, -1},
+      {"flat, mount 0", [](Case& c) { c.imu_roll_mount = 0.0; }, 1.0, 0.004, 0.008, 0.49, 1, -1},
+      {"flat, mount +0.02", [](Case& c) { c.imu_roll_mount = 0.02; }, 1.0, 0.004, 0.008, 0.49, 1, -1},
+      // Hand-arranged leg zeros are indistinguishable from the IMU mount: the body stays as tilted as
+      // with roll off (no correction), but without a permanent side offset.
+      {"flat, legs 8mm, mount -0.013", [](Case& c) { c.imu_roll_mount = -0.013; c.leg_side_err_m = 0.008; },
+       1.0, -1.0, 0.032, 0.47, 1, -1},
+      {"flat, noise x4, mount -0.013", [](Case& c) { c.imu_roll_mount = -0.013; c.roll_noise_scale = 4.0; },
+       1.0, 0.005, 0.010, 0.49, 1, -1},
+      {"flat, servo x0.5", [](Case& c) { c.imu_roll_mount = -0.013; c.roll_servo_scale = 0.5; },
+       1.0, 0.004, 0.008, 0.49, 1, -1},
+      {"flat, servo x2", [](Case& c) { c.imu_roll_mount = -0.013; c.roll_servo_scale = 2.0; },
+       1.0, 0.004, 0.008, 0.49, 1, -1},
+      {"slope +0.06 at 12 s", [](Case& c) { c.imu_roll_mount = -0.013; c.cross_slope = 0.06; c.slope_t0 = 12.0; },
+       11.0, 0.004, 0.020, 0.47, 1, 17.5},
+      {"slope -0.05 at 12 s", [](Case& c) { c.imu_roll_mount = -0.013; c.cross_slope = -0.05; c.slope_t0 = 12.0; },
+       11.0, 0.004, 0.020, 0.47, 1, 17.5},
+      // Beyond the legs' travel: the latch fades the loop out instead of pinning the legs at the stop.
+      {"slope +0.15 at 12 s (too steep)", [](Case& c) { c.imu_roll_mount = -0.013; c.cross_slope = 0.15;
+                                                          c.slope_t0 = 12.0; }, 1.0, -1.0, 0.16, 0.40, 2, -1},
+      {"turn 0.55 m/s 1.5 rad/s", [](Case& c) { c.imu_roll_mount = -0.013; c.drive_m_s = 0.55; c.drive_start_s = 8;
+                                                 c.drive_end_s = 16; c.yaw_rad_s = 1.5; c.yaw_t0 = 11;
+                                                 c.yaw_t1 = 14; }, 1.0, 0.004, 0.030, 0.46, 1, -1},
+      {"left bump 8 mm 0.3", [](Case& c) { c.imu_roll_mount = -0.013; c.bump_h = 0.008; c.bump_ramp = 0.04;
+                                            c.bump_x0 = 0.25; c.bump_width = 0.05; c.bump_left_only = true;
+                                            c.drive_start_s = 6; c.drive_m_s = 0.3; c.drive_end_s = 12; },
+       1.0, 0.004, 0.026, 0.46, 1, -1},
+  };
+  for (const auto& sc : scs) {
+    for (int mode = all_modes ? 0 : 2; mode < 3; ++mode) {  // off, old single loop, layered
+      Case c = withMode(Case{}, 2);
+      c.duration_s = 28.0;
+      c.roll = mode > 0;
+      if (mode == 1) { c.roll_learn = 0; c.roll_pre = 0; c.roll_damp = 0.0; c.roll_latch = 0; }
+      if (mode == 2) { c.roll_learn = 1; c.roll_pre = 1; c.roll_damp = 0.0; c.roll_latch = 1; c.roll_gimbal = 1; }
+      if (mode == 2 && std::getenv("RL_DAMP")) c.roll_damp = std::atof(std::getenv("RL_DAMP"));
+      if (mode == 2 && std::getenv("RL_PRE")) c.roll_pre = std::atoi(std::getenv("RL_PRE"));
+      if (std::getenv("RL_ONLY") && mode != std::atoi(std::getenv("RL_ONLY"))) continue;
+      sc.apply(c);
+      const Result r = simulate(c);
+      std::printf("V40 %-32s %-7s fell=%d held=%d | dh_end %4.1f mm phi_end %+.4f ref %+.4f mode=%d rev/s %.1f | "
+                  "app max %.3f (over 0.005 until %.1f s) vs gravity max %.3f load min %.2f dh max %4.1f mm body %.3f\n",
+                  sc.name, mode == 0 ? "off" : mode == 1 ? "old" : "layered", r.fell, r.held_resets,
+                  r.roll_dh_end * 1000, r.roll_phi_end, r.roll_ref_end, r.roll_mode_end, r.roll_dh_rev_s,
+                  r.roll_app_max, r.roll_t_last, r.roll_world_max, r.wheel_load_min, r.roll_dh_max * 1000,
+                  r.body_dev_all);
+      std::fflush(stdout);
+      if (mode != 2) continue;
+      assert(!r.fell && r.held_resets == 0);
+      assert(r.roll_dh_end * 1000 <= sc.max_dh_end_mm || sc.mode == 2);
+      if (sc.max_phi_end >= 0.0) assert(std::abs(r.roll_phi_end) <= sc.max_phi_end);
+      assert(r.roll_app_max <= sc.max_app && r.wheel_load_min >= sc.min_load);
+      assert(r.roll_mode_end == sc.mode && r.roll_dh_rev_s < 1.5);
+      if (sc.t_settle_s > 0.0) assert(r.roll_t_last < sc.t_settle_s);
+    }
+  }
+  // Roll belongs to the gimbal: without the pitch level loop it does not act.
+  {
+    Case c = withMode(Case{}, 2);
+    c.duration_s = 24.0;
+    c.roll = 1; c.roll_learn = 1; c.roll_pre = 1; c.roll_latch = 1; c.roll_gimbal = 1; c.level = 0;
+    c.imu_roll_mount = -0.013; c.cross_slope = 0.06; c.slope_t0 = 12.0;
+    const Result r = simulate(c);
+    std::printf("V40 roll without the pitch gimbal: dh_end %.1f mm mode=%d\n", r.roll_dh_end * 1000, r.roll_mode_end);
+    assert(!r.fell && r.roll_mode_end == 0 && r.roll_dh_end < 1.0e-3);
+  }
+}
+
 int main() {
   // V1: plant self-check - passive motion (no torques, free hip and knee) conserves
   // energy, so the numeric Kane equations are consistent.
@@ -2123,6 +2459,14 @@ int main() {
   }
   if (std::getenv("TIER_SUSPENSION_PUSH") != nullptr) {
     runSuspensionPushRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_HFVIB") != nullptr) {
+    runHfVibrationRegression();
+    return 0;
+  }
+  if (std::getenv("TIER_KNEEFOLLOW") != nullptr) {
+    runKneeFollowRegression();
     return 0;
   }
   if (std::getenv("TIER_ADAPTSUS") != nullptr) {
@@ -2755,6 +3099,10 @@ int main() {
                   r.roll_t_last - r.roll_t_first, r.roll_t_half - r.roll_t_first, r.roll_dh_max * 1000);
       std::fflush(stdout);
     }
+    return 0;
+  }
+  if (std::getenv("TIER_ROLL2") != nullptr) {
+    runLayeredRoll(true);
     return 0;
   }
   if (std::getenv("TIER_ROLL") != nullptr) {
@@ -4078,6 +4426,8 @@ int main() {
       }
     }
   }
+  // V40: layered roll as the lateral axis of the gimbal.
+  runLayeredRoll(false);
   // V31: the same alternating push regression can be run in isolation with
   // TIER_SUSPENSION_PUSH=1 and remains part of the complete suite below.
   runSuspensionPushRegression();

@@ -47,8 +47,7 @@ class MotorFeedback {
   // power-up, so the legs are homed on the support fixture, whose pose is the
   // neutral geometry: core = driver_sign * driver_raw + offset.
   HomeResult homeLegs(std::uint64_t now_us) noexcept;
-  // Same, for an arbitrary known leg pose (e.g. legs hanging free under
-  // gravity, see LegHoming.hpp). Only the leg joints of `pose` are used.
+  // Same, for an arbitrary known leg pose. Only the leg joints of `pose` are used.
   HomeResult homeLegsAt(const robot_control::JointArray& pose,
                         std::uint64_t now_us) noexcept;
   // Drops the zero when any leg's MIT feedback has been silent long enough

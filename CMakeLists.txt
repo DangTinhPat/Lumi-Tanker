@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(tap_native LANGUAGES CXX)
 
-# Canonical native build.  The workspace contains no ROS package or middleware
-# dependency; the robot model and simulator are native MuJoCo assets.
+# Canonical native build.  The robot model and simulator are native MuJoCo
+# assets; the build has no middleware dependency.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 include(CTest)
 add_subdirectory(src/tap_control/hal)

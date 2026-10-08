@@ -6,7 +6,7 @@ boot, số đo phần cứng và các hướng đã loại nằm ở `docs/V3.3_
 
 Build/nạp: `pio run -e esp32-s3-v3 [-t upload --upload-port /dev/ttyUSBx]`. Điều khiển: `python3 tools/tap_serial_control_gui.py`
 (tự kết nối, log ở `~/tap_logs/`; mở cổng serial reset ESP32 và mất mọi `SET` chạy). Không dùng BLE khi điều khiển
-bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 giữ nguyên.
+bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`) đã gỡ ngày 08/10/2026 (mã, test, tài liệu); `esp32-s3-v3` là môi trường mặc định và duy nhất, còn lịch sử trong git.
 
 ## Tổng quan
 
@@ -62,13 +62,14 @@ bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 giữ nguyên.
   `lqrleadtall|lqrleadlow`, `ttrimacc 0|1`, `ttrimtau`, `leash` (neo vị trí khi lái), `sleash|sret` (neo đứng, mặc định tắt),
   `hcap` (trần tốc độ bánh khi bị giữ), `wpred|wbpred|wpdelay|wptau|wpmeas` (bộ dự đoán bánh).
 - **Tầng 2:** `vpitch` (chỉ khi không Balancing), `trunk`, `tshare|tlead|tleadexp|tmax|trate`, `texp|texpt` (số mũ phần hông gánh ở
-  độ cao thấp/cao), `tvg|tvglow` (trọng số tốc độ khớp trong θv_rate), `tbdamp` (giảm chấn thân), `tcarrier`, `tadapt`,
+  độ cao thấp/cao), `tvg|tvglow` (trọng số tốc độ khớp trong θv_rate), `tbdamp` (giảm chấn thân), `tbdlpf` (lọc gyro cho giảm chấn, Hz, boot 4,5; 0 = gyro thô), `tcarrier`, `tadapt`,
   `legacy 0|1` (đưa tầng 2 về như `b4b6d4a`), `tlsrc 0|1` (lead lấy gyro), `tgate|tglo|tghi|tgllo|tglhi|tgrel` (cổng sự kiện phản xạ),
   `tdb` (vùng chết), `tsatm`, `tprev|tpacc|tpjerk|tpvmax|tpt` (preview), `tlvl|tlevel|tltau|tlvmax` (vòng level), `tplanfull`,
-  `tenv|tenvlean`, `khold|wbkhold`, `cdx <mm>` (lệch CoM thân), `timu`.
+  `tenv|tenvlean`, `khold|wbkhold`, `kfhz|kfrate` (gối bù độ cao của IK qua lọc Hz + giới hạn rad/s, boot 1.0/0.6, `kfhz 0` = tức thì), `cdx <mm>` (lệch CoM thân), `timu`.
 - **Chiều cao/gối:** `height <mm>`, `hrate <mm/s>`, `haccel <mm/s²>`, `hjerk <mm/s³>`, `hff`, `tsus 0|1`, `tsusad 0|1`, `tsusk`,
   `tsusdelay`, `tsusg`, `tsusmax <mm>`.
-- **Roll:** `roll 0|1` (boot 0), `rolltau|rollkp|rollff|rolltgt|rollyaw|rollmax|rollres|rollsign|rollvff`.
+- **Roll (trục ngang của gimbal):** `roll 0|1` (boot 0), `rolltau|rollkp|rollff|rollyaw|rollmax|rollres|rollsign|rollvff`,
+  `rolltgt` (ghim mốc ngang, tắt học), `rollcal` (học lại mốc), `rolllearn|rollpre|rolldamp|rolllatch|rollgimbal`. TR: `rref`, `rm`.
 - **Khởi động:** `imm`, `auto`, `armgo`, `stillms`, `stillspan`.
 - **Whole-body (thử nghiệm):** `wbarm|wbgive|wbsoft|wbenv|wbff|wbslack|wbbg`.
 - `leg_kp|leg_kd` chỉ cho `LEGMODE MIT`.

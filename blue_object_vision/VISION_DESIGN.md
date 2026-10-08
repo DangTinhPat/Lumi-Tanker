@@ -2,7 +2,7 @@
 
 ## Goal and boundary
 
-Provide a standalone, non-ROS vision process that tracks a person
+Provide a standalone vision process that tracks a person
 and publishes fresh image measurements for a separate control adapter. This
 process does not command motors or infer metric distance. Lumi Tanker v3.3's
 control contract already has forward-velocity and yaw-rate command fields, but
@@ -30,7 +30,7 @@ measurements or setpoints through the existing external command path.
   use the local COCO model at 640-pixel inference size. The detector exposes
   only its `person` class to the existing tracker.
 
-No ROS dependency is introduced. No code from those projects is copied.
+No code from those projects is copied.
 
 ## Implementation stages
 

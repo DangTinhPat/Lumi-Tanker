@@ -128,7 +128,7 @@ struct MotorCommand {
   JointArray kp_scale{};
   JointArray kd_scale{};
   // Additive feedforward torque, added to the joint PD term before the
-  // torque_nm clamp (see BalanceControllerNode::publishLegCommand). Zero by
+  // torque_nm clamp in the leg command path. Zero by
   // default; used by LandingImpedance's virtual spring-damper force and by
   // JumpController's own feedforward.
   JointArray feedforward_nm{};

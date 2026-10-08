@@ -70,8 +70,8 @@ LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
   const float x = std::copysign(std::clamp(std::abs(x_world_m), xmin, xmax), x_world_m);
   out.limited = std::abs(x - x_world_m) > 1.0e-6F || h != depth_world_m;
 
-  // Specify the end-effector target before solving joints (Pinocchio IK
-  // example: https://docs.ros.org/en/rolling/p/pinocchio/doc/b-examples/d-inverse-kinematics.html).
+  // Specify the end-effector target before solving joints (the Cartesian-task
+  // approach of Pinocchio's IK examples).
   // TAP's planar two-link chain admits an analytic solve. Use the actual
   // CAD vectors and knee rebase, not nominal supplier lengths or a mirrored
   // right leg. The supported knee branch is monotonic in radius.
@@ -89,6 +89,17 @@ LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
   out.x_world_m = x;
   out.ok = std::isfinite(out.hip_offset_rad) && std::isfinite(knee);
   return out;
+}
+
+float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
+                               float body_pitch_rad) noexcept {
+  const float knee = std::clamp(knee_offset_rad, kKneeMinRad, 0.0F);
+  const auto zero_hip = WholeBodyModel::legHeight(0.0F, knee);
+  const float r = std::hypot(zero_hip.x_m, zero_hip.height_m);
+  const float x = std::clamp(x_world_m, -0.999F * r, 0.999F * r);
+  const float depth = std::sqrt(std::max((r - x) * (r + x), 0.0F));
+  const float hip_below = std::atan2(zero_hip.height_m, zero_hip.x_m) + 1.57079632679F;
+  return hip_below - hangHipCad() - std::atan2(x, depth) - body_pitch_rad;
 }
 
 // Constant for the model: computed once (they were a full forKnee each call,

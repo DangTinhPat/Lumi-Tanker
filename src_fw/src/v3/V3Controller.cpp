@@ -321,7 +321,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     } else {
       out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
       updateLegLayers(in, true, out.wheel_cmd_rad_s);
-      coordinateTrunkAxle();
+      coordinateTrunkAxle(in.dt_s);
     }
     out.leg_hip_offset_rad = hipCommand();
     out.leg_knee_offset_rad = kneeCommand();
@@ -1541,8 +1541,15 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   // impedance controller or a passivity proof for delayed actuators. It is
   // allowed only with a resolved whole-system disturbance (response weight):
   // body/joint counter-rotation with a stationary axle->COM line keeps it at zero.
+  // body_rate_ itself stays raw: held/armed detection and the reflex gate read it.
+  if (trunk_alpha_ <= 0.0F || t.body_damp_lpf_hz <= 0.0F) {
+    body_rate_damp_f_ = body_rate_;
+  } else {
+    body_rate_damp_f_ += std::clamp(2.0F * 3.14159265F * t.body_damp_lpf_hz * in.dt_s, 0.0F, 1.0F) *
+        (body_rate_ - body_rate_damp_f_);
+  }
   const float body_damping = std::max(t.body_damping_s, 0.0F) * std::sqrt(ratio) *
-      response * body_rate_ / jh;
+      response * body_rate_damp_f_ / jh;
   // Tier::hip_deadband_rad: small leans stay with the wheels.
   const float fast_signal = fast_residual + rate_lead;
   const float hip_db = std::max(t.hip_deadband_rad, 0.0F);
@@ -1592,6 +1599,7 @@ void V3Controller::updateTrunk(const Input& in, bool active,
                                     std::abs(wheel_cmd_rad_s[1] + wheel_carrier_rad_s_[1])) /
       wheel_cap;
   const bool wheel_saturating = wheel_ratio >= std::clamp(t.wheel_sat_margin, 0.0F, 1.0F);
+  gimbal_frozen_ = wheel_saturating;
   const float range_ceiling = (!wheel_saturating || mag_ratio <= margin)
       ? 1.0F : std::clamp((1.0F - mag_ratio) / (1.0F - margin), 0.0F, 1.0F);
   // Not gated on !height_startup_: max_rad above already tracks the real
@@ -1687,14 +1695,62 @@ void V3Controller::updateRoll(const Input& in, bool active) {
       roll_bias_ = std::clamp(roll_bias_ - in.dt_s / (tau * 5.0F) * err, -0.2F, 0.2F);
     }
   }
+  // Filtered roll rate (bias removed): the reflex damping and the learning gate.
+  roll_w_f_ += std::clamp(2.0F * 3.14159265F * 10.0F * in.dt_s, 0.0F, 1.0F) *
+      ((in.roll_rate_rad_s - roll_bias_) - roll_w_f_);
+  if (state_ != State::Balancing || !r.enabled) roll_fail_ = false;
+  // Level reference: learned in place after free balancing has been calm for a
+  // while, with the side offsets at zero (Roll::learn_ref). The same flat-floor
+  // assumption as a manual calibration, but it follows each power-up.
+  if (!active) {
+    roll_ref_valid_ = false;
+    roll_learn_n_ = 0;
+    roll_learn_sum_ = 0.0F;
+    roll_learn_t0_us_ = 0U;
+    roll_active_since_us_ = 0U;
+  } else if (r.learn_ref && !roll_ref_valid_) {
+    if (roll_active_since_us_ == 0U) roll_active_since_us_ = in.now_us;
+    const float since_s = static_cast<float>(in.now_us - roll_active_since_us_) * 1.0e-6F;
+    if (since_s >= r.learn_delay_s) {
+      const bool calm = std::abs(roll_w_f_) < r.learn_rate_rad_s &&
+          std::abs(ground_v_) < r.learn_speed_m_s && std::abs(yaw_cmd_) < 1.0e-3F &&
+          std::abs(roll_dh_) < 5.0e-4F;
+      if (!calm) {
+        roll_learn_n_ = 0;
+        roll_learn_sum_ = 0.0F;
+        roll_learn_t0_us_ = 0U;
+      } else {
+        if (roll_learn_t0_us_ == 0U) roll_learn_t0_us_ = in.now_us;
+        roll_learn_sum_ += roll_est_;
+        ++roll_learn_n_;
+        if (static_cast<float>(in.now_us - roll_learn_t0_us_) * 1.0e-6F >= r.learn_window_s) {
+          roll_ref_ = roll_learn_sum_ / static_cast<float>(roll_learn_n_);
+          roll_ref_valid_ = true;
+        }
+      }
+    }
+  }
+  const bool use_ref = r.learn_ref && roll_ref_valid_;
+  const float ref = use_ref ? roll_ref_ : r.target_rad;
+  const bool gimbal_open = !r.gimbal_link || (config_.tier.level && level_beta_ >= 0.99F);
+  const bool level_ready = r.enabled && active && !roll_fail_ && gimbal_open &&
+      (!r.learn_ref || roll_ref_valid_);
+  roll_alpha_ += std::clamp((level_ready ? 1.0F : 0.0F) - roll_alpha_,
+                            -in.dt_s / 0.5F, in.dt_s / std::max(r.ramp_s, 0.05F));
   // Lean-in target: the resultant of gravity and the centripetal pull
-  // between the wheels (left turn, a_c > 0: left side down, roll < 0).
-  roll_target_ = r.target_rad - r.turn_ff * std::atan(std::clamp(a_c / 9.80665F, -0.3F, 0.3F));
+  // between the wheels (left turn, a_c > 0: left side down, roll < 0). With
+  // cmd_preview it follows the commanded (slewed) yaw, which leads the wheels.
+  const float a_lean = r.cmd_preview ? roll_v_lp_ * yaw_cmd_ : a_c;
+  roll_target_ = ref - r.turn_ff * std::atan(std::clamp(a_lean / 9.80665F, -0.3F, 0.3F));
+  roll_tgt_rate_f_ += std::clamp(2.0F * 3.14159265F * 10.0F * in.dt_s, 0.0F, 1.0F) *
+      ((roll_target_ - roll_tgt_prev_) / std::max(in.dt_s, 1.0e-4F) - roll_tgt_rate_f_);
+  roll_tgt_prev_ = roll_target_;
   const float half = 0.5F * std::max(r.track_m, 0.05F);
   // Feasible roll travel opens at the slow common-height rate. Keep the
   // normal roll slew so it can use that travel immediately on a cross slope.
   const float step = std::max(r.rate_m_s, 0.0F) * in.dt_s;
-  if (!r.enabled || !active) {
+  if (!level_ready) {
+    roll_sat_s_ = 0.0F;
     roll_dh_ -= std::clamp(roll_dh_, -step, step);  // back to even legs
     roll_i_ = roll_dh_;
     roll_e_lp_ = roll_est_ - roll_target_;
@@ -1702,7 +1758,7 @@ void V3Controller::updateRoll(const Input& in, bool active) {
     // Feed-forward: the side offset that sets the target roll on level
     // ground; the integral takes the ground and the legs' own error; the
     // proportional part reacts to a sudden tilt at once (gyro-fast).
-    const float ff = half * std::tan(roll_target_ - r.target_rad);
+    const float ff = half * std::tan(roll_target_ - ref);
     roll_e_lp_ += std::clamp(2.0F * 3.14159265F * std::max(r.err_lpf_hz, 0.1F) * in.dt_s, 0.0F, 1.0F) *
         ((roll_est_ - roll_target_) - roll_e_lp_);
     const float e = roll_e_lp_;  // + = left side too high
@@ -1716,12 +1772,27 @@ void V3Controller::updateRoll(const Input& in, bool active) {
     const float room = std::max(std::min({r.max_dh_m, hi - h, h - lo}), 0.0F);
     const float tau = r.vel_ff ? r.tau_vff : r.tau_s;
     const float kp = r.vel_ff ? r.kp_vff : r.kp;
-    roll_i_ -= in.dt_s / std::max(tau, 0.02F) * half * std::sin(e);
+    if (!(r.gimbal_link && gimbal_frozen_)) {
+      roll_i_ -= in.dt_s / std::max(tau, 0.02F) * half * std::sin(e);
+    }
     roll_i_ = std::clamp(roll_i_, -room - ff, room - ff);
     const float p = -kp * half * std::sin(e);
-    const float want = std::clamp(roll_i_ + ff + p, -room, room);
+    // Reflex: damping on the error rate (body rate minus the target's own rate).
+    const float w_e = roll_w_f_ - roll_tgt_rate_f_;
+    const float w_d = std::copysign(std::max(std::abs(w_e) - r.damp_db_rad_s, 0.0F), w_e);
+    const float d = std::clamp(-r.damp_s * half * w_d, -r.damp_max_m, r.damp_max_m);
+    const float want = std::clamp(roll_alpha_ * (roll_i_ + ff + p + d), -room, room);
     roll_dh_ += std::clamp(want - roll_dh_, -step, step);
     roll_dh_ = std::clamp(roll_dh_, -room, room);
+    // Latch: pinned at the travel limit with the error still large = the loop
+    // cannot level the body; fade out instead of fighting (Roll::latch).
+    if (r.latch && room > 0.002F && std::abs(roll_dh_) >= 0.9F * room &&
+        std::abs(roll_e_lp_) > r.fail_err_rad) {
+      roll_sat_s_ += in.dt_s;
+      if (roll_sat_s_ >= r.fail_s) roll_fail_ = true;
+    } else {
+      roll_sat_s_ = std::max(roll_sat_s_ - in.dt_s, 0.0F);
+    }
   }
   // Side height offset -> joint offsets through the leg IK at the pose
   // (knee for the height, hip to keep the axle under the hip).
@@ -1748,14 +1819,20 @@ void V3Controller::updateRoll(const Input& in, bool active) {
   roll_hip_ = hip;
 }
 
-void V3Controller::coordinateTrunkAxle() noexcept {
+void V3Controller::coordinateTrunkAxle(float dt_s) noexcept {
   axle_hip_correction_ = 0.0F;
   axle_limited_ = false;
   axle_limit_direction_ = 0.0F;
   if (!kneeHoldOn()) { dknee_ = 0.0F; return; }
+  const Tier& t = config_.tier;
+  const bool follow = t.knee_follow_hz > 0.0F;
   // Below 2 micrometres of requested axle motion, avoid subtracting nearly
-  // equal squared radii at full extension. Keep the nominal zero solution.
-  if (std::abs(dhip_) < 1.0e-5F) { dknee_ = 0.0F; return; }
+  // equal squared radii at full extension. Keep the nominal zero solution
+  // (a following knee first walks back to it).
+  if (std::abs(dhip_) < 1.0e-5F && !(follow && std::abs(dknee_) > 1.0e-5F)) {
+    dknee_ = 0.0F;
+    return;
+  }
   // Keep the nominal pose's vertical projection at the CURRENT body pitch.
   // Thus dhip=0 introduces no new posture correction on the lifting stand
   // or during the max-height wheel catch. Cancel the arc caused by trunk
@@ -1775,9 +1852,26 @@ void V3Controller::coordinateTrunkAxle() noexcept {
   // through zero instead of jumping between disconnected annulus branches.
   const float depth = std::max(h * std::cos(body_pitch_), LegHeight::minHeight());
   const auto target = LegHeight::forAxleOnPlane(requested_x, depth, body_pitch_);
-  if (!target.ok) { dknee_ = 0.0F; axle_limited_ = true; return; }
-  axle_hip_correction_ = target.hip_offset_rad - pose_.hip_offset_rad - dhip_;
-  dknee_ = target.knee_offset_rad - pose_.knee_offset_rad;
+  if (!target.ok) {
+    axle_limited_ = true;
+    if (!follow) { dknee_ = 0.0F; return; }
+  }
+  const float want_dknee = target.ok ? target.knee_offset_rad - pose_.knee_offset_rad : 0.0F;
+  if (follow) {
+    // dknee follows dhip^2: low-pass + rate limit it. The hip below is solved for
+    // the knee actually sent, so the axle's fore/aft stays exact and only its
+    // depth lags by the compensation's few millimetres.
+    const float a = std::clamp(2.0F * 3.14159265F * t.knee_follow_hz * dt_s, 0.0F, 1.0F);
+    const float step = std::max(t.knee_follow_rate_rad_s, 0.0F) * dt_s;
+    dknee_ += std::clamp(a * (want_dknee - dknee_), -step, step);
+    if (!target.ok) return;
+    axle_hip_correction_ = LegHeight::hipForKneeAtX(
+        pose_.knee_offset_rad + dknee_, target.x_world_m, body_pitch_) -
+        pose_.hip_offset_rad - dhip_;
+  } else {
+    axle_hip_correction_ = target.hip_offset_rad - pose_.hip_offset_rad - dhip_;
+    dknee_ = want_dknee;
+  }
   axle_limited_ = target.limited;
   axle_limit_direction_ = target.x_world_m - requested_x;
 }

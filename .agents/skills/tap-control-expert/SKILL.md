@@ -1,35 +1,35 @@
 ---
 name: tap-control-expert
-description: Port or review TAP MPC, whole-body compensation, joint trajectories, embedded control and state-machine recovery from the wheel_leg reference.
+description: Review or extend the TAP balance controller (V3Controller tiers, LQR, hip/knee coordination), its estimators and safety logic under embedded constraints.
 ---
 
-# MPC And State Machine Expert
+# Balance Control Expert
 
-Read workspace `AGENTS.md` and `docs/ALGORITHM_MIGRATION.md`; inspect reference
-`balance_firmware_core/core/{include/robot_control,src}` and actual TAP core.
+Read workspace `AGENTS.md`, `architecture.md`, `docs/V3.3_HANDOFF.md` (current
+state, boot configuration, measured hardware facts, rejected ideas) and
+`src_fw/FIRMWARE_V3.md`, then inspect `src_fw/src/v3/V3Controller.cpp`.
 
-- Keep deterministic algorithm code independent of ROS/Gazebo. Preserve the
-  six-element order LH, LK, LW, RH, RK, RW at documented boundaries; name-map
-  external joint messages instead of trusting their array order.
-- Reference MPC is a four-state linear inverted-pendulum acceleration optimizer,
-  not full rigid-body inverse dynamics or contact-constrained whole-body MPC.
-  Audit model period versus update dt, acceleration-to-velocity integration,
-  saturation, horizon bounds, solver warm state and reset behavior explicitly.
-- Replace old geometry, mirrored wheel mapping and WholeBodyModel fits. Derive
-  forward/yaw mixing and inverse odometry together for native CAD axes; prove
-  both with sign tests before tuning gains. Use current FK for equilibrium pitch
-  and COM height, including asymmetric poses and body mesh rotation.
-- Preserve stop priority, disable behavior, stale-sensor response and explicit
-  re-enable semantics across core AND ROS wrapper. Test requests held high,
-  fall during pose motion, stop during recovery and reset after time jumps.
-- JointMotionPlanner is cubic smoothstep position interpolation, not a
-  velocity/acceleration-limited planner. Add or validate feasibility separately.
-  Stand-up Tuck/Rise/Settle is a candidate sequence, not proven recovery on TAP;
-  remap poses, test contact/clearance and distinguish timeout from success.
-- Keep optional pitch integral trim disabled until its settled-state gate is
-  supported by data. Re-evaluate station hold during drive/pose transitions.
-  Do not reuse old gains, torques or widened recovery fall limits as measured
+- Keep the deterministic algorithm portable and bounded (Rule 4): no dynamic
+  allocation or parsing in the control path, worst-case cycle time measured, the
+  six-element joint order `[LH, LK, LW, RH, RK, RW]` preserved at every boundary.
+- Respect the structure: tier 1 (wheel LQR on the virtual pendulum angle) and
+  tier 2 (hip reflex, preview, level loop) with the paired hip/knee IK. Check
+  `docs/V3.3_HANDOFF.md` section 5 before proposing a mechanism; do not retry a
+  rejected idea without new evidence.
+- Robot time is scarce. New behaviour ships behind a core-default-off,
+  revertible `SET` flag, is validated in the planar sims first, and states which
+  evidence level it has. Calibrate the sim to robot measurements (wheel dead
+  time and lag, hip delay) before trusting it; the hip lags more when crouched.
+- Measure what the operator hears and feels, not only body deviation: command
+  roughness and rates per joint, and the >5 Hz content of the gyro and hip
+  command (`tools/hf_vibration_stats.py`). A fix that only improves lean can still
+  rattle a gearbox.
+- Derivative feedback through a lagging actuator can become positive feedback
+  near the frequency where the phase reaches -180 deg; low-pass gyro-fed paths
+  and check the margin across the delays measured on the robot.
+- Preserve stop priority, disable behaviour, stale-sensor response and explicit
+  re-enable semantics. Do not widen fall limits or reuse old gains as measured
   motor capabilities.
 
 Deliver explicit frame/parameter changes and deterministic regression evidence.
-Label balance, roll and recovery as pending until closed-loop TAP trials pass.
+Label balance, roll and crouch behaviour as pending until robot logs confirm it.

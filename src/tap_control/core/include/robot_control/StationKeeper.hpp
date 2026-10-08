@@ -19,7 +19,7 @@ class StationKeeper {
     double yaw = 0.0;  // world heading, rad
     double dt = 0.0;   // elapsed seconds; nonpositive/nonfinite resets
     bool active = false;  // caller: balance-capable mode and fresh pose
-    bool operator_driving = false;  // actual operator cmd_vel, not correction
+    bool operator_driving = false;  // actual operator velocity command, not correction
     bool ready_to_acquire = true;  // ignored after the anchor has been captured
   };
   struct Output {

@@ -22,9 +22,9 @@ User-supplied manufacturer source: https://www.cjcmotor.com/motor/bl4820m12
 Retrieved 2026-09-12; unmodified HTML snapshot:
 `source_assets/datasheets/cjc_bl4820m12_20260912.html`.
 SHA256: `4334f5f2ecd5c97f759c863e799dc7d407430dca5b45b0a9c7ec35a734234484`.
-Structured reference data is installed with the robot description at
-`description/company_rb/wheel_motor.yaml`. It is not loaded by the controller
-or Xacro and does not enforce actuator limits in Gazebo.
+The datasheet snapshot above is the only copy kept in the repository. No
+structured motor file is loaded by the controller, and nothing here enforces
+actuator limits in the simulator.
 
 | Published property | Value |
 | --- | --- |
@@ -149,11 +149,11 @@ assigned to the spinning wheel. Revised COM/inertia require mounting geometry,
 not only a total mass. CAD fit and wheel/leg interference must be checked again.
 
 Existing 3 Nm leg command caps, damping, speed limits and ideal wheel velocity
-servos remain simulation assumptions. No runtime parameter, URDF, inertia,
+servos remain simulation assumptions. No runtime parameter, model file, inertia,
 encoder limit or live desktop process was changed for this selection record.
 Previous balance/deep-squat passes apply to the recorded legacy model only;
 they do not validate the selected four-GIM/two-CJC actuator combination.
 
 After variant verification, update mass allocation and actuator modeling,
-regenerate COM/pose data, then repeat balance, drive and deep-squat tests in
-Gazebo. No hardware actuation or firmware deployment is authorized by this note.
+regenerate COM/pose data, then repeat balance and drive tests in
+simulation. No hardware actuation or firmware deployment is authorized by this note.

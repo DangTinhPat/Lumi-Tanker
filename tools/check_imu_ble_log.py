@@ -3,7 +3,7 @@
 
 Usage:
   python3 tools/check_imu_ble_log.py serial.log
-  pio device monitor -e esp32-s3-poc | tee serial.log
+  pio device monitor -e esp32-s3-v3 | tee serial.log
   python3 tools/check_imu_ble_log.py --require-filter --require-ble serial.log
 """
 

@@ -114,6 +114,46 @@ class V3Controller {
     // Side mapping of the correction: -1 if the IMU's body +y is the robot's
     // right (SET rollsign).
     float sign = 1.0F;
+
+    // --- Layered response (HANDOFF / docs/ROLL_REDESIGN_20261005.md). The struct
+    // defaults keep the single PI loop above; the firmware switches these on.
+    //
+    // Level reference learned in place (SET rollcal re-learns, SET rolltgt pins
+    // target_rad and turns it off). The natural roll of the robot (IMU mount,
+    // hand-arranged leg zeros) changes with every power-up, and a fixed target
+    // held the body tilted with a permanent -5...-11 mm side height difference.
+    // After learn_delay_s of free balancing, the mean estimate over learn_window_s
+    // with the side offsets at zero is the reference (a flat floor is assumed at
+    // that moment); a slope that appears later is then leveled. The loop opens
+    // only after that, ramping in over ramp_s.
+    bool learn_ref = false;
+    float learn_delay_s = 2.0F;
+    float learn_window_s = 2.0F;
+    float learn_rate_rad_s = 0.05F;   // window restarts above this |roll rate|
+    float learn_speed_m_s = 0.15F;    // ... or this |ground speed|, or while turning
+    float ramp_s = 1.5F;
+    // Turn lean-in from the commanded (slewed) yaw instead of only the measured
+    // one, so the legs lean as the wheels start to turn rather than after.
+    bool cmd_preview = false;
+    // Reflex: damping from the roll gyro, a PD derivative on the roll error.
+    // Side height offset = -damp_s * (track / 2) * roll-error rate [s], with a soft
+    // deadband on the rate and a bound (the gyro is clean; vz was not).
+    float damp_s = 0.0F;
+    float damp_db_rad_s = 0.03F;
+    float damp_max_m = 0.004F;
+    // Roll is the lateral axis of the gimbal (mechanism 2): with gimbal_link the level
+    // loop opens only with the pitch gimbal's authority (Tier::level, level_beta_ at 1:
+    // after tier-2 settle, not while held) and, like the pitch level integral, stops
+    // integrating while the wheels are near their cap. Off: the roll loop runs alone
+    // (the whole-body path has no pitch gimbal).
+    bool gimbal_link = false;
+    // Latch: a side offset at >= 90 % of the available travel for fail_s with the
+    // roll error still above fail_err_rad means the loop cannot level the body
+    // (wrong sign, a slope beyond the legs, a wheel in the air). The roll then
+    // fades out and stays off until SET roll / SET rollcal or the next engage.
+    bool latch = false;
+    float fail_s = 2.5F;
+    float fail_err_rad = 0.02F;
   };
 
   // Wheel speed predictor (Smith style). The measured wheel speed trails the
@@ -247,6 +287,12 @@ class V3Controller {
     // counter-rotation per rad/s], scheduled by sqrt(l/l_hang) and gated by the
     // disturbance weight (ungated it rings). Struct default 0.04; boot 0.08.
     float body_damping_s = 0.04F;
+    // Low-pass on the gyro feeding that damping [Hz, 0 = raw gyro]. The damping is a
+    // derivative feedback through a hip that lags ~70 ms: near 7 Hz the loop phase
+    // reaches -180 deg and the gate-open gain (lead + damping) turns it into a small
+    // 6-8 Hz limit cycle (robot logs 07/10, sim V42). Body swings worth damping are
+    // 1-3 Hz. SET tbdlpf.
+    float body_damp_lpf_hz = 0.0F;
     // Soft deadband on the fast feedback part of the tier-2 hip (residual lean +
     // lead), not on the planned lean or the slow level loop [rad of lean,
     // SET tdb; 0 = off]. Small leans stay with the wheels; the hips act on real
@@ -337,6 +383,13 @@ class V3Controller {
     // knee_hold_wb: the whole-body path keeps its own knee height solve.
     bool knee_hold = true;
     bool knee_hold_wb = true;
+    // The IK knee term grows as dhip^2, so its gain to dhip is ~3.3*|dhip| and a
+    // reflex swing near max_rad drives the loaded knee 0.5-1x as hard as the hip
+    // (robot grind, 07/10). The compensation is only millimetres, so the knee
+    // follows the IK solution through a low-pass (Hz) and rate limit (rad/s) and
+    // the hip is re-solved for the knee actually sent. 0 Hz = instant (SET kfhz).
+    float knee_follow_hz = 0.0F;
+    float knee_follow_rate_rad_s = 0.6F;
     float env_catch_rad = 0.20F;   // see envelope
     // Tier 2 takes the planned lean from the plan this much ahead of the tracked
     // reference (the GDS68 hip servo lags ~60-90 ms).
@@ -718,6 +771,22 @@ class V3Controller {
   [[nodiscard]] float wbLevelHip() const noexcept { return wb_bias_; }
   [[nodiscard]] float rollEstimate() const noexcept { return roll_est_; }  // vs gravity
   [[nodiscard]] float rollTarget() const noexcept { return roll_target_; }
+  [[nodiscard]] float rollReference() const noexcept { return roll_ref_; }
+  // 0 learning/off, 1 level loop active, 2 latched off (see Roll::latch).
+  [[nodiscard]] int rollMode() const noexcept {
+    return roll_fail_ ? 2 : (roll_alpha_ > 0.01F ? 1 : 0);
+  }
+  [[nodiscard]] float rollAuthority() const noexcept { return roll_alpha_; }
+  // Forget the learned level reference and the latch (SET rollcal).
+  void requestRollRelearn() noexcept {
+    roll_ref_valid_ = false;
+    roll_learn_n_ = 0;
+    roll_learn_sum_ = 0.0F;
+    roll_learn_t0_us_ = 0U;
+    roll_active_since_us_ = 0U;
+    roll_fail_ = false;
+    roll_sat_s_ = 0.0F;
+  }
   [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
   [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
@@ -866,7 +935,7 @@ class V3Controller {
   // Knee offset from the pose that keeps the pose's hip-axle height with the
   // hip at pose + dhip (Tier::knee_hold), 0 when off.
   [[nodiscard]] float kneeHold(float dhip) noexcept;
-  void coordinateTrunkAxle() noexcept;
+  void coordinateTrunkAxle(float dt_s) noexcept;
   [[nodiscard]] bool kneeHoldOn() const noexcept {
     return config_.tier.knee_hold || (wholeBody() && config_.tier.knee_hold_wb);
   }
@@ -886,6 +955,16 @@ class V3Controller {
   float roll_v_lp_ = 0.0F, roll_w_lp_ = 0.0F, roll_i_ = 0.0F, roll_e_lp_ = 0.0F;
   float yaw_cmd_ = 0.0F;  // the turn command as used (slewed with roll on)
   float roll_target_ = 0.0F;
+  float roll_ref_ = 0.0F;          // learned level reference (IMU roll frame)
+  bool roll_ref_valid_ = false;
+  float roll_learn_sum_ = 0.0F;
+  int roll_learn_n_ = 0;
+  std::uint64_t roll_learn_t0_us_ = 0U, roll_active_since_us_ = 0U;
+  float roll_alpha_ = 0.0F;        // loop authority 0..1
+  bool roll_fail_ = false;         // latched off (Roll::latch)
+  float roll_sat_s_ = 0.0F;        // time at the travel limit with the error still large
+  float roll_w_f_ = 0.0F, roll_tgt_prev_ = 0.0F, roll_tgt_rate_f_ = 0.0F;
+  bool gimbal_frozen_ = false;     // wheels near their cap: the gimbal integrators hold
   std::array<float, 2> roll_hip_{}, roll_knee_{}, roll_hip_rate_{}, roll_knee_rate_{};
   [[nodiscard]] bool envelopeOn() const noexcept {
     return config_.tier.envelope || (wholeBody() && config_.tier.envelope_wb);
@@ -893,6 +972,7 @@ class V3Controller {
   [[nodiscard]] PlanSample planDelayed() const noexcept;
   [[nodiscard]] PlanSample planAt(float delay_s) const noexcept;  // plan delay_s ago
   float lean_lp_ = 0.0F, lean_rate_f_ = 0.0F; // whole-system residual / rate
+  float body_rate_damp_f_ = 0.0F;             // body_rate_ low-passed for the damping only
   float sus_vz2_ = 0.0F;  // running mean square of the vertical-speed error [m2/s2]
   float ga_v1_ = 0.0F, ga_prev_ = 0.0F, ga_f_ = 0.0F;  // ground-acceleration estimate stages
   bool ga_init_ = false;

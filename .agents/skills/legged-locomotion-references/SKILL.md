@@ -65,7 +65,7 @@ below), not a freehand derivation presented as novel.
    citable method first.
 2. Port the *idea*, not code verbatim - TAP's dynamics, joint conventions,
    and actuator limits (GIM6010-8, see `masses.yaml`) differ from any of the
-   above robots; always re-derive constants from TAP's own CAD/URDF.
+   above robots; always re-derive constants from TAP's own CAD/MJCF model.
 3. Always validate a ported method against Rule 3's canonical landing test
    (`docs/RULES.md`) with real trials before trusting it - a technique being
    "established" for a biped/quadruped is not proof it transfers cleanly to

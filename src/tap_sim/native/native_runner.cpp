@@ -1739,6 +1739,8 @@ class NativeRunner {
               << "|collision_confidence=" << flight.collision_confidence
               << "|wheel_position=" << state_.wheel.position_m
               << "|wheel_velocity=" << state_.wheel.velocity_m_s
+              << "|wheel_left_position=" << state_.wheel.left_position_m
+              << "|wheel_right_position=" << state_.wheel.right_position_m
               << "|joint_lh=" << state_.joints.position_rad[0]
               << "|joint_lk=" << state_.joints.position_rad[1]
               << "|joint_rh=" << state_.joints.position_rad[3]

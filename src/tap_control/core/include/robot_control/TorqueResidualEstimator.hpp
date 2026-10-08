@@ -24,7 +24,7 @@ namespace robot_control {
 //   3. Leg-only: hip/knee CAN joints only. Wheel joints are never read here.
 //   4. No new physical sensor: only RobotState::joints::effort_nm, already
 //      populated end-to-end from the GDS68 driver's own Iq*Kt estimate
-//      (docs/motor_drivers/GDS68_DRIVER.md), never a new topic/field.
+//      (docs/actuatal_driver/GDS68_DRIVER.md), never a new field.
 //   5. Evidence-labeling: Output::valid plus the per-side direction flags
 //      let a consumer/report state plainly whether this signal was used.
 //

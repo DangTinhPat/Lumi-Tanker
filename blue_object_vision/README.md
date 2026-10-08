@@ -3,7 +3,7 @@
 Standalone person detection with the local YOLOv8n ONNX model, followed by the
 existing motion-aware single-target tracker. Inference uses CPU at 640 pixels
 and is capped at 30 FPS at 640×480 by default. The live window shows measured
-processing rate and YOLO inference time. The program does not require ROS and does not send robot
+processing rate and YOLO inference time. The program does not send robot
 commands.
 
 ## Run

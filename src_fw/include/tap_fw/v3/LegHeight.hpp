@@ -58,6 +58,11 @@ class LegHeight {
   // pitch uses the native +Y convention R(p): (cx+sz, -sx+cz).
   [[nodiscard]] static LegAxleTarget forAxleOnPlane(
       float x_world_m, float depth_world_m, float body_pitch_rad) noexcept;
+  // Hip offset that puts the axle at x_world for a knee that is NOT the exact
+  // IK knee (a filtered one): X stays exact, the depth follows the knee. Equals
+  // forAxleOnPlane's hip when the knee is its solution.
+  [[nodiscard]] static float hipForKneeAtX(
+      float knee_offset_rad, float x_world_m, float body_pitch_rad) noexcept;
 };
 
 }  // namespace tap_fw::v3

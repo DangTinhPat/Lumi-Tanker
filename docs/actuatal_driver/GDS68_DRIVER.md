@@ -25,7 +25,7 @@ Nguồn 24V của robot nằm trong dải điện áp danh định → tương t
 
 **Chưa xác minh:** 5 N·m danh định / 11 N·m stall có đủ cho khớp đùi/gối
 robot hay không — cần khối lượng robot + chiều dài tay đòn để tính. Robot
-hiện chưa có dữ liệu mass (URDF chỉ là mesh preview, không có `<inertial>`).
+chỉ có khối lượng ước lượng từ CAD/BOM (4,621 kg, xem `src/tap_sim/model/PHYSICS.md`), chưa có phép đo thật.
 
 ## 1.5. Kết nối vật lý & cảnh báo an toàn
 

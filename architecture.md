@@ -1,256 +1,192 @@
 # Lumi-Tanker architecture
 
-This document describes the current canonical runtime and separates it from
-the retained ROS 2/Gazebo migration code. It is an implementation map, not a
-claim of hardware validation. No real robot, motor, firmware flash, or ESP32
-deployment is authorized by this repository.
+This document maps the repository as it is today and states which part runs on
+the robot and which part is only a verification tool. It is an implementation
+map, not a claim of hardware validation: simulation and host tests are evidence
+for the models they exercise, and robot logs are the only evidence about the
+physical robot. Operating hardware, flashing firmware or sending motor commands
+requires an explicit request from the user.
 
-## 1. Canonical runtime
+## 1. Two deliverables that share a core
 
-The active path is native C++ MuJoCo plus a small Python/Tk operator GUI:
-
-```text
-Python/Tk GUI
-    │ line-based stdin/stdout IPC
-    ▼
-tap_mujoco_native
-    ├── MuJoCo free-body physics
-    ├── MPU6500-like IMU synthesis
-    ├── six encoder synthesis
-    ├── optional GDS68 leg-torque feedback mock
-    └── tap_control_core
-          ├── ImuStateEstimator
-          ├── FlightObserver
-          ├── TorqueResidualEstimator
-          ├── CMF support/flight decision
-          └── balance, landing and safety controllers
-```
-
-The root [`CMakeLists.txt`](CMakeLists.txt) intentionally builds only
-`tap_control_core` and `tap_mujoco`. It does not discover, link, launch, or
-exchange messages with ROS 2 or Gazebo.
-
-| Area | Current location | Responsibility |
+| | Robot firmware (v3.3) | Native simulator |
 | --- | --- | --- |
-| Deterministic controller | `src/tap_control/core` | ROS-independent state, FK, MPC, IMU estimator, CMF and landing logic |
-| Native simulator | `src/tap_mujoco` | MuJoCo model, fixed-rate runner, actuator dynamics and sensor boundary |
-| Sensor/actuator boundary | `src/tap_mujoco/scripts/mujoco_sensor_actuator_backend.py` and the native runner | Noise, bias, latency, dropout, quantization, saturation and GDS68 feedback mock |
-| Native operator GUI | `src/gui/gui/native_dashboard.py` | Tk controls/diagnostics and the MuJoCo 3-D viewer; it communicates only through line IPC |
-| Native GUI process client | `src/gui/gui/native_backend.py` | Starts/stops the runner and serializes operator commands |
-| CAD source | `src/tap_robot_description/description/company_rb` | Authoritative company RB meshes, inertial data, CAD signs and URDF/Xacro parity source |
-| Pose/offline tools | `src/tap_teleop`, `tools/` | Offline curve generation, audits and regression tooling |
-| Retained migration code | `src/legacy/ros2_gazebo_sim` | ROS 2/Gazebo adapter and historical simulation only; outside canonical build |
+| Purpose | Balances and drives the physical RB R1 | MuJoCo model + GUI for inspection and experiments |
+| Controller | `V3Controller` (`src_fw/src/v3`) | `EmbeddedController` (`src/tap_control/core`) |
+| Runs on | ESP32-S3 N16R8, FreeRTOS | Host PC, MuJoCo 3 |
+| Build | PlatformIO env `esp32-s3-v3` | CMake target `tap_mujoco_native` (`TAP_BUILD_SIMULATOR=ON`, needs MuJoCo) |
+| Operator | `tools/tap_serial_control_gui.py` over USB serial | `tools/tap_native_gui.py` over line IPC |
 
-`src/gui/gui/dashboard.py` and `src/gui/scripts/gui` are compatibility entry
-points for the native dashboard. They do not import `rclpy`.
+**The native simulator does not run `V3Controller`.** It drives the older
+`EmbeddedController` (MPC, landing and jump logic) which the robot does not use.
+The firmware's control law is exercised on the host by the two-body planar
+plant in `src_fw/tests/LegPlant.hpp` (the `v3_*_tests`, in particular
+`v3_tier_tests`). Results from the MuJoCo runner therefore say nothing about
+`V3Controller`, and vice versa.
 
-## 2. Hardware-shaped contract
+Shared code: the rigid-body model `WholeBodyModel` and generated CAD geometry
+(`GeneratedGeometry.hpp`), `ImuStateEstimator`, `LqrBalancer`, the tuned LQR
+configuration (`TunedConfig`, used by `defaultV3Config()`), and the motor
+protocol layer in `src/tap_control/hal`.
 
-The deployable algorithm is deliberately restricted to the planned hardware:
-
-- one MPU6500: three-axis accelerometer and three-axis gyroscope;
-- four leg motor encoders and two wheel motor encoders;
-- the four leg drivers' GDS68 current-derived torque estimate, only as a
-  secondary corroborating signal when its provenance is enabled and valid.
-
-There is no force/torque sensor, wheel contact switch, range sensor, camera,
-GPS, external localization, or wheel load/current signal in the contract.
-MuJoCo pose, contact, constraint force, and simulator state are telemetry for
-scoring and visualization only. They are not copied into `RobotState` and do
-not make decisions in CMF, landing, MPC, or the safety FSM.
-
-The six-joint order is fixed:
+## 2. Repository map
 
 ```text
-[LH, LK, LW, RH, RK, RW]
+firmware_esp32/        ESP32-S3 adapter: main.cpp, AppV3 (tasks, console, logging),
+                       Esp32Bus (TWAI/UART), Mpu6500Spi
+src_fw/
+  include/tap_fw/      BoardConfig (pins, rates, hardware facts), ImuMount, MotorFeedback,
+                       BusTransport, FastFormat, v3/ (V3Controller, LegLock, LegHeight, ...)
+  src/                 implementations; v3/ holds the controller
+  tests/               host tests and the planar plant (LegPlant.hpp)
+  FIRMWARE_V3.md       firmware reference (states, SET keys, log fields)
+src/tap_control/
+  core/                portable C++17: WholeBodyModel, ImuStateEstimator, LqrBalancer,
+                       TunedConfig, EmbeddedController and its native-only pieces
+  hal/                 MotorFrameCodec, MotorMapping, MotorTransport (GDS68 CAN, BL4820 UART)
+  apps/, tests/        demos and core tests
+src/tap_sim/           MuJoCo runner (native/), MJCF + CAD manifest + PHYSICS.md (model/),
+                       sensor/actuator drivers, model validation scripts
+src/gui/               Tk dashboard + 3-D viewer for the simulator, command router, vision client
+tools/                 serial GUI, log analysis (hip_chatter_stats, hf_vibration_stats,
+                       tr_rest_stats, fit_leg_servo), tier-sim helpers, leg-jog bench firmware
+blue_object_vision/    optional person detector/tracker used by the follower (host camera)
+docs/                  V3.3_HANDOFF.md (current state), RULES.md, NATIVE_RUNTIME.md,
+                       actuatal_driver/ (GDS68 and wheel-motor protocols), dated investigations
+source_assets/         supplier datasheets
 ```
 
-The native CAD axes are `+Y` on both sides. Right-side signs must not be
-mirrored as an old-robot compatibility shortcut. The model contract is:
+`docs/V3.3_HANDOFF.md` is the authoritative record of the firmware's current
+state, boot configuration, measured hardware facts, rejected ideas and open
+problems; this document does not duplicate it.
 
-| Quantity | Value/status |
-| --- | --- |
-| Wheel radius | `0.040 m` |
-| Axle centre spacing | `0.309 m` |
-| Half-track | `0.1545 m` |
-| Approximate mass | `4.621 kg`, provisional CAD/BOM estimate |
-| Body visual/inertial pitch | `-pi/2`, applied consistently to body visual and inertia |
+## 3. Hardware and sensor contract
 
-The full mass, COM, inertia, motor-lumping and mechanical-limit caveats remain
-in [`PHYSICS.md`](src/tap_mujoco/model/PHYSICS.md). The MJCF and checked-in
-CAD manifest are the active native geometry source.
+- Board: custom ESP32-S3-WROOM-1 N16R8 PCB. Console on UART0 via CP2102 at
+  921600 baud; optional Dabble gamepad over BLE.
+- IMU: one MPU6500 (3-axis accelerometer and gyro) on SPI. It is mounted
+  rotated 90° (chip Y forward, chip X right); `ImuMount.hpp` maps chip axes to
+  the body frame before the estimator.
+- Leg joints: four SteadyWin GDS68 drivers (GIM6010-8, 8:1) on CAN at
+  500 kbit/s, node IDs and signs in `docs/actuatal_driver/GDS68_MOTOR_MAPPING.md`
+  and `MotorMapping.hpp`. The firmware runs all four in the driver's position
+  mode; legs lock at the pose they had at power-up (that pose is joint zero).
+- Wheels: two CJC BL4820M12 motors on UART at 1 Mbaud, speed command and
+  encoder feedback.
+- Deployable sensor inventory: one MPU6500 and six motor encoders. The leg
+  drivers' Iq-based torque estimate is allowed only under the conditions of
+  Rule 1 in `docs/RULES.md`. Simulator pose, contact and constraint data never
+  enter a control decision.
 
-## 3. Native simulator boundary
+Fixed conventions:
 
-`src/tap_mujoco/model/tap_robot.xml` contains a free-root robot, ground plane,
-CAD visuals, bounded primitive collisions, inertias, six actuators and raw
-sensor channels. The model's current physical assumptions are recorded in
-`model_manifest.yaml`.
+- Joint order `[LH, LK, LW, RH, RK, RW]`; native CAD axes are `+Y` on both
+  sides and are not mirrored. Driver sign conversion happens only in
+  `MotorMapping.hpp`.
+- Wheel radius `0.040 m`, axle spacing `0.309 m` (half-track `0.1545 m`).
+- Mass `4.621 kg` (body 3.371, each thigh 0.296, each shin 0.109, each wheel
+  plus motor 0.220). Mass, CoM and inertia are CAD/BOM estimates; the firmware
+  compensates a measured CoM offset (`SET cdx`). See `src/tap_sim/model/PHYSICS.md`.
+- Height is the hip-to-axle distance, 188.6 mm (legs hanging) down to 78 mm.
 
-The runner configures the model timestep to the requested loop rate. The
-current normal target is 3 kHz and the stress target is 4 kHz; sensor packets
-are independently generated at 500 Hz. The sensor boundary applies:
+## 4. Firmware v3.3
 
-- accelerometer and gyro white noise, bias and random walk;
-- quantization, packet latency and occasional dropout;
-- encoder position/velocity noise, quantization and dropout;
-- command latency and first-order actuator lag;
-- leg torque saturation, wheel torque saturation and the measured/provisional
-  wheel speed envelope;
-- Coulomb/stiction/viscous friction terms;
-- optional delayed, biased and noisy GDS68-like leg torque feedback.
+### 4.1 Runtime
 
-These are exposed simulation assumptions, not calibration certificates. They
-must be replaced by measured hardware parameters when available.
+A FreeRTOS control task on core 1 runs the 500 Hz loop; serial, BLE and
+logging run on core 0 (`-DTAP_V3_SINGLE_LOOP=1` selects a single-loop fallback
+environment). Leg commands are sent as one batch of four at about 333 Hz;
+GDS68 position feedback arrives at about 96 Hz. State machine:
+`Idle → Locking → Ready → Balancing`, with `Fault` on any safety trip.
+`DISABLE`, `ESTOP`, a lost serial link (0.5 s), a pitch beyond 0.6 rad, wheel
+runaway, sensor loss or leg/pose inconsistency stop the wheels; the legs stay
+locked until `DISABLE`.
 
-The GUI receives two separate channels:
+### 4.2 Control structure (`V3Controller`)
+
+```text
+IMU pitch/gyro + hip/knee encoders + wheel encoders
+        │ virtual pendulum angle θv = pitch + CoM line angle(measured legs) − hang value
+        ▼
+ safety: fall, runaway, held/lifted detection, θv vs legs consistency
+        ▼
+ Tier 1 (wheels): LQR on θv with a gain table over pendulum length, position anchor,
+                  balance trim, height-adaptive feedback lead
+ Tier 2 (hips):  reflex (lean residual + lead + gated body damping) + manoeuvre preview
+                  + slow IMU level loop ("gimbal")  →  dhip
+ Coordination:   paired hip/knee IK keeps the axle on a horizontal plane; the knee
+                  term follows through a low-pass (kfhz); height profile (rate/accel/jerk);
+                  position-mode suspension; optional per-side roll (off at boot)
+        ▼
+ Output → AppV3 → LegLock (GDS68 position targets) + wheel speed commands → CAN/UART
+```
+
+Gains, boot overrides and the evidence behind each are listed in
+`docs/V3.3_HANDOFF.md` (section 3); every override has a `SET` key that reverts
+it on the robot without reflashing. Opening the serial port resets the ESP32
+and clears runtime `SET` overrides.
+
+### 4.3 Operator interface and logs
+
+`tools/tap_serial_control_gui.py` sends `START`, `GO`, `DRIVE`, `HMOVE`,
+`DISABLE`, `ESTOP`, `SET`, `GET`, `REC` and writes every line to
+`~/tap_logs/`. The firmware emits `SENS` (5 Hz health/timing), `TR` (25 Hz
+controller trace), `CONTROL` and `V3 TUNE` lines; field meanings are in
+`src_fw/FIRMWARE_V3.md`. `REC` captures an 8 s, 250 Hz RAM trace for fast
+phenomena that the 25 Hz trace cannot show.
+
+## 5. Native simulator
+
+`tap_mujoco_native` loads `src/tap_sim/model/tap_robot.xml` (free-root body,
+seven links, six `+Y` hinge joints, CAD visuals, primitive collisions, one
+MPU6500-like IMU, six encoders). The runner steps physics at 3 kHz (4 kHz stress
+target) and produces sensor packets at 500 Hz with noise, bias, quantization,
+latency, dropout, actuator lag, torque saturation and friction; leg torque
+feedback can be mocked. Only these sensor packets reach `EmbeddedController`.
+
+The GUI talks to the child process over line IPC. Commands: `ENABLE`, `DISABLE`,
+`RESET`, `ESTOP`, `CLEAR_ESTOP`, `STOP`, `DRIVE <v> <yaw>`, `POSE <LH> <LK> <RH> <RK>`
+(retired by `POSE_DONE`), `HEIGHT <m>`, `STAND_UP`, `DANCE START|STOP`, `QUIT`.
+Telemetry has two channels:
 
 ```text
 STATE|...   sensor-derived controller telemetry
-VIEW|...    simulator pose used only for drawing the debug view
+VIEW|...    simulator pose, used only to draw the 3-D view
 ```
 
-`VIEW` is intentionally not parsed into the controller. A GUI that renders a
-correct pose therefore does not prove state estimation, balance, or landing.
+`VIEW` is never parsed into the controller, so a correct picture proves nothing
+about estimation or balance. The child owns the fast loop; Tk is only a
+human-rate client. `ESTOP`, stale data and expired commands force safe outputs.
 
-## 4. Control and CMF data flow
+`EmbeddedController` also contains flight/landing logic (`FlightObserver`,
+`TorqueResidualEstimator`), a jump controller and a station keeper. The robot
+does not use them; they stay in the shared core only because `TunedConfig`
+and the native runner depend on the same library.
 
-For each native step:
+## 6. Verification levels
 
-1. The simulator advances physics and applies bounded actuator dynamics.
-2. Delayed/noisy sensor packets become available when their simulated latency
-   expires.
-3. `ImuStateEstimator` consumes MPU6500 samples and maintains pitch, rates,
-   specific-force magnitude, startup qualification and impact evidence.
-4. Named encoder samples update joint state, wheel odometry and motion
-   consistency. Missing or stale samples fail closed.
-5. `TorqueResidualEstimator` processes only valid leg torque-feedback samples
-   and the commanded/measured joint motion. It estimates a bounded normal-load
-   hypothesis; it is never a standalone contact gate.
-6. `FlightObserver` fuses IMU and encoder evidence, with torque residual as
-   optional corroboration, into support/flight phases.
-7. `EmbeddedController` applies the state machine, MPC, landing stack and
-   bounded motor commands.
-8. Periodic `STATE` telemetry is emitted for inspection; `VIEW` is emitted
-   separately for visualization.
-
-No stage reads MuJoCo `qpos`, body pose, contacts, constraint forces, or hidden
-ground-truth phase for control. The landing scenario may alter simulator
-state to create a ledge/drop event, but only subsequent sensor packets enter
-the controller.
-
-## 5. CMF and landing
-
-CMF means the constrained combination of `FlightObserver` and
-`TorqueResidualEstimator`:
-
-```text
-MPU6500 + six encoders ──► FlightObserver ──► primary phase hypothesis
-                                  ▲
-valid GDS68 leg torque ──► TorqueResidualEstimator
-                           secondary corroboration only
-```
-
-The observer phases include grounded/partial support, unloading, ballistic
-flight, collision candidate, touchdown candidate and no-support timeout.
-Debounce and persistence are measured in sensor-observation time, not blindly
-in control-loop iterations. One-wheel support may be reported as partial
-support while the landing controller waits for a stable handoff.
-
-Landing authority is phase-gated:
-
-```text
-nominal pose
-  + LandingReflex / flight extension
-  + LandingController target and feed-forward
-  -> operating-envelope clamp
-  -> per-side LandingImpedance scheduling
-  -> bounded leg torque
-```
-
-During ballistic flight, wheel-ground acceleration authority is not assumed.
-After a sensor-derived support hypothesis persists, the controller blends
-impact handling, recovery and wheel-balance handoff. A touchdown candidate is
-not equivalent to proven physical contact, and a successful observer trace is
-not by itself proof that the robot can recover dynamically.
-
-The current canonical landing profile is the controlled `v = 1.5 m/s`,
-`h = 0.30 m` scenario in
-[`landing_30cm_cmf_1p5.yaml`](src/tap_control/config/landing_30cm_cmf_1p5.yaml).
-The scenario uses height and velocity only to configure the simulator event;
-they are not fed to CMF as measurements. The known result remains that CMF
-phase detection is repeatable, while recovery success is not yet established.
-
-## 6. Command and IPC contract
-
-The native GUI sends line commands to the child process. Launching the GUI also
-opens a MuJoCo 3-D viewer loaded from the same `tap_robot.xml`; the C++ child
-remains the only physics/control owner and the viewer mirrors only the
-debug-only `VIEW` snapshot:
-
-```text
-ENABLE
-DISABLE
-RESET
-ESTOP
-CLEAR_ESTOP
-DRIVE <velocity_m_s> <yaw_rate_rad_s>
-POSE <LH> <LK> <RH> <RK>
-STAND_UP
-QUIT
-```
-
-The child owns the kHz loop. Tk runs at a human-scale refresh rate and never
-acts as the control scheduler. `ESTOP`, stale sensor data, invalid samples and
-expired commands force safe outputs. Clearing e-stop does not implicitly
-resume motion. `DISABLE` is a recoverable safe stop: it clears drive/pose
-requests and requires a fresh `ENABLE`; it is distinct from the latched
-`ESTOP` path. `POSE` is a transaction and is retired automatically when the
-core joint planner reaches its endpoint. `RESET` resets MuJoCo state, sensor
-queues/timestamps, estimator/controller state and command latches while
-keeping the external sensor clock monotonic.
-
-## 7. Legacy ROS 2/Gazebo boundary
-
-`src/legacy/ros2_gazebo_sim` contains the old `tap_sim` ROS package, Gazebo
-worlds, `ros2_control` plugin, launch file and controller activation helper.
-`src/tap_control/ros2_adapter/BalanceControllerNode.cpp` is the old ROS 2
-adapter retained for migration comparison. Their package identities and
-internal plugin names remain unchanged where required by old launch files.
-
-They are not part of the root native build. Their telemetry may be used for
-historical debugging, but Gazebo contact/pose/effort must not be described as
-hardware evidence or allowed to leak into the native CMF path.
-
-The repository therefore still contains ROS/Gazebo text and code by design,
-but it is isolated and explicitly named as legacy. “ROS-free runtime” means
-the canonical native build and execution graph, not that historical source
-has been silently deleted.
-
-## 8. Verification levels
-
-Evidence must be reported separately:
+Report evidence separately; none certifies the physical robot on its own:
 
 1. source/path audit;
-2. native CMake build and deterministic core tests;
-3. MuJoCo model, sensor-boundary and native-runner contracts;
-4. multi-rate CMF and landing scenario tests;
-5. GUI/IPC smoke tests;
-6. closed-loop simulation outcomes;
-7. hardware tests, which are currently out of scope.
+2. host build and unit tests (`ctest`);
+3. planar two-body firmware sims (`v3_tier_tests`, selected by `TIER_*`
+   environment variables; method in `docs/V3.3_HANDOFF.md` section 7);
+4. MuJoCo native runner and GUI/IPC smoke tests;
+5. firmware build and size/timing (`pio run -e esp32-s3-v3`);
+6. robot logs from real sessions.
 
-Useful native commands are:
+`ctest` currently has five failures that predate this document
+(`core_allocation_tests`, `jump_tests`, `jump_quality_tests`, `lqr_tests`, and
+`v3_tier_tests`, which stops at its V14 assertion); they are tracked in
+`docs/V3.3_HANDOFF.md`. Commands:
 
 ```bash
-cmake -S . -B build/native -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build build/native -j2
+cmake -S . -B build/native -DBUILD_TESTING=ON -DTAP_BUILD_SIMULATOR=OFF
+cmake --build build/native -j4
 ctest --test-dir build/native --output-on-failure
-python3 src/tap_mujoco/native_landing_contract_test.py \
-  --runner build/native/bin/tap_mujoco_native \
-  --model src/tap_mujoco/model/tap_robot.xml
-python3 tools/tap_native_gui.py
+~/.platformio/penv/bin/pio run -e esp32-s3-v3
+python3 tools/tap_serial_control_gui.py
 ```
 
-The GUI and `VIEW` channel are usability evidence only. Passing native tests
-does not establish motor calibration, contact-force accuracy, or physical
-landing recovery.
+With MuJoCo installed, drop `-DTAP_BUILD_SIMULATOR=OFF` and run
+`python3 tools/tap_native_gui.py` for the simulator.

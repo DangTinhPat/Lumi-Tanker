@@ -358,6 +358,8 @@ bản native — đây là lúc biết balance/landing có sống sót ràng bu�
 cứng không. Kết quả có thể là "không", và đó là thông tin giá trị nhất của
 cả kế hoạch.
 
+> Ghi chú 08/10/2026: `FirmwareApp`, `ControllerActuatorBridge` và env `esp32-s3-poc` nhắc dưới đây thuộc firmware v1/v2 đã gỡ; HAL (codec, transport, MotorFeedback, Esp32 TWAI/UART) vẫn dùng cho v3.
+
 **Phase 5 — adapter ESP32-S3. Phần code/build XONG; phần cứng CHƯA NGHIỆM THU.**
 `Esp32TwaiPort` + hai `Esp32UartPort` dùng chung codec và `ControllerActuatorBridge`;
 `Mpu6500Spi`, `MotorFeedback` và `FirmwareApp` nối peripheral vào control loop.
