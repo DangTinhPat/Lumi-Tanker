@@ -32,7 +32,11 @@ MIN_BODY_HEIGHT_M = 0.140
 # and capture checks before starting the path.
 BEST_TESTED_BODY_HEIGHT_M = 0.200
 # The high endpoint is the native FK/CAD envelope, not a knee-stop command.
-MAX_BODY_HEIGHT_M = 0.245
+# Measured directly from tap_fw::v3::LegHeight (axle range 0.0961-0.1886 m +
+# the 0.040 m wheel radius = 0.1361-0.2286 m body height); the previous 0.245
+# here was stale and past the real envelope, so setHeightTarget rejected
+# every "Max standup" click with no visible feedback beyond an ERROR line.
+MAX_BODY_HEIGHT_M = 0.228
 
 
 def _posture_to_height(position: float) -> float:
@@ -72,10 +76,10 @@ class NativeDashboard:
         self.backend = backend
         self.enabled = False
         self.estop = False
+        self._stand_up_pending = False
         self.drive = (0.0, 0.0)
         self._drive_button_active = False
         self._drive_stop_latched = True
-        self.dance_active = False
         self.show_started_s = None
         self._posture_send_job = None
         self._posture_drag_active = False
@@ -162,7 +166,7 @@ class NativeDashboard:
                  length=150).pack(fill="x")
         ttk.Button(drive, text="Reset mô phỏng", command=self.reset).pack(
             fill="x", pady=(4, 0))
-        ttk.Button(drive, text="Bập bênh – giai đoạn 1", command=self.stand_up).pack(
+        ttk.Button(drive, text="Đứng dậy (bập bênh)", command=self.stand_up).pack(
             fill="x", pady=(4, 0))
 
         posture = ttk.LabelFrame(toolbar, text="Chiều cao thân", style="Card.TLabelframe", padding=10)
@@ -200,17 +204,6 @@ class NativeDashboard:
                            sticky="ew", padx=1, pady=1)
         for column in range(3):
             height_presets.columnconfigure(column, weight=1)
-
-        skill = ttk.LabelFrame(toolbar, text="Skill", style="Card.TLabelframe", padding=6)
-        skill.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(skill, text="Gimbal VMC · xoay tại chỗ + đổi chiều cao theo nhịp",
-                  style="Card.TLabel").pack(side="left", padx=(2, 10))
-        ttk.Button(skill, text="Múa ↻",
-                   command=lambda: self.start_dance(1.0)).pack(side="left", padx=2)
-        ttk.Button(skill, text="Múa ↺",
-                   command=lambda: self.start_dance(-1.0)).pack(side="left", padx=2)
-        ttk.Button(skill, text="Dừng skill",
-                   command=self.stop_skill).pack(side="left", padx=2)
 
         body = ttk.Frame(outer, style="Card.TFrame", padding=18)
         body.pack(fill="both", expand=True)
@@ -396,7 +389,14 @@ class NativeDashboard:
             self._cancel_pending_posture()
             self.stop_skill()
             self.backend.command_drive(0.0, 0.0)
-            self.backend.send("STAND_UP")
+            # STAND_UP is rejected (once, no retry) until the runner reports
+            # its IMU seeded, ~0.3-1 s after Start SIM. A click inside that
+            # window must not be a silent no-op: defer it to tick() instead
+            # of dropping it, so one press always ends up standing.
+            if self.backend.telemetry.get("imu_seeded") == "1":
+                self.backend.send("STAND_UP")
+            else:
+                self._stand_up_pending = True
 
     def clear_estop(self):
         self._cancel_pending_posture()
@@ -409,9 +409,15 @@ class NativeDashboard:
     def set_drive(self, forward: float, yaw: float):
         if self.enabled and not self.estop:
             fields = self.backend.telemetry
+            # Two independent stand-up paths reach "ready to drive": V3.1's
+            # own Balance mode, or the rocking stand-up (RockerLower) holding
+            # its terminal Balanced phase - v3_controller_ is never ticked
+            # while rocking runs, so "mode" alone stays "Disabled" the whole
+            # time and this second check is the only way to see it.
             drive_ready = (fields.get("mode") == "Balance" and
                            fields.get("station_eligible") == "1" and
-                           fields.get("station_capture_ready") == "1")
+                           fields.get("station_capture_ready") == "1") or (
+                fields.get("rocker_phase") == "balanced")
             if (forward != 0.0 or yaw != 0.0) and not drive_ready:
                 self.backend.log.append("DRIVE_BLOCKED|reason=station_not_ready")
                 return
@@ -586,20 +592,8 @@ class NativeDashboard:
             self.show_started_s = None
 
     def stop_skill(self):
-        if self.dance_active:
-            self.backend.command_dance_stop()
-            self.dance_active = False
         self._cancel_pending_posture()
         self.show_started_s = None
-
-    def start_dance(self, direction=1.0):
-        if not self.backend.running or not self.enabled or self.estop:
-            return
-        self._cancel_pending_posture()
-        self.show_started_s = None
-        self.drive = (0.0, 0.0)
-        self.backend.command_dance(direction)
-        self.dance_active = True
 
     def _show_pose(self, elapsed):
         # Reuse the checked-in CAD neutral/CoM-aware curves, scheduled at UI
@@ -622,6 +616,10 @@ class NativeDashboard:
     def tick(self):
         self.backend.drain()
         fields = self.backend.telemetry
+        if (self._stand_up_pending and self.backend.running and
+                not self.estop and fields.get("imu_seeded") == "1"):
+            self._stand_up_pending = False
+            self.backend.send("STAND_UP")
         if (self._posture_last_sent_height is not None and
                 (fields.get("height_rejected") == "1" or
                  (fields.get("height_request") == "0" and
@@ -641,7 +639,6 @@ class NativeDashboard:
         self.telemetry.set(
             f"t={fields.get('t', '--')} s   pitch={fields.get('pitch', '--')} rad   pitch_rate={fields.get('pitch_rate', '--')} rad/s\n"
             f"phase={fields.get('flight', '--')}   airborne={fields.get('airborne', '--')}   touchdown={fields.get('touchdown', '--')}   torque_valid={fields.get('torque_valid', '--')}\n"
-            f"skill={fields.get('skill', '--')}   dance_height={fields.get('dance_height_target', '--')} m   dance_yaw={fields.get('dance_yaw_rate', '--')} rad/s\n"
             f"lqr_pitch={fields.get('lqr_pitch_state', '--')} rad   station_capture={fields.get('station_capture_distance', '--')} m   COM-line={fields.get('wb_com_line_angle', '--')} rad\n"
             f"body height={self.backend.view.get('body_height', '--')} m   Fz hypothesis L/R={fields.get('fz_l', '--')} / {fields.get('fz_r', '--')} N\n"
             f"loop={fields.get('loop_hz', '--')} Hz   ground_truth_to_controller={fields.get('ground_truth_to_controller', '--')}"
@@ -654,7 +651,7 @@ class NativeDashboard:
             pose = self._show_pose(time.monotonic() - self.show_started_s)
             self.backend.command_pose(*pose)
         elif (self.enabled and self.backend.running and not self.estop and
-              not self.dance_active and not self._drive_stop_latched):
+              not self._drive_stop_latched):
             self.backend.command_drive(*self.drive)
         self.root.after(20, self.tick)
 

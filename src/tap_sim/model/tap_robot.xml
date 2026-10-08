@@ -258,8 +258,12 @@
     <motor name="act_left_knee" joint="cad_left_knee" ctrlrange="-12 12" gear="1"/>
     <motor name="act_right_hip" joint="cad_right_hip" ctrlrange="-12 12" gear="1"/>
     <motor name="act_right_knee" joint="cad_right_knee" ctrlrange="-12 12" gear="1"/>
-    <motor name="act_left_wheel" joint="cad_left_wheel" ctrlrange="-0.13 0.13" gear="1"/>
-    <motor name="act_right_wheel" joint="cad_right_wheel" ctrlrange="-0.13 0.13" gear="1"/>
+    <!-- SIM ceiling only, wider than the shipped BL4820M12 (0.13 Nm/wheel):
+         RockerLower's wheelie maneuver commands the driver's own torque
+         ceiling up to 0.8 Nm for that phase only (see RockerLower.cpp); this
+         actuator range just has to permit it, not certify the hardware. -->
+    <motor name="act_left_wheel" joint="cad_left_wheel" ctrlrange="-1.0 1.0" gear="1"/>
+    <motor name="act_right_wheel" joint="cad_right_wheel" ctrlrange="-1.0 1.0" gear="1"/>
   </actuator>
 
   <keyframe>

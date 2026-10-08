@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 
+#include "robot_control/WholeBodyModel.hpp"
 #include "tap_fw/v3/RockerLower.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 
@@ -46,7 +47,12 @@ int main() {
   assert(std::abs(RockerLower::nToP(1.10F, -1.2F, 0.03F)) < 0.001F);
   RockerLower lower;
   lower.reset(kHomeHip, -1.2F);
-  RockerLower::Input in{0.002F, kHomePitch, kHomeHip, -1.2F, true};
+  RockerLower::Input in{};  // named field assignment: robust to struct reordering
+  in.dt_s = 0.002F;
+  in.pitch_rad = kHomePitch;
+  in.hip_rad = kHomeHip;
+  in.knee_rad = -1.2F;
+  in.sensors_ok = true;
   auto low = lower.update(in);
   assert(low.phase == RockerLower::Phase::Lowering);
   assert(low.hip_target_rad < kHomeHip && low.knee_target_rad == -1.2F);
@@ -62,9 +68,39 @@ int main() {
   in.dt_s = 0.1F;       // command reaches the lock: pivot, hip held there
   low = lower.update(in);
   assert(low.phase == RockerLower::Phase::Pivot && low.hip_target_rad == 1.2F);
+  // From Pivot, loop-drive the rest of the stand-up: track the hip encoder to
+  // the just-commanded target (approximating the leg servo) and set pitch to
+  // the balance loop's own equilibrium for that hip (approximating a robot
+  // that is otherwise perfectly balanced) - not a physics engine, just enough
+  // to exercise every phase transition and confirm the state machine reaches
+  // Balanced with the hip at the level-zero target.
+  in.dt_s = 0.002F;
+  bool saw_wheelie = false, saw_catch = false, saw_level = false;
+  for (int i = 0; i < 5000; ++i) {
+    low = lower.update(in);
+    saw_wheelie |= low.phase == RockerLower::Phase::Wheelie;
+    saw_catch |= low.phase == RockerLower::Phase::Catch;
+    saw_level |= low.phase == RockerLower::Phase::Level;
+    if (low.phase == RockerLower::Phase::Balanced ||
+        low.phase == RockerLower::Phase::Aborted) {
+      break;
+    }
+    in.hip_rad = low.hip_target_rad;
+    const auto body = robot_control::WholeBodyModel{}.compute(
+        in.hip_rad, in.knee_rad, in.hip_rad, in.knee_rad);
+    in.pitch_rad = -body.com_line_angle_rad;
+  }
+  assert(saw_wheelie && saw_catch && saw_level);
+  assert(low.phase == RockerLower::Phase::Balanced);
+  assert(std::abs(low.hip_target_rad - 1.1248F) < 1.0e-3F);
+  in.pitch_rad = 3.0F;  // fallen: Balanced/Catch/Level abort past the lean limit
+  assert(lower.update(in).phase == RockerLower::Phase::Aborted);
   lower.reset(kHomeHip, -1.2F);
-  in.hip_rad = kHomeHip;
+  in = RockerLower::Input{};
+  in.dt_s = 0.002F;
   in.pitch_rad = kHomePitch;
+  in.hip_rad = kHomeHip;
+  in.knee_rad = -1.2F;
   in.sensors_ok = false;
   assert(lower.update(in).phase == RockerLower::Phase::Aborted);
   lower.reset(kHomeHip, -1.2F);

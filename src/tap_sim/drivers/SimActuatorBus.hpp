@@ -201,6 +201,13 @@ class SimBl4820Wheel {
   bool settling() const { return settle_remaining_s_ > 0.0F; }
   std::uint8_t motorId() const { return cfg_.motor_id; }
 
+  // Runtime torque ceiling change. Unlike the leg GDS68's one-time Set_Limits
+  // semantics, the BL4820M12's Moving-Speed interface has no equivalent
+  // hardware limit register; this only changes the plant's simulated
+  // actuator envelope, e.g. to explore a wheel/gearbox spec beyond the
+  // shipped 0.13 Nm (see RockerLower's wheelie maneuver).
+  void setTorqueLimitNm(float limit_nm) { cfg_.max_torque_nm = std::max(limit_nm, 0.0F); }
+
  private:
   float servoTorqueNm() const {
     const float tau = cfg_.velocity_servo_gain_nm_per_rad_s *

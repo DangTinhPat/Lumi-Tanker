@@ -123,6 +123,14 @@ Options parseOptions(int argc, char** argv) {
       options.rocker.hip_floor_rad = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-lower-floor"));
     else if (arg == "--rocker-fling-lock")
       options.rocker.fling_lock_rad = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-fling-lock"));
+    else if (arg == "--rocker-pivot-hold")
+      options.rocker.pivot_hold_s = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-pivot-hold"));
+    else if (arg == "--rocker-outer-kx")
+      options.rocker.balance_outer_kx = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-outer-kx"));
+    else if (arg == "--rocker-outer-kv")
+      options.rocker.balance_outer_kv = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-outer-kv"));
+    else if (arg == "--rocker-outer-cap")
+      options.rocker.balance_outer_max_rad = static_cast<float>(asDouble(value(arg.c_str()), "--rocker-outer-cap"));
     else if (arg == "--help") {
       std::cout << "tap_mujoco_native --model FILE [--keyframe NAME] [--rate 3000|4000] "
                     "[--sensor-rate 500] [--realtime] [--run-for SEC]\n";
@@ -157,7 +165,7 @@ struct EncoderSample {
 };
 
 class NativeRunner {
-  enum class RockingStage { Idle, Lower };
+  enum class RockingStage { Idle, Active };
 
  public:
   NativeRunner(const Options& options) : options_(options), rng_(options.seed) {
@@ -420,6 +428,7 @@ class NativeRunner {
     disable_request_ = false;
     power_off_free_ = false;
     rocking_stage_ = RockingStage::Idle;
+    rocker_balancing_ = false;
     estop_ = false;
     enabled_ = false;
     leg_command_.fill(0.0F);
@@ -526,16 +535,47 @@ class NativeRunner {
         std::abs(q[4] - v3_knee_hold_rad_) < 0.05F;
 
     if (rocking_stage_ != RockingStage::Idle) {
+      const auto& qd = state_.joints.velocity_rad_s;
       RockerLower::Input lower_in;
       lower_in.dt_s = input.dt_s;
       lower_in.pitch_rad = input.pitch_rad;
+      lower_in.pitch_rate_rad_s = input.pitch_rate_rad_s;
       lower_in.hip_rad = 0.5F * (q[0] + q[3]);
       lower_in.knee_rad = 0.5F * (q[1] + q[4]);
+      lower_in.hip_rate_rad_s = 0.5F * (qd[0] + qd[3]);
+      lower_in.knee_rate_rad_s = 0.5F * (qd[1] + qd[4]);
+      lower_in.wheel_pos_rad = 0.5F * (q[2] + q[5]);
+      lower_in.wheel_rate_rad_s = 0.5F * (qd[2] + qd[5]);
+      lower_in.target_forward_m_s = command_.target_forward_velocity_m_s;
+      lower_in.target_yaw_rad_s = command_.target_yaw_rate_rad_s;
+      // Same HEIGHT->knee conversion as setHeightTarget/V3Controller's own
+      // Height feature (task-space meters -> LegHeight's knee_offset_rad,
+      // which is already in the native frame RockerLower uses directly).
+      if (command_.request_height_change) {
+        const float axle_height = std::clamp(
+            command_.target_body_height_m - robot_control::geometry::wheel_radius_m,
+            V3LegHeight::minHeight(), V3LegHeight::maxHeight());
+        lower_in.height_change_requested = true;
+        lower_in.requested_knee_rad = V3LegHeight::forHeight(axle_height).knee_offset_rad;
+        command_.request_height_change = false;  // consumed; RockerLower owns the ramp
+      }
       lower_in.sensors_ok = input.sensors_ok;
       const auto lower = rocker_lower_.update(lower_in);
       rocker_n_to_p_m_ = lower.n_to_p_m;
+      // The BL4820M12's Moving-Speed interface has no torque-limit register;
+      // this only raises the plant's simulated ceiling for the wheelie phase
+      // (see RockerLower's wheelie_wheel_torque_nm comment).
+      motor_transport_.wheel(0).setTorqueLimitNm(lower.wheel_torque_ceiling_nm);
+      motor_transport_.wheel(1).setTorqueLimitNm(lower.wheel_torque_ceiling_nm);
+      // Wheel-ground contact biases the accelerometer's specific force the
+      // same way it does for V3.1 (see balancingEstimatorConfig): switch the
+      // IMU estimator to gyro-dominant once the wheels are load-bearing.
+      rocker_balancing_ = lower.phase == RockerLower::Phase::Catch ||
+          lower.phase == RockerLower::Phase::Level ||
+          lower.phase == RockerLower::Phase::Balanced;
       if (lower.phase == RockerLower::Phase::Aborted) {
         rocking_stage_ = RockingStage::Idle;
+        resetWheelTorqueLimits();
         enable_request_ = false;
         power_off_free_ = true;
         std::cout << "STAND_UP_ABORTED|reason=sensors_or_leg_clearance|n_to_p_mm="
@@ -557,8 +597,11 @@ class NativeRunner {
       motors.kd_scale = {1.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F};
       motors.position_rad[0] = motors.position_rad[3] = lower.hip_target_rad;
       motors.position_rad[1] = motors.position_rad[4] = lower.knee_target_rad;
-      // Fling/Pivot: powered zero-speed wheel hold, the pivot for the next stage.
-      motors.velocity_rad_s[2] = motors.velocity_rad_s[5] = lower.wheel_rad_s;
+      // Fling/Pivot: powered zero-speed wheel hold, the pivot for the next
+      // stage. Balanced: wheel_yaw_rad_s is 0 elsewhere, so this reduces to
+      // the same common command as every other phase.
+      motors.velocity_rad_s[2] = lower.wheel_rad_s - lower.wheel_yaw_rad_s;
+      motors.velocity_rad_s[5] = lower.wheel_rad_s + lower.wheel_yaw_rad_s;
       return motors;
     }
 
@@ -787,7 +830,8 @@ class NativeRunner {
           sample.accel[0] * sample.accel[0] +
           sample.accel[1] * sample.accel[1] +
           sample.accel[2] * sample.accel[2]);
-      const bool balancing = v3_controller_.state() == V3Controller::State::Balancing;
+      const bool balancing = v3_controller_.state() == V3Controller::State::Balancing ||
+          rocker_balancing_;
       imu_estimator_.setConfig(balancing
           ? tap_fw::v3::balancingEstimatorConfig(ImuStateEstimator::Config{})
           : ImuStateEstimator::Config{});
@@ -1081,6 +1125,16 @@ class NativeRunner {
     last_command_s_ = sim_time_s_;
   }
 
+  // Real BL4820M12 spec (docs/MOTOR_SELECTION.md); RockerLower's wheelie
+  // phase temporarily raises this and it must not leak into V3.1 balancing.
+  static constexpr float kWheelTorqueLimitNm = 0.13F;
+
+  void resetWheelTorqueLimits() {
+    motor_transport_.wheel(0).setTorqueLimitNm(kWheelTorqueLimitNm);
+    motor_transport_.wheel(1).setTorqueLimitNm(kWheelTorqueLimitNm);
+    rocker_balancing_ = false;
+  }
+
   void clearMotionCommand() {
     command_.target_forward_velocity_m_s = 0.0F;
     command_.target_yaw_rate_rad_s = 0.0F;
@@ -1152,6 +1206,7 @@ class NativeRunner {
     }
     else if (op == "DISABLE") {
       rocking_stage_ = RockingStage::Idle;
+      resetWheelTorqueLimits();
       clearMotionCommand();
       power_off_free_ = false;
       disable_request_ = true;
@@ -1166,6 +1221,7 @@ class NativeRunner {
     }
     else if (op == "POWER_OFF") {
       rocking_stage_ = RockingStage::Idle;
+      resetWheelTorqueLimits();
       // Simulation-only fixture: emulate cutting motor power while leaving
       // MuJoCo gravity/contact dynamics running so a held squat can collapse.
       clearMotionCommand();
@@ -1181,6 +1237,7 @@ class NativeRunner {
     }
     else if (op == "ESTOP") {
       rocking_stage_ = RockingStage::Idle;
+      resetWheelTorqueLimits();
       clearMotionCommand();
       estop_ = true;
       enable_request_ = false;
@@ -1207,7 +1264,9 @@ class NativeRunner {
           command_.request_height_change;
       const bool drive_ready =
           continuing_motion ||
-          v3_controller_.state() == V3Controller::State::Balancing;
+          v3_controller_.state() == V3Controller::State::Balancing ||
+          (rocking_stage_ == RockingStage::Active &&
+           rocker_reported_phase_ == RockerLower::Phase::Balanced);
       if (motion_requested && !drive_ready) {
         command_.target_forward_velocity_m_s = 0.0F;
         command_.target_yaw_rate_rad_s = 0.0F;
@@ -1251,17 +1310,14 @@ class NativeRunner {
         disable_request_ = false;
         enable_request_ = true;
         boot_hold_until_s_ = sim_time_s_;
-        rocking_stage_ = RockingStage::Lower;
+        rocking_stage_ = RockingStage::Active;
         rocker_lower_ = RockerLower(options_.rocker);
         rocker_lower_.reset(0.5F * (q[0] + q[3]), 0.5F * (q[1] + q[4]));
         rocker_reported_phase_ = RockerLower::Phase::Lowering;
         std::cout << "STAND_UP_ACCEPTED|controller=v3.1|stage=lower"
                   << std::endl;
       }
-    } else if (op == "DANCE") {
-      std::cout << "ERROR|dance_unsupported_by_v3=1" << std::endl;
-    }
-    else if (op == "QUIT") quit_ = true;
+    } else if (op == "QUIT") quit_ = true;
   }
 
   bool setHeightTarget(float body_height_m) {
@@ -1302,6 +1358,7 @@ class NativeRunner {
               << "|controller=v3.1|v3_state=" << tap_fw::v3::toString(v3_controller_.state())
               << "|power_off_free=" << power_off_free_
               << "|rocking_stage=" << static_cast<int>(rocking_stage_)
+              << "|rocker_phase=" << tap_fw::v3::toString(rocker_reported_phase_)
               << "|rocker_n_to_p_mm=" << rocker_n_to_p_m_ * 1.0e3F
               << "|sim_contact_body=" << support.body
               << "|sim_contact_thigh=" << support.thigh
@@ -1408,6 +1465,7 @@ class NativeRunner {
   RockingStage rocking_stage_ = RockingStage::Idle;
   RockerLower rocker_lower_;
   RockerLower::Phase rocker_reported_phase_ = RockerLower::Phase::Lowering;
+  bool rocker_balancing_ = false;
   float rocker_n_to_p_m_ = 0.0F;
   ImuStateEstimator imu_estimator_;
   RobotState state_{};

@@ -36,17 +36,24 @@ class NativeBackend:
         self._viewer_process: Optional[subprocess.Popen[str]] = None
 
     def runner_path(self) -> Path:
+        # Several build directories (build/, build/native/, build/native-min/,
+        # ...) can each hold their own compiled tap_mujoco_native from the
+        # same root CMakeLists.txt; only the one most recently rebuilt is the
+        # one whose controller code matches this checkout. A fixed priority
+        # order silently ran a stale binary (missing the whole rocking
+        # feature) even though `build/native` was freshly rebuilt.
         candidates = [
             self.root / "build/bin/tap_mujoco_native",
             self.root / "build/native/bin/tap_mujoco_native",
+            self.root / "build/native-min/bin/tap_mujoco_native",
             self.root / "build/tap_mujoco_native3/tap_mujoco_native",
             self.root / "build/tap_mujoco_native/tap_mujoco_native",
             self.root / "build/tap_mujoco_native2/tap_mujoco_native",
         ]
-        for path in candidates:
-            if path.is_file() and path.stat().st_mode & 0o111:
-                return path
-        raise RuntimeError("native runner is not built; build tap_mujoco_native first")
+        built = [p for p in candidates if p.is_file() and p.stat().st_mode & 0o111]
+        if not built:
+            raise RuntimeError("native runner is not built; build tap_mujoco_native first")
+        return max(built, key=lambda p: p.stat().st_mtime)
 
     @property
     def running(self) -> bool:
@@ -200,10 +207,3 @@ class NativeBackend:
         """Request a symmetric FK height target; C++ owns the inverse FK."""
         if math.isfinite(body_height_m):
             self.send(f"HEIGHT {body_height_m:.7g}")
-
-    def command_dance(self, direction: float = 1.0) -> None:
-        if math.isfinite(direction):
-            self.send(f"DANCE START {'-1' if direction < 0 else '1'}")
-
-    def command_dance_stop(self) -> None:
-        self.send("DANCE STOP")
