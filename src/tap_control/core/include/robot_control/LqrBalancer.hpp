@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 
+#include "robot_control/GeneratedGeometry.hpp"
 #include "robot_control/Types.hpp"
 
 namespace robot_control {
@@ -38,7 +39,7 @@ class LqrBalancer {
 
   struct Config {
     float wheel_radius_m = 0.04F;
-    float half_wheel_base_m = 0.1545F;
+    float half_wheel_base_m = 0.5F * geometry::axle_spacing_m;
     float max_ground_velocity_m_s = 0.35F;
     float max_yaw_rate_rad_s = 0.8F;
     bool position_anchor_hold = false;
@@ -53,10 +54,10 @@ class LqrBalancer {
     // uses the same sign on both sides.
     float left_wheel_sign = 1.0F;
 
-    float leg_length_m = 0.24F;
+    float leg_length_m = 0.19F;
     float pendulum_length_per_com_height = 1.10F;
-    float min_pendulum_length_m = 0.15F;
-    float max_pendulum_length_m = 0.27F;
+    float min_pendulum_length_m = 0.04F;
+    float max_pendulum_length_m = 0.20F;
     float gravity_m_s2 = 9.81F;
     float max_ground_accel_m_s2 = 2.0F;
     float wheel_ground_mu = 1.0F;

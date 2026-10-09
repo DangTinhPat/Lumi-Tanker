@@ -128,21 +128,9 @@ The reported knee encoder range 30..145 degrees remains a separate joint-limit
 calibration issue. The CAD-zero encoder reading and sign are still unknown.
 That range must not be imposed on the continuous wheel joints.
 
-## Legacy Model Is Not Yet Converted
-
-The company BOM in `docs/data/BOM .png` now supersedes that provisional
-allocation. The active `masses.yaml` total is 4.621 kg: body 3.371 kg
-(including four 0.388 kg leg motors), each thigh 0.296 kg, each shin 0.109 kg,
-and each wheel link 0.220 kg (0.150 kg wheel motor + 0.070 kg TPE wheel).
-The BOM fixes link totals but does not provide motor mounting COM, rotor inertia,
-or a composite CAD inertia tensor; those remain explicit simulation estimates.
-
-Do not add six new motor masses on top of the old motor-inclusive masses.
-With existing leg/body groups retained, the bookkeeping total is
-`3.668 + 2*(m_cjc_motor + m_bare_wheel)` kg. This conditional formula is not a
-new mass estimate or a COM allocation. Mount locations and existing thigh/shin
-mass contents still need confirmation. The previous six-GIM mass formula is
-superseded and must not be applied to the CJC wheel motors.
+No robot mass allocation is currently attached to the native simulation.
+Derive it from the adopted CAD and BOM before using model-based torque or
+balance results.
 
 Motor stator/gearbox mass must follow its supporting link rather than all being
 assigned to the spinning wheel. Revised COM/inertia require mounting geometry,

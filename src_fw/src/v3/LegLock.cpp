@@ -4,6 +4,9 @@
 #include <cmath>
 
 #include "robot_hal/MotorFrameCodec.hpp"
+#include "robot_control/WholeBodyModel.hpp"
+#include "tap_fw/v3/CurrentTorque.hpp"
+#include "tap_fw/v3/LegHeight.hpp"
 
 namespace tap_fw::v3 {
 namespace frame = robot_control::motor_frame;
@@ -22,11 +25,15 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
   const auto legs = board::MotorIds{}.leg_can;
   for (std::size_t i = 0; i < kLegs; ++i) {
     const auto node = legs[i].node_id;
-    const std::int32_t input_mode = jointMit(i) ? frame::kInputModeMit
-                                                : frame::kInputModePassthrough;
+    ok = transport.sendCan(frame::canId(node, frame::kSetLimitsCmdId),
+                           frame::packSetLimits(config_.velocity_limit_turns_s,
+                                                config_.current_limit_a)) && ok;
+  }
+  for (std::size_t i = 0; i < kLegs; ++i) {
+    const auto node = legs[i].node_id;
     ok = transport.sendCan(frame::canId(node, frame::kSetControllerModeCmdId),
-                           frame::packSetControllerMode(frame::kControlModePosition,
-                                                        input_mode)) && ok;
+                           frame::packSetControllerMode(frame::kControlModeTorque,
+                                                        frame::kInputModePassthrough)) && ok;
   }
   // The first set-point equals the measured pose, so closing the loop does
   // not snap the leg anywhere; the ramp then walks it to 0.
@@ -65,11 +72,6 @@ float LegLock::velFfTurns(std::size_t leg) const noexcept {
   return rate_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
 }
 
-bool LegLock::jointMit(std::size_t leg) const noexcept {
-  if (leg >= kLegs) return false;
-  return config_.mode == Mode::Mit;
-}
-
 bool LegLock::atZero(std::uint64_t now_us) const noexcept {
   return engaged_ && (config_.ramp_s <= 0.0F ||
       (now_us > engage_us_ &&
@@ -81,24 +83,36 @@ bool LegLock::sendTargets(std::uint64_t now_us,
   last_send_us_ = now_us;
   bool ok = true;
   const auto legs = board::MotorIds{}.leg_can;
+  std::array<float, kLegs> gravity_torque_nm{};
+  for (std::size_t side = 0; side < 2U; ++side) {
+    const std::size_t hip = side == 0U ? 0U : 2U;
+    const std::size_t knee = hip + 1U;
+    const float hip_sign = legs[hip].driver_sign;
+    const float knee_sign = legs[knee].driver_sign;
+    const float hip_cad = LegHeight::hangHipCad() +
+        hip_sign * feedback_position_rad_[hip];
+    const float knee_cad = knee_sign * feedback_position_rad_[knee];
+    const auto leg_gravity = robot_control::WholeBodyModel::legGravityTorque(
+        hip_cad, knee_cad);
+    const auto body_gravity = robot_control::WholeBodyModel::bodySupportTorque(
+        hip_cad, knee_cad);
+    gravity_torque_nm[hip] = hip_sign * (leg_gravity.hip_nm + body_gravity.hip_nm);
+    gravity_torque_nm[knee] = knee_sign * (leg_gravity.knee_nm + body_gravity.knee_nm);
+  }
   for (std::size_t i = 0; i < kLegs; ++i) {
     const float turns = targetTurns(i, now_us);
-    const bool mit = jointMit(i);
-    const auto id = frame::canId(legs[i].node_id, mit ? frame::kMitControlCmdId
-                                                      : frame::kSetInputPosCmdId);
-    if (!mit) {
-      // vel_ff in milli-turns/s (int16): only the roll side rate, 0 otherwise.
-      const float vff = std::clamp(velFfTurns(i) * 1000.0F, -32767.0F, 32767.0F);
-      ok = transport.sendCan(id, frame::packSetInputPos(
-                                     turns, static_cast<std::int16_t>(std::lround(vff)), 0)) && ok;
-    } else {
-      // MIT works in joint radians (after the 8:1 gear), driver frame.
-      const float joint_rad = turns * kTwoPi / config_.gear_ratio;
-      ok = transport.sendCan(id, frame::packMitCommand(joint_rad, 0.0F,
-                                                       config_.mit_kp_nm_per_rad,
-                                                       config_.mit_kd_nm_s_per_rad,
-                                                       0.0F)) && ok;
-    }
+    // Torque mode uses output-joint Nm. A stale Iq sample suppresses the command.
+    const float target_rad = turns * kTwoPi / config_.gear_ratio;
+    const float target_rate = velFfTurns(i) * kTwoPi / config_.gear_ratio;
+    const float requested_nm = gravity_torque_nm[i] + config_.joint_kp_nm_per_rad *
+            (target_rad - feedback_position_rad_[i]) +
+        config_.joint_kd_nm_s_per_rad *
+            (target_rate - feedback_velocity_rad_s_[i]);
+    const auto current = currentTorqueCommand(requested_nm, feedback_current_a_[i],
+        feedback_valid_[i], config_.kt_nm_per_a, config_.current_limit_a,
+        config_.current_comp_gain);
+    ok = transport.sendCan(frame::canId(legs[i].node_id, frame::kSetInputTorqueCmdId),
+                           frame::packSetInputTorque(current.torque_nm)) && ok;
   }
   return ok;
 }
@@ -122,10 +136,6 @@ bool LegLock::release(motor_transport::Transport& transport) noexcept {
                            frame::packSetAxisState(frame::kAxisStateIdle)) && ok;
   }
   return ok;
-}
-
-const char* toString(LegLock::Mode mode) noexcept {
-  return mode == LegLock::Mode::Position ? "POS" : "MIT";
 }
 
 }  // namespace tap_fw::v3

@@ -257,9 +257,9 @@ nhiễm wrap, và chỉ dùng position để hiệu chỉnh chậm. Khuyến ngh
 | T_ff | 12 | ±50 N·m | 24.4 mN·m | thô, xem dưới |
 
 Kd sát trần và đã có một chỗ tràn: sim dùng `kd = 2√(80 × I) × kd_scale` →
-hip 2.08, knee 1.04 N·m/(rad/s) (`GeneratedGeometry.hpp:50-51`), trong khi
-dải MIT chỉ tới 5.0. `LandingImpedance` đặt `impact_kd_scale = 3.0`
-(`native_runner.cpp:686`) → 3.0 × 2.08 = 6.25, vượt dải, bão hoà im lặng.
+hip 2.08, knee 1.04 N·m/(rad/s), trong khi dải MIT chỉ tới 5.0.
+`LandingImpedance` đặt `impact_kd_scale = 3.0` → 3.0 × 2.08 = 6.25, vượt
+dải, bão hoà im lặng.
 Phát hiện trên giấy, chưa kiểm chứng bằng chạy — nhưng nằm đúng ở đường
 landing đang hỏng.
 
@@ -273,8 +273,7 @@ hoá này vào sim để biết nó có làm hỏng landing không.
 Chân: GDS68 danh định 5 N·m, stall 11 N·m; sim dùng 3.0 N·m (`:588`), còn
 biên. Bánh: BL4820M12 130 mN·m, không hộp số; sim dùng đúng 0.13 N·m
 (`:473`, `:1039`), trung thực. Đây là con số khắc nghiệt: 0.13/0.04 = 3.25 N
-lực kéo mỗi bánh, 6.5 N cho robot 4.621 kg (45 N trọng lượng) — toàn bộ
-authority bắt thăng bằng chỉ khoảng 0.14 g.
+lực kéo mỗi bánh, 6.5 N tổng lực kéo — authority bắt thăng bằng thấp.
 
 Bánh xe 400 RPM có tải → ±400 raw ↔ ±41.888 rad/s ↔ 1.6755 m/s. Sim clamp
 đúng ±41.887902 (`:1080`) và mọi đường code khác cũng vậy. Con số 1.2566 m/s

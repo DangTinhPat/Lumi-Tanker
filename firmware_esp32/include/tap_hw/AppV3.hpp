@@ -24,8 +24,8 @@
 namespace tap_hw {
 
 // Firmware v3: two-wheel inverted pendulum. The legs are arranged before the
-// motor supply is switched on and locked at that power-up pose (encoder 0 of
-// each GDS68, driver position mode); only the wheels balance. USB serial only
+// motor supply is switched on and controlled around that power-up pose from
+// encoder 0 using current-compensated GDS68 torque mode; only the wheels balance. USB serial only
 // (tools/tap_serial_control_gui.py), no BLE.
 class AppV3 {
  public:

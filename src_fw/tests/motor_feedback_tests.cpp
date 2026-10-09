@@ -45,6 +45,14 @@ CanFrame legFeedback(std::uint8_t node, float position, float velocity,
   return frame;
 }
 
+CanFrame iqFeedback(std::uint8_t node, float setpoint_a, float measured_a) {
+  CanFrame frame{};
+  frame.id = canId(node, kGetIqCmdId);
+  frame.dlc = 8U;
+  frame.data = packIqFeedback(setpoint_a, measured_a);
+  return frame;
+}
+
 }  // namespace
 
 int main() {
@@ -70,6 +78,17 @@ int main() {
   assert(feedback.ingestCan(lk, 1'000U));
   assert(feedback.ingestCan(rh, 1'000U));
   assert(feedback.ingestCan(rk, 1'000U));
+  assert(feedback.ingestCan(iqFeedback(3U, 0.2F, 0.4F), 1'000U));
+  assert(feedback.ingestCan(iqFeedback(4U, 0.2F, 0.5F), 1'000U));
+  assert(feedback.ingestCan(iqFeedback(1U, 0.2F, 0.6F), 1'000U));
+  assert(feedback.ingestCan(iqFeedback(2U, 0.2F, 0.7F), 1'000U));
+  assert(feedback.allLegCurrentsFresh(21'000U));
+  assert(!feedback.allLegCurrentsFresh(21'001U));
+  // Core sign follows the verified motor map (LH/LK inverted, RH/RK positive).
+  assert(near(feedback.legCurrentA(0U), -0.4F));
+  assert(near(feedback.legCurrentA(1U), -0.5F));
+  assert(near(feedback.legCurrentA(3U), 0.6F));
+  assert(near(feedback.legCurrentA(4U), 0.7F));
 
   const auto left_first = buildPresentResponse(1U, 1020U, 10, 0);
   const auto right_first = buildPresentResponse(1U, 500U, -10, 0);
@@ -124,6 +143,9 @@ int main() {
   CanFrame dlc5 = dlc6;
   dlc5.dlc = 5U;
   assert(!short_frames.ingestCan(dlc5, 1'000U));
+  CanFrame short_iq = iqFeedback(3U, 0.1F, 0.2F);
+  short_iq.dlc = 7U;
+  assert(!short_frames.ingestCan(short_iq, 1'000U));
 
   CanFrame wrong_command = lh;
   wrong_command.id = canId(3U, kSetAxisStateCmdId);

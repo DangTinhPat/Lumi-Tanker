@@ -15,9 +15,18 @@ V3Controller::V3Controller(Config config)
       com_reference_m_(LegHeight::forKnee(LegHeight::kKneeMaxRad).com_above_axle_m) {
   // Initial pendulum length (legs at the power-up pose); lqrUpdate follows the pose.
   lqr_.setComHeight(config_.com_height_m);
+  config_.initial_knee_rad = std::isfinite(config_.initial_knee_rad)
+      ? std::clamp(config_.initial_knee_rad, LegHeight::kKneeMinRad, LegHeight::kKneeMaxRad)
+      : 0.0F;
+  if (config_.initial_knee_rad > 0.0F) {
+    knee_target_rad_ = knee_cmd_rad_ = config_.initial_knee_rad;
+    pose_ = LegHeight::forKnee(knee_cmd_rad_);
+    height_target_m_ = pose_.axle_below_hip_m;
+  }
 }
 
 V3Controller::Output V3Controller::fault(const char* reason, const Output& base) {
+  lqr_prediction_.reset();
   state_ = State::Fault;
   last_fault_ = reason;
   #ifdef TAP_SPLIT_HOST_PROTOTYPE
@@ -37,6 +46,7 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
 }
 
 V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_in) {
+  if (config_.algo != Algo::Lqr) lqr_prediction_.reset();
   wheel_carrier_rad_s_.fill(0.0F);
   // Roll on: the turn command is slewed (Roll::yaw_accel_rad_s2) so the
   // lean-in can build with the centripetal pull instead of after it.
@@ -128,7 +138,12 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   }
 
   Output out{};
+  if (config_.initial_knee_rad > 0.0F) {
+    out.leg_hip_offset_rad = pose_.hip_offset_rad;
+    out.leg_knee_offset_rad = pose_.knee_offset_rad;
+  }
   if (cmd.disable) {
+    lqr_prediction_.reset();
     legs_held_ = false;
     #ifdef TAP_SPLIT_HOST_PROTOTYPE
     if (config_.split.enabled) {
@@ -156,12 +171,14 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         state_since_us_ = in.now_us;
         runaway_since_us_ = 0U;
         if (!legs_held_) {
-          // Fresh lock: legs go to their zero, so the height starts at max.
-          height_target_m_ = LegHeight::maxHeight();
-          knee_target_rad_ = knee_cmd_rad_ = 0.0F;
+          knee_target_rad_ = knee_cmd_rad_ = config_.initial_knee_rad;
           height_speed_m_s_ = 0.0F;
           height_accel_m_s2_ = 0.0F;
-          pose_ = LegHeight::forKnee(0.0F);
+          pose_ = LegHeight::forKnee(knee_cmd_rad_);
+          height_target_m_ = config_.initial_knee_rad > 0.0F
+              ? pose_.axle_below_hip_m : LegHeight::maxHeight();
+          out.leg_hip_offset_rad = pose_.hip_offset_rad;
+          out.leg_knee_offset_rad = pose_.knee_offset_rad;
         }
         out.engage_legs = !legs_held_;  // already holding after a fault: keep it
         legs_held_ = true;
@@ -369,6 +386,7 @@ void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_tr
 }
 
 void V3Controller::engageBalance(const Input& in, float seed) {
+  lqr_prediction_.reset();
   state_ = State::Balancing;
   ga_init_ = false;
   runaway_v_imu_ = ground_v_;
@@ -423,6 +441,7 @@ float V3Controller::releaseBalance(const Input& in) const {
 }
 
 void V3Controller::heldRezero(const Input& in) {
+  lqr_prediction_.reset();
   ++held_resets_;
   trim_blend_ = false;
   wbReset(in);
@@ -779,6 +798,26 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   state.wheel.position_m = ground_x_;
   state.wheel.velocity_m_s = pid_v_filt_;
 
+  if (config_.lqr_prediction.enabled && !held_outer_off_ && !held_quiet_) {
+    const float reference = lqr_.balanceTrim() + ffPitch();
+    const float carrier = radius * (body_rate_ + .5F *
+        (in.hip_rate_rad_s[0] + in.hip_rate_rad_s[1] +
+         in.knee_rate_rad_s[0] + in.knee_rate_rad_s[1]));
+    const auto future = lqr_prediction_.predict(
+        {ground_x_, in.pitch_rad-reference, ground_v_, in.pitch_rate_rad_s},
+        config_.lqr_prediction, in.dt_s,
+        config_.lqr_inertia_length ? lqrInertiaLength() :
+            pose_.com_above_axle_m * config_.lqr.pendulum_length_per_com_height,
+        carrier, std::min(config_.lqr.max_ground_accel_m_s2,
+                          config_.lqr.wheel_ground_mu * 9.81F));
+    state.wheel.position_m = future[0];
+    state.wheel.velocity_m_s = future[2];
+    state.imu.pitch_rad = future[1] + reference;
+    state.imu.pitch_rate_rad_s = future[3];
+  } else {
+    lqr_prediction_.reset();
+  }
+
   robot_control::ControlCommand command{};
   command.target_forward_velocity_m_s = held_outer_off_ ? 0.0F : target_v;
   command.target_yaw_rate_rad_s = cmd.yaw_rad_s;
@@ -894,8 +933,11 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
           body_rate_ + in.hip_rate_rad_s[side] + in.knee_rate_rad_s[side], -3.0F, 3.0F);
     }
   }
-  return {comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
-          comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
+  const std::array<float, 2> sent{
+      comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
+      comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
+  lqr_prediction_.record(config_.lqr.left_wheel_sign * radius * .5F * (sent[0]+sent[1]));
+  return sent;
 }
 
 void V3Controller::wbReset(const Input& in) {
@@ -1564,7 +1606,10 @@ void V3Controller::updateTrunk(const Input& in, bool active,
         std::max(t.reflex_rate_hi - t.reflex_rate_lo, 1.0e-3F);
     const float lean_m = (std::abs(fast_residual) - t.reflex_lean_lo) /
         std::max(t.reflex_lean_hi - t.reflex_lean_lo, 1.0e-3F);
-    const float want_w = std::clamp(std::max(rate_m, lean_m), 0.0F, 1.0F);
+    const float accel_m = (std::abs(body_accel_f_) - t.reflex_accel_lo) /
+        std::max(t.reflex_accel_hi - t.reflex_accel_lo, 1.0e-3F);
+    const float want_w = std::clamp(std::max(rate_m,
+        t.reflex_inertial_gate ? accel_m : lean_m), 0.0F, 1.0F);
     const float up_g = in.dt_s / std::max(t.reflex_attack_s, 1.0e-3F);
     const float down_g = in.dt_s / std::max(t.reflex_release_s, 1.0e-3F);
     reflex_w_ += std::clamp(want_w - reflex_w_, -down_g, up_g);
@@ -2231,8 +2276,7 @@ V3Controller::Config defaultV3Config() {
   cfg.lqr.balance_trim_pitch_gate_rad = 0.25F;
   cfg.lqr.command_velocity_tracking_margin_m_s = 0.25F;
   cfg.lqr.max_ground_velocity_m_s = 0.8F;
-  // Demo turning: 1.5 rad/s (~86 deg/s) = 0.23 m/s per wheel at the 0.1545 m
-  // half track; the default 0.8 capped the BLE stick well below that.
+  // The default yaw cap of 0.8 rad/s restricted the BLE stick.
   cfg.lqr.max_yaw_rate_rad_s = 1.5F;
   // tunedControllerConfig() derives this from a 0.13 N.m torque spec that
   // predates the BL4820 wheels; the PID's accel_max_m_s2 = 8.0 is the value
@@ -2244,7 +2288,8 @@ V3Controller::Config defaultV3Config() {
   // V3Controller always passes hold_station=true and manages the anchor itself via
   // reanchorPosition).
   cfg.lqr.position_anchor_hold = true;
-  // Provisional GIM CAD CoM range; keep margin around the low knee stop.
+  // The GIM CAD CoM height is short at the lower knee stop and about 0.19 m
+  // near full extension. Keep margin around this provisional range.
   cfg.lqr.min_pendulum_length_m = 0.035F;
   cfg.lqr.max_pendulum_length_m = 0.20F;
   // Input cost for the real wheel delay (the BL4820 speed servo answers after

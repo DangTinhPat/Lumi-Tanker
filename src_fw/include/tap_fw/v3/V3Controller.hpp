@@ -6,6 +6,7 @@
 
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
+#include "robot_control/LqrActuationPredictor.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
@@ -15,8 +16,8 @@ namespace tap_fw::v3 {
 //   Tier 1  wheels: LQR (or PID / whole-body) on the virtual pitch theta_v.
 //   Tier 2  hips: reflex + preview + slow level loop (Config::Tier).
 //   Knees:  height profile (updateHeight), suspension, knee hold, roll IK.
-// All four leg joints are position-driven by LegLock; this class only produces
-// their offsets from the power-up pose (Output::leg_*).
+// LegLock converts the four leg targets into current-difference torque commands;
+// this class produces their offsets from the power-up pose (Output::leg_*).
 //
 // Start flow (operator): START -> legs lock -> Ready (wheels hold still, no
 // balance loop) -> the operator puts the robot on the floor and holds it still
@@ -97,9 +98,8 @@ class V3Controller {
     float rate_m_s = 0.08F;     // side height offset slew
     float turn_ff = 1.0F;       // lean-in weight (target atan(v w / g))
     float kp = 0.2F;            // proportional part (1 = the whole tilt at once)
-    // Servo velocity feed-forward (SET rollvff): the side offsets' rate goes to
-    // the GDS68 with each target (Set_Input_Pos vel_ff), so the knee follows a
-    // ramp without its position-loop lag and the loop runs with kp_vff/tau_vff.
+    // Joint velocity reference (SET rollvff): the side offsets' rate enters
+    // the GDS68 current/torque impedance so the knee follows a ramp smoothly.
     // The fast gains without the feed-forward are worse, so both switch together.
     // Off: it made the side legs hunt on the robot.
     bool vel_ff = false;
@@ -256,7 +256,7 @@ class V3Controller {
     // Body CoM fore/aft correction of the CAD mass model [m, body frame], fitted
     // to the measured balance-angle shifts with height (CAD alone has the wrong
     // sign; HANDOFF 5.37).
-    float body_com_dx_m = 0.0F;  // CAD estimate is in GeneratedGeometry
+    float body_com_dx_m = 0.0F;  // additional correction; CAD estimate is in GeneratedGeometry
     float lean_share = 1.0F;   // full virtual-lean isolation inside the existing travel limits
     // Residual whole-system lean authority, separate from maneuver preview.
     float disturbance_share = 1.0F;
@@ -306,6 +306,9 @@ class V3Controller {
     // chatter pollutes): weight 0 below *_lo, 1 above *_hi, fast attack, slow
     // release so the reflex stays on through a recovery. Off at boot (SET tgate).
     bool reflex_gate = false;
+    // Inertial events only: static lean stays with wheel balance/slow level.
+    bool reflex_inertial_gate = false;
+    float reflex_accel_lo = .2F, reflex_accel_hi = .8F;  // gravity-removed IMU [m/s²]
     // Thresholds: ~0.8 standing hip reversals/s with the body close to the
     // ungated one (HANDOFF 5.42).
     float reflex_rate_lo = 0.06F, reflex_rate_hi = 0.20F;   // |gyro| low-passed at 5 Hz [rad/s]
@@ -513,6 +516,7 @@ class V3Controller {
     // it and turns the schedule off). 0.03 stands tall but falls crouched; 0.08
     // stands both (HANDOFF 5.46).
     float lqr_lead_s = 0.03F;
+    robot_control::LqrActuationPredictor::Config lqr_prediction{};
     // Height-adaptive lead (SET lqradapt 0/1; boot on). The wheel loop's phase
     // lag matters more the faster the pendulum is, so the lead grows as the CoM
     // comes down:
@@ -568,6 +572,8 @@ class V3Controller {
     // driving [m]; 0 = speed only (SET wbslack).
     float wb_drive_slack_m = 0.0F;
     std::uint64_t lock_settle_us = 1'200'000U;  // leg ramp + settle before wheels
+    // Optional CAD knee angle held on START; the GIM simulator uses full extension.
+    float initial_knee_rad = 0.0F;
     float fall_pitch_rad = 0.60F;
     // Auto-learned balance trim (theta_v-referenced, height-independent while
     // virtual_pitch is on). Once the robot has held its ground position within
@@ -790,6 +796,7 @@ class V3Controller {
   [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
   [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
+  [[nodiscard]] float plannedAcceleration() const noexcept { return plan_a_; }
   [[nodiscard]] float reflexGate() const noexcept { return reflex_w_; }
   [[nodiscard]] float lqrLeadEffective() const noexcept { return lqr_lead_eff_; }
   [[nodiscard]] float suspensionDeadband() const noexcept { return sus_db_eff_; }
@@ -1049,6 +1056,7 @@ class V3Controller {
   // unfiltered, gyro/encoder noise rode into the sent wheel command and read as
   // jerky chatter on the robot.
   float lqr_lead_filt_ = 0.0F;
+  robot_control::LqrActuationPredictor lqr_prediction_{};
   std::uint64_t held_window_start_us_ = 0U;
   float held_v0_ = 0.0F;
   float held_max_rate_ = 0.0F;

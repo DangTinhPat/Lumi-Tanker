@@ -115,6 +115,18 @@ bool MotorFeedback::ingestCan(const motor_transport::CanFrame& input,
     return true;
   }
 
+  if (command_id == frame::kGetIqCmdId) {
+    if (input.dlc < 8U) return false;
+    const auto iq = frame::unpackIqFeedback(input.data);
+    if (!std::isfinite(iq.setpoint_a) || !std::isfinite(iq.measured_a)) return false;
+    const std::size_t joint = binding->joint_index;
+    current_a_[joint] = binding->driver_sign * iq.measured_a;
+    current_stamp_us_[joint] = now_us;
+    current_valid_[joint] = true;
+    ++sequence_;
+    return true;
+  }
+
   // GDS68 MIT feedback uses bytes 0-5 only and arrives with DLC 6 on the
   // robot (verified 2026-09-25). Get_Encoder_Estimates (0x009) is not a
   // joint source: its scale and zero differ from MIT and are unverified, and

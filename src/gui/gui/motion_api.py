@@ -15,9 +15,9 @@ import time
 
 # Native runner hard clamps. These are software ceilings, not validated
 # physical robot operating limits.
-NATIVE_MAX_LINEAR_M_S = 1.0
+NATIVE_MAX_LINEAR_M_S = 0.5
 NATIVE_MAX_YAW_RAD_S = 0.8
-WHEEL_TRACK_M = 0.309
+WHEEL_TRACK_M = 0.2654
 MAX_DISTANCE_ACTION_M = 5.0
 MAX_TURN_ACTION_RAD = 2.0 * math.pi
 
@@ -231,7 +231,7 @@ class MotionAPI:
             self._end_action(ActionStatus.REJECTED)
             return self.action_status
         fields = self.backend.telemetry
-        if fields.get("mode") not in ("Balance", "Drive"):
+        if fields.get("mode") not in ("Balance", "Balancing", "Drive"):
             self._end_action(ActionStatus.REJECTED)
             return self.action_status
         try:
@@ -296,12 +296,15 @@ class MotionAPI:
         now = time.monotonic()
         if stamp <= 0.0 or now - stamp > 0.25:
             return None
-        if fields.get("mode") != "Balance":
+        if fields.get("mode") not in ("Balance", "Balancing"):
             return None
-        if (self.require_station_capture and
-                (fields.get("station_eligible") != "1" or
-                 fields.get("station_capture_ready") != "1")):
-            return None
+        if self.require_station_capture:
+            if "drive_ready" in fields:
+                if fields["drive_ready"] != "1":
+                    return None
+            elif (fields.get("station_eligible") != "1" or
+                  fields.get("station_capture_ready") != "1"):
+                return None
         try:
             values = {key: float(fields[key]) for key in keys}
         except (KeyError, TypeError, ValueError):

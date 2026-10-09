@@ -24,8 +24,7 @@ trên **ODrive**, không phải protocol riêng của SteadyWin.
 Nguồn 24V của robot nằm trong dải điện áp danh định → tương thích.
 
 **Chưa xác minh:** 5 N·m danh định / 11 N·m stall có đủ cho khớp đùi/gối
-robot hay không — cần khối lượng robot + chiều dài tay đòn để tính. Robot
-chỉ có khối lượng ước lượng từ CAD/BOM (4,621 kg, xem `src/tap_sim/model/PHYSICS.md`), chưa có phép đo thật.
+robot hay không — cần khối lượng robot + chiều dài tay đòn đã được xác nhận.
 
 ## 1.5. Kết nối vật lý & cảnh báo an toàn
 
@@ -154,8 +153,10 @@ CAN ID (11 bit) = (node_id << 5) | cmd_id
 | cmd_id | Tên | Chiều | Vai trò trong `can_motor.c` |
 |---|---|---|---|
 | 0x007 | Set_Axis_State | host→motor | IDLE (1) khi disable, CLOSED_LOOP_CONTROL (8) khi bật |
-| 0x008 | Mit_Control | 2 chiều | lệnh điều khiển + feedback chính |
-| 0x00B | Set_Controller_Mode | host→motor | set control_mode=3, input_mode=9 (MIT) khi bật |
+| 0x008 | Mit_Control | 2 chiều | MIT fallback/protocol; V3 không dùng |
+| 0x00B | Set_Controller_Mode | host→motor | torque mode: control_mode=1, input_mode=1 |
+| 0x00E | Set_Input_Torque | host→motor | mô-men mục tiêu; V3 dùng |
+| 0x014 | Get_Iq | motor→host | dòng mục tiêu và dòng đo; V3 dùng |
 
 ### cmd_id khác có sẵn trong firmware, chưa dùng
 
@@ -166,7 +167,9 @@ CAN ID (11 bit) = (node_id << 5) | cmd_id
 | 0x003 | Get_Error | motor→host |
 | 0x006 | Set_Axis_Node_ID | host→motor |
 | 0x009 | Get_Encoder_Estimates | motor→host |
-| 0x00C/D/E | Set_Input_Pos/Vel/Torque | host→motor |
+| 0x00C | Set_Input_Pos | host→motor |
+| 0x00D | Set_Input_Vel | host→motor |
+| 0x00E | Set_Input_Torque | host→motor |
 | 0x00F | Set_Limits | host→motor |
 | 0x014 | Get_Iq | motor→host |
 | 0x016 | Reboot | host→motor |
@@ -177,11 +180,19 @@ CAN ID (11 bit) = (node_id << 5) | cmd_id
 | 0x01E | Disable_Can | host→motor |
 | 0x01F | Save_Configuration | host→motor |
 
-## 4. Mit_Control (0x008) — dùng cho cả 4 khớp
+`Get_Iq (0x014)` phát 8 byte little-endian: float32 `Iq_Setpoint` tại byte 0,
+float32 `Iq_Measured` tại byte 4. GDS68 mặc định đặt
+`odrv0.axis0.config.can.iq_rate_ms = 0` (tắt broadcast); V3 torque mode cần cấu
+hình giá trị khác 0 và lưu trên từng driver. `Set_Input_Torque (0x00E)` nhận
+float32 little-endian Nm tại byte 0 sau khi chọn `control_mode=1` (torque),
+`input_mode=1` (passthrough). Firmware V3 gửi `Set_Limits (0x00F)` trước khi
+đóng vòng.
+
+## 4. Mit_Control (0x008) — giao thức dự phòng
 
 4 chế độ điều khiển driver hỗ trợ: Position / Velocity / Torque / Motion
-(MIT). Firmware này dùng MIT — công thức chuẩn cho khớp cần phản ứng lực
-nhanh:
+(MIT). Firmware V3 hiện dùng `Set_Input_Torque`; phần MIT dưới đây giữ làm tài
+liệu giao thức và không phải đường điều khiển hiện tại:
 
 ```
 T_target = Kp × (Pos_target − Pos) + Kd × (Vel_target − Vel) + T_ff

@@ -501,7 +501,7 @@ class NativeRunner {
     EmbeddedController::Config cfg;
     auto& lqr = cfg.lqr;
     lqr.wheel_radius_m = robot_control::geometry::wheel_radius_m;
-    lqr.half_wheel_base_m = 0.1545F;
+    lqr.half_wheel_base_m = 0.5F * robot_control::geometry::axle_spacing_m;
     lqr.left_wheel_sign = 1.0F;
     // The speed actuator is torque-limited at 0.13 N.m. Keep the operator
     // envelope wider than the validated cruise range so the feedback loop can
@@ -782,8 +782,7 @@ class NativeRunner {
     accel_id_ = mj_name2id(model_, mjOBJ_SENSOR, "mpu6500_accel");
     gyro_id_ = mj_name2id(model_, mjOBJ_SENSOR, "mpu6500_gyro");
     if (accel_id_ < 0 || gyro_id_ < 0) throw std::runtime_error("MJCF missing IMU sensors");
-    // IDs are fixed by the model contract and validated by validate_model.py;
-    // look up by the explicit names so a reordered XML cannot silently swap a side.
+    // Look up named sensors so reordering the MJCF cannot silently swap a side.
     const std::array<const char*, 6> names = {
         "enc_left_hip_pos", "enc_left_knee_pos", "enc_left_wheel_pos",
         "enc_right_hip_pos", "enc_right_knee_pos", "enc_right_wheel_pos"};

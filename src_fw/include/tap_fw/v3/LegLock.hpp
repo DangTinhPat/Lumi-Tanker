@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -14,25 +15,24 @@ namespace motor_transport = robot_control::motor_transport;
 // the offsets the controller asks for. The operator arranges the legs before the
 // motor supply is switched on, so "zero" is exactly that pose.
 //
-// Position mode (default, all four joints): the driver's internal
-// position/velocity/integrator loop tracks Set_Input_Pos. At engage the target
-// ramps smoothly from wherever the leg is to the zero pose; after that it moves
-// by the height / tier-2 / roll offsets (setOffsets, setSideOffsets).
-// MIT mode is a fallback: the same target with a fixed Kp/Kd spring (LEGMODE MIT).
+// All four joints use direct GDS68 torque mode. Local position/velocity
+// impedance creates a requested torque; fresh measured Iq applies delta-I
+// correction before it is sent to the driver.
 class LegLock {
  public:
-  enum class Mode { Position, Mit };
-
   struct Config {
-    Mode mode = Mode::Position;
     float ramp_s = 1.0F;                   // current pose -> 0
     // 333 Hz, paced on the 500 Hz control clock (alternating 2/4 ms). Four
     // commands per cycle at 500 Hz would use ~88 % of the 500 kbit/s bus before
     // heartbeat/diagnostics (worst-case stuffing).
     std::uint32_t resend_period_us = 3'000U;
-    float mit_kp_nm_per_rad = 15.0F;
-    float mit_kd_nm_s_per_rad = 0.5F;
+    float joint_kp_nm_per_rad = board::kLegMaxKpNmPerRad;
+    float joint_kd_nm_s_per_rad = 0.5F;
     float gear_ratio = 8.0F;               // rotor turns per joint turn
+    float kt_nm_per_a = 0.47F;
+    float current_limit_a = board::kLegCurrentLimitA;
+    float current_comp_gain = 0.2F;
+    float velocity_limit_turns_s = board::kLegVelLimitTurnsS;
   };
   static constexpr std::size_t kLegs = 4U;  // board::MotorIds{}.leg_can order
 
@@ -52,7 +52,15 @@ class LegLock {
   [[nodiscard]] bool atZero(std::uint64_t now_us) const noexcept;
   [[nodiscard]] float targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
-  void setMode(Mode mode) noexcept { config_.mode = mode; }
+  void setFeedback(const std::array<float, kLegs>& position_rad,
+                   const std::array<float, kLegs>& velocity_rad_s,
+                   const std::array<float, kLegs>& current_a,
+                   const std::array<bool, kLegs>& current_valid) noexcept {
+    feedback_position_rad_ = position_rad;
+    feedback_velocity_rad_s_ = velocity_rad_s;
+    feedback_current_a_ = current_a;
+    feedback_valid_ = current_valid;
+  }
   // Height / tier-2 offsets: hip/knee (core frame, rad) added to every leg's
   // zero once the engage ramp is done; applied the same to both legs.
   void setOffsets(float hip_core_rad, float knee_core_rad) noexcept {
@@ -61,8 +69,8 @@ class LegLock {
   }
   // Roll (V3Controller::Config::Roll): per-side offsets [left, right]
   // added to the common ones above.
-  // Optional rates [core rad/s] go out as the position target's velocity
-  // feed-forward (POS mode, Set_Input_Pos vel_ff).
+  // Optional rates [core rad/s] form the velocity reference in the joint
+  // impedance controller.
   void setSideOffsets(const std::array<float, 2>& hip_core_rad,
                       const std::array<float, 2>& knee_core_rad,
                       const std::array<float, 2>& hip_rate = {},
@@ -78,9 +86,12 @@ class LegLock {
     config_.resend_period_us = period_us;
     next_send_us_ = last_send_us_ + period_us;
   }
-  void setMitGains(float kp, float kd) noexcept {
-    config_.mit_kp_nm_per_rad = kp;
-    config_.mit_kd_nm_s_per_rad = kd;
+  void setJointGains(float kp, float kd) noexcept {
+    config_.joint_kp_nm_per_rad = kp;
+    config_.joint_kd_nm_s_per_rad = kd;
+  }
+  void setCurrentCompGain(float gain) noexcept {
+    config_.current_comp_gain = std::clamp(gain, 0.0F, 1.0F);
   }
 
  private:
@@ -90,7 +101,10 @@ class LegLock {
   std::array<float, 2> side_knee_rad_{};
   std::array<float, 2> side_hip_rate_{};
   std::array<float, 2> side_knee_rate_{};
-  [[nodiscard]] bool jointMit(std::size_t leg) const noexcept;
+  std::array<float, kLegs> feedback_position_rad_{};
+  std::array<float, kLegs> feedback_velocity_rad_s_{};
+  std::array<float, kLegs> feedback_current_a_{};
+  std::array<bool, kLegs> feedback_valid_{};
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};
@@ -100,7 +114,5 @@ class LegLock {
   std::uint64_t next_send_us_ = 0U;
   std::array<float, kLegs> start_turns_{};
 };
-
-[[nodiscard]] const char* toString(LegLock::Mode mode) noexcept;
 
 }  // namespace tap_fw::v3

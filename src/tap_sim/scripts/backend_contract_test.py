@@ -16,7 +16,7 @@ def main() -> int:
 
     # Default settings intentionally contain noise, latency and packet loss.
     backend = TapMujocoBackend(args.model)
-    # The natural ENABLE reference is tangent to the CAD-derived 40 mm wheel radius.
+    # The requested model supplies its own natural ENABLE reference.
     # MuJoCo may report zero contacts at exact tangency; either zero contacts
     # or non-penetrating wheel contacts is valid before the first step.
     assert abs(float(backend.data.qpos[2]) - 0.1484350375) < 1.0e-9

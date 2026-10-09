@@ -1,8 +1,7 @@
 # GIM6010-8 model frame and physics
 
-This file records the adopted GIM CAD frame, geometry and estimated mass
-properties. The MuJoCo model is a simulation asset; this beta firmware keeps
-the GDS68 leg joints in POS mode.
+Full runtime parameters, friction, actuator equations and evidence are in
+[`docs/GIM_SIM_PHYSICS_SPEC.md`](../../../docs/GIM_SIM_PHYSICS_SPEC.md).
 
 This note applies to `ROBOT (GIM6010-8).STEP`. The assembly visual is CAD
 geometry. Its STEP file contains neither rigid-body mates nor validated mass

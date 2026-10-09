@@ -10,7 +10,7 @@ EmbeddedController::Config tunedControllerConfig() {
   EmbeddedController::Config cfg;
   auto& lqr = cfg.lqr;
   lqr.wheel_radius_m = robot_control::geometry::wheel_radius_m;
-  lqr.half_wheel_base_m = 0.1545F;
+  lqr.half_wheel_base_m = 0.5F * robot_control::geometry::axle_spacing_m;
   lqr.left_wheel_sign = 1.0F;
   // The speed actuator is torque-limited at 0.13 N.m. Keep the operator
   // envelope wider than the validated cruise range so the feedback loop can
@@ -42,10 +42,10 @@ EmbeddedController::Config tunedControllerConfig() {
   // Let the leg-side gimbal absorb the small supported pitch error. The
   // wheel LQR remains the fast catch controller for larger transients.
   lqr.wheel_pitch_feedback_scale = 0.70F;
-  lqr.leg_length_m = 0.234F;
+  lqr.leg_length_m = 0.19F;
   lqr.pendulum_length_per_com_height = 1.077F;
-  lqr.min_pendulum_length_m = 0.10F;
-  lqr.max_pendulum_length_m = 0.27F;
+  lqr.min_pendulum_length_m = 0.04F;
+  lqr.max_pendulum_length_m = 0.20F;
   // LQR is solved for the fresh 500 Hz sensor interval, not the 3 kHz
   // actuator/cache loop. Gains are rebuilt only when the live COM height
   // changes enough to warrant a new reduced-order model.

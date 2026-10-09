@@ -97,6 +97,38 @@ Result run(V3Controller::Algo algo, float eq, float release, float tau,
 }  // namespace
 
 int main() {
+  // A configured simulator spawn must stay extended through lock and re-enable.
+  for (float knee : {0.0F, tap_fw::v3::LegHeight::kKneeMaxRad}) {
+    auto cfg = tap_fw::v3::defaultV3Config();
+    cfg.initial_knee_rad = knee;
+    cfg.engage.immediate = cfg.engage.automatic = false;
+    cfg.lock_settle_us = 0U;
+    V3Controller c(cfg);
+    const auto pose = tap_fw::v3::LegHeight::forKnee(knee);
+    V3Controller::Input in{};
+    in.sensors_ok = in.legs_ready = true;
+    in.accel_z_m_s2 = 9.80665F;
+    V3Controller::Command cmd{};
+    for (int cycle = 0; cycle < 2; ++cycle) {
+      cmd.disable = false;
+      cmd.start = true;
+      in.now_us += 2000U;
+      auto out = c.update(in, cmd);
+      assert(out.state == V3Controller::State::Locking);
+      assert(near(out.leg_hip_offset_rad, pose.hip_offset_rad));
+      assert(near(out.leg_knee_offset_rad, knee));
+      cmd.start = false;
+      in.now_us += 2000U;
+      out = c.update(in, cmd);
+      assert(out.state == V3Controller::State::Ready);
+      assert(near(out.leg_hip_offset_rad, pose.hip_offset_rad));
+      assert(near(out.leg_knee_offset_rad, knee));
+      cmd.disable = true;
+      in.now_us += 2000U;
+      out = c.update(in, cmd);
+      assert(out.state == V3Controller::State::Idle && !out.legs_locked);
+    }
+  }
   // Body and hips can counter-rotate while the axle-to-CoM line stays still.
   // The stable b4b6d4a fast trunk path must not chase that internal motion.
   // Static body leveling is disabled here to isolate the fast feedback path.
@@ -175,23 +207,27 @@ int main() {
     assert(lock.update(1000000, bus) && bus.can.size() == before);
     std::printf("paired CAN pacing: %d batches / 100 ms, no stall burst\n", batches);
   }
-  // Position-mode lock: set-point starts at the measured pose, closes the
-  // loop without a jump, ramps to exactly 0 (the power-up pose).
+  // Current/torque mode is the only leg mode; targets still ramp from the
+  // measured pose to exactly 0 before the controller moves the legs.
   {
     FakeTransport bus;
     LegLock lock;
     const std::array<float, 4> start{0.8F, -0.4F, 0.2F, 0.0F};
     assert(lock.engage(start, 1'000'000U, bus));
-    assert(bus.can.size() == 12U);
+    assert(bus.can.size() == 16U);
     for (int i = 0; i < 4; ++i) {
-      assert(cmdOf(bus.can[i]) == kSetControllerModeCmdId);
-      const auto mode = unpackSetControllerMode(bus.can[i].data);
-      assert(mode.control_mode == kControlModePosition &&
+      assert(cmdOf(bus.can[i]) == kSetLimitsCmdId);
+      const auto limits = unpackSetLimits(bus.can[i].data);
+      assert(near(limits.velocity_limit_turns_s, lock.config().velocity_limit_turns_s));
+      assert(near(limits.current_limit_a, lock.config().current_limit_a));
+      assert(cmdOf(bus.can[4 + i]) == kSetControllerModeCmdId);
+      const auto mode = unpackSetControllerMode(bus.can[4 + i].data);
+      assert(mode.control_mode == kControlModeTorque &&
              mode.input_mode == kInputModePassthrough);
-      assert(cmdOf(bus.can[4 + i]) == kSetInputPosCmdId);
-      assert(near(unpackSetInputPosTurns(bus.can[4 + i].data), start[i]));
-      assert(cmdOf(bus.can[8 + i]) == kSetAxisStateCmdId);
-      assert(unpackSetAxisState(bus.can[8 + i].data) == kAxisStateClosedLoop);
+      assert(cmdOf(bus.can[8 + i]) == kSetInputTorqueCmdId);
+      assert(near(unpackSetInputTorque(bus.can[8 + i].data), 0.0F));
+      assert(cmdOf(bus.can[12 + i]) == kSetAxisStateCmdId);
+      assert(unpackSetAxisState(bus.can[12 + i].data) == kAxisStateClosedLoop);
     }
     assert(!lock.atZero(1'500'000U));
     const float mid = lock.targetTurns(0, 1'500'000U);
@@ -203,7 +239,7 @@ int main() {
     assert(lock.atZero(2'000'000U));
     bus.can.clear();
     assert(lock.update(2'100'000U, bus));
-    for (const auto& f : bus.can) assert(near(unpackSetInputPosTurns(f.data), 0.0F));
+    for (const auto& f : bus.can) assert(near(unpackSetInputTorque(f.data), 0.0F));
     bus.can.clear();
     assert(lock.release(bus) && bus.can.size() == 4U);
     for (const auto& f : bus.can) {
@@ -246,26 +282,34 @@ int main() {
     }
   }
 
-  // Roll side rates go out as Set_Input_Pos vel_ff (milli-turns/s, driver
-  // frame through the 8:1 gear); none without them.
+  // Roll side rates enter the joint-velocity impedance in the driver frame.
   {
     FakeTransport bus;
     LegLock::Config cfg{};
     cfg.ramp_s = 0.0F;
     LegLock lock(cfg);
     lock.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F}, {0.1F, -0.1F}, {0.5F, -0.5F});
+    lock.setFeedback({0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0},
+                     {true, true, true, true});
     assert(lock.engage({0.0F, 0.0F, 0.0F, 0.0F}, 0U, bus));
     bus.can.clear();
     assert(lock.update(1'000'000U, bus) && bus.can.size() == 4U);
     const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    const auto leg_gravity = robot_control::WholeBodyModel::legGravityTorque(
+        tap_fw::v3::LegHeight::hangHipCad(), 0.0F);
+    const auto body_gravity = robot_control::WholeBodyModel::bodySupportTorque(
+        tap_fw::v3::LegHeight::hangHipCad(), 0.0F);
     for (std::size_t i = 0; i < 4U; ++i) {
       const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
       const bool left = legs[i].joint_index < 3U;
       const float rate = (knee ? 0.5F : 0.1F) * (left ? 1.0F : -1.0F);
-      const float expect = rate * legs[i].driver_sign * 8.0F / 6.28318530718F * 1000.0F;
-      const auto& d = bus.can[i].data;
-      const auto vff = static_cast<std::int16_t>(static_cast<std::uint16_t>(d[4] | (d[5] << 8)));
-      assert(std::abs(vff - expect) <= 1.0F);
+      const float gravity = legs[i].driver_sign * (knee
+          ? leg_gravity.knee_nm + body_gravity.knee_nm
+          : leg_gravity.hip_nm + body_gravity.hip_nm);
+      const float requested = gravity + rate * legs[i].driver_sign *
+          cfg.joint_kd_nm_s_per_rad;
+      const float expect = requested * (1.0F + cfg.current_comp_gain);
+      assert(near(unpackSetInputTorque(bus.can[i].data), expect, 0.03F));
     }
   }
 
@@ -301,18 +345,31 @@ int main() {
     assert(std::strcmp(hx.c_str(), "40 0 deadbeef") == 0);
   }
 
-  // MIT fallback: joint radians, fixed Kp/Kd.
+  // Joint impedance is converted to torque feedforward; driver-side MIT
+  // position/velocity gains stay disabled, and fresh current adds delta-I.
   {
     FakeTransport bus;
     LegLock::Config cfg{};
-    cfg.mode = LegLock::Mode::Mit;
     cfg.ramp_s = 0.0F;
     LegLock lock(cfg);
+    const std::array<float, 4> q{0.0F, 0.0F, 0.0F, 0.0F};
+    const std::array<float, 4> qd{};
+    const std::array<float, 4> effort{};
+    const std::array<bool, 4> valid{true, true, true, true};
+    lock.setFeedback(q, qd, effort, valid);
+    lock.setOffsets(0.1F, 0.0F);
     assert(lock.engage({0.8F, 0.0F, 0.0F, 0.0F}, 0U, bus));
-    const auto mit = unpackMitCommand(bus.can[4].data);
-    assert(cmdOf(bus.can[4]) == kMitControlCmdId);
-    assert(near(mit.pos_rad, 0.0F, 1.0e-3F));  // ramp 0: straight to zero
-    assert(near(mit.kp, 15.0F, 0.2F) && near(mit.kd, 0.5F, 0.01F));
+    const float torque = unpackSetInputTorque(bus.can[8].data);
+    assert(cmdOf(bus.can[8]) == kSetInputTorqueCmdId);
+    assert(std::abs(torque) > cfg.joint_kp_nm_per_rad * 0.1F);
+    assert(std::abs(torque) <= cfg.kt_nm_per_a * cfg.current_limit_a);
+    LegLock uncompensated(cfg);
+    uncompensated.setFeedback(q, qd, effort, {false, false, false, false});
+    uncompensated.setOffsets(0.1F, 0.0F);
+    FakeTransport no_current;
+    assert(uncompensated.engage({0, 0, 0, 0}, 0U, no_current));
+    const auto stale = unpackSetInputTorque(no_current.can[8].data);
+    assert(near(stale, 0.0F));
   }
 
   // Sequencing: start -> Locking (engage edge) -> Balancing once the legs are
@@ -510,7 +567,7 @@ int main() {
         in.now_us = t += 2000U;
         in.pitch_rad = pitch;
         in.pitch_rate_rad_s = body_rate;
-        // Encoder positions remain exactly at the straight-leg power-up
+        // Encoder positions remain exactly at the CAD-zero power-up
         // pose; only the driver's velocity feedback alternates.
         const float noise = (++sample % 2 == 0) ? 0.15F : -0.15F;
         in.hip_rate_rad_s = {noise, noise};
@@ -522,7 +579,7 @@ int main() {
     auto out = step(0.0F, 0.01F, 1000);
     assert(out.state == V3Controller::State::Ready && c.readyPhase() == 0);
     assert(near(c.legPose().knee_offset_rad, 0.0F));
-    assert(near(c.legPose().axle_below_hip_m, tap_fw::v3::LegHeight::maxHeight()));
+    assert(near(c.legPose().axle_below_hip_m, tap_fw::v3::LegHeight::minHeight()));
     assert(std::abs(c.virtualPitchRate()) > cfg.engage.tip_rate_rad_s);
     out = step(0.10F, 0.8F, 10);  // actual body movement leaves the stand
     assert(out.state == V3Controller::State::Ready && c.readyPhase() == 1);
@@ -643,8 +700,8 @@ int main() {
     assert(std::abs(c.legPose().axle_below_hip_m - 0.160F) < 0.001F);  // legs moved
     std::printf("held on stand, lowered to 160 mm: max wheel after %.2f rad/s\n", max_after);
     assert(max_after < 2.0F);
-    // Balance angle (at the power-up height) + height feed-forward = held pitch.
-    assert(near(c.balanceRef(), 0.08F, 0.01F));  // FF off by default
+    // Without measured legs the wheel reference includes CAD height feed-forward.
+    assert(near(c.pitchRef(), 0.08F, 0.01F));
   }
 
   // Closed loop: unknown balance point, hand error at release. The cascade

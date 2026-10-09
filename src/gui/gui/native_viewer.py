@@ -8,7 +8,9 @@ publishes data back to the runner.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import select
 import sys
 
 import mujoco
@@ -18,6 +20,13 @@ import mujoco.viewer
 def fields(line: str):
     return {part.split("=", 1)[0]: part.split("=", 1)[1]
             for part in line.split("|")[1:] if "=" in part}
+
+
+def latest_view(buffer):
+    lines = buffer.split(b"\n")
+    partial = lines.pop()
+    latest = next((line for line in reversed(lines) if line.startswith(b"VIEW|")), None)
+    return latest, partial if len(partial) <= 65536 else b""
 
 
 def apply_view(model, data, values):
@@ -46,8 +55,11 @@ def main(argv=None):
     model = mujoco.MjModel.from_xml_path(str(args.model))
     data = mujoco.MjData(model)
     # The checked-in MJCF keyframe is the single source of truth for the
-    # current CAD-neutral pose; do not duplicate old robot constants here.
-    mujoco.mj_resetDataKeyframe(model, data, 0)
+    # extended spawn pose; CAD assembly zero remains a separate keyframe.
+    spawn = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "spawn_extended")
+    if spawn < 0:
+        raise ValueError("GIM model is missing the extended spawn keyframe")
+    mujoco.mj_resetDataKeyframe(model, data, spawn)
     mujoco.mj_forward(model, data)
 
     handle = mujoco.viewer.launch_passive(
@@ -59,15 +71,21 @@ def main(argv=None):
         handle.cam.azimuth = model.vis.global_.azimuth
         handle.cam.elevation = model.vis.global_.elevation
     handle.sync()
+    pending = b""
+    input_fd = sys.stdin.fileno()
     try:
-        for line in sys.stdin:
-            if not handle.is_running():
+        while handle.is_running():
+            if not select.select([input_fd], [], [], .05)[0]:
+                continue
+            chunk = os.read(input_fd, 65536)
+            if not chunk:
                 break
-            if not line.startswith("VIEW|"):
+            line, pending = latest_view(pending + chunk)
+            if line is None:
                 continue
             try:
                 with handle.lock():
-                    apply_view(model, data, fields(line))
+                    apply_view(model, data, fields(line.decode("ascii")))
                 handle.sync(state_only=True)
             except (TypeError, ValueError, RuntimeError):
                 # A malformed debug snapshot must not affect the controller;

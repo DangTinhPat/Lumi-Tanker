@@ -29,36 +29,21 @@ These are persistent expert instructions, not claims of running agent processes.
 | Tests, regressions, simulation evidence | `.agents/skills/tap-qa-regression/SKILL.md` |
 | Balance/fall-recovery theory (humanoid, quadruped, wheel-legged), before designing a new mechanism | `.agents/skills/legged-locomotion-references/SKILL.md` |
 
-## Model Contract
+## Robot Model
 
-- Native CAD joint axes are `+Y` on BOTH sides; the CAD assembly is joint zero
-  (the firmware takes the power-up pose as zero). Joint order is
-  `[LH, LK, LW, RH, RK, RW]`. Do not import mirrored right-side angle/wheel
-  signs; driver sign conversion lives in `MotorMapping.hpp`.
-- Wheel radius: `0.040 m`. Axle center spacing: `0.309 m`; half-track:
-  `0.1545 m`. Outer width `0.334 m` is not the track.
-- Approximate total mass: `4.621 kg`: body `3.371`, each thigh `0.296`, each
-  shin `0.109`, each wheel plus motor `0.220`. These are CAD/BOM estimates.
-- Body visual pitch is `-pi/2`; rotate COM and inertial frame consistently, not
-  joint or IMU frames merely to match the mesh. Legs remain unchanged.
-- All four hip/knee motors are provisionally lumped in the body; wheel motor and
-  wheel are lumped on the rotating link. Neither allocation is measured.
-  Uniform-solid mesh volume integrals estimate COM and inertia. Tensors are
-  about mesh centroids, per kg, scaled by mass; avoid a second parallel-axis
-  shift or applying the body rotation twice.
-- Supplier lengths `0.105/0.110 m` are nominal; retain CAD joint origins unless
-  intentionally recalibrated. Knee mechanical range and torque/speed values in
-  the simulator are placeholders.
-- The deployable sensor inventory is one MPU6500 (3-axis accelerometer and
+No CAD model is currently configured for simulation. Keep the supplied GIM
+STEP as source input; derive joint frames, link inertias, collision geometry
+and limits from it before enabling a simulator model. Do not reuse cached
+geometry or physical constants from the removed model. The deployable sensor
+inventory is one MPU6500 (3-axis accelerometer and
   3-axis gyroscope) plus six motor encoders (four leg joints, two wheel
   joints). Wheel-contact switches, force/torque sensors, motor current feedback
   (except the leg-driver exception in `docs/RULES.md` Rule 1), range sensors,
   cameras and external localization are excluded from the control design and
   must not become hidden dependencies. Simulator contacts, efforts and pose are
   telemetry only; derive support hypotheses from MPU6500 and encoder data.
-- Re-read the current model and `src/tap_sim/model/PHYSICS.md` before edits;
-  record intentional changes to this contract rather than overwriting newer user
-  decisions.
+- Record verified model parameters and their source when a replacement model
+  is adopted.
 
 ## Architecture And Evidence
 

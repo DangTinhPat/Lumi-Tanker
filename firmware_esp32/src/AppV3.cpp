@@ -145,8 +145,8 @@ bool AppV3::begin() noexcept {
   pinMode(tap_fw::board::kLed1Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed2Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed3Gpio, OUTPUT);
-  out_.println("TAP firmware v3.3beta: two-wheel inverted pendulum, legs locked at the "
-                 "power-up pose (driver position mode), USB serial control");
+  out_.println("TAP firmware v3: two-wheel inverted pendulum, legs locked at the "
+                 "power-up pose (current-compensated torque mode), USB serial control");
   can_ready_ = can_.begin();
   uart_ready_ = uart1_.begin(tap_fw::board::kMotorUartBaud) &&
       uart2_.begin(tap_fw::board::kMotorUartBaud);
@@ -444,14 +444,6 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       drive_forward_ = std::clamp(f, -kBleDriveSpeedMS, kBleDriveSpeedMS);
       drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
     }
-  } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
-    if (ctrl_.state() != V3Controller::State::Idle &&
-        ctrl_.state() != V3Controller::State::Fault) {
-      out_.println("V3 LEGMODE refused: DISABLE first");
-      return;
-    }
-    legs_.setMode(line[8] == 'P' ? LegLock::Mode::Position : LegLock::Mode::Mit);
-    printTunables();
   } else if (std::strncmp(line, "SET ", 4U) == 0) {
     char key[20]{};
     float v = 0.0F;
@@ -527,6 +519,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().lqr_lead_adaptive = false;  // a fixed value pins the lead
     }
     else if (!std::strcmp(key, "lqradapt")) ctrl_.config().lqr_lead_adaptive = v >= 0.5F;
+    else if (!std::strcmp(key, "lqrpredict")) ctrl_.config().lqr_prediction.enabled = v >= 0.5F;
+    else if (!std::strcmp(key, "lqrdelay")) ctrl_.config().lqr_prediction.delay_s = std::clamp(v, 0.0F, 0.1F);
+    else if (!std::strcmp(key, "lqrlag")) ctrl_.config().lqr_prediction.lag_s = std::clamp(v, 0.0F, 0.12F);
     else if (!std::strcmp(key, "lqrleadtall")) ctrl_.config().lqr_lead_tall_s = std::clamp(v, 0.0F, 0.2F);
     else if (!std::strcmp(key, "lqrleadlow")) ctrl_.config().lqr_lead_low_s = std::clamp(v, 0.0F, 0.2F);
     else if (!std::strcmp(key, "wpred")) ctrl_.config().wheel_pred.enabled = v >= 0.5F;
@@ -573,6 +568,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tleadexp")) ctrl_.config().tier.lead_exp = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "tlsrc")) ctrl_.config().tier.lead_gyro_only = v >= 0.5F;
     else if (!std::strcmp(key, "tgate")) ctrl_.config().tier.reflex_gate = v >= 0.5F;
+    else if (!std::strcmp(key, "tginertia")) ctrl_.config().tier.reflex_inertial_gate = v >= 0.5F;
     else if (!std::strcmp(key, "tglo")) ctrl_.config().tier.reflex_rate_lo = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "tghi")) ctrl_.config().tier.reflex_rate_hi = std::clamp(v, 0.01F, 3.0F);
     else if (!std::strcmp(key, "tgllo")) ctrl_.config().tier.reflex_lean_lo = std::clamp(v, 0.0F, 0.2F);
@@ -625,8 +621,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "wbff")) ctrl_.config().wb_lean_ff = v >= 0.5F;
     else if (!std::strcmp(key, "wbslack")) ctrl_.config().wb_drive_slack_m = std::clamp(v, 0.0F, 0.1F);
     else if (!std::strcmp(key, "wbbg")) ctrl_.config().wb_bias_gain = std::clamp(v, 0.0F, 0.3F);
-    else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
-    else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
+    else if (!std::strcmp(key, "leg_kp")) legs_.setJointGains(std::clamp(v, 0.0F, tap_fw::board::kLegMaxKpNmPerRad), legs_.config().joint_kd_nm_s_per_rad);
+    else if (!std::strcmp(key, "leg_kd")) legs_.setJointGains(legs_.config().joint_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
+    else if (!std::strcmp(key, "iqcomp")) legs_.setCurrentCompGain(v);
     else {
       out_.printf("V3 SET unknown key '%s'\n", key);
       return;
@@ -705,7 +702,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                   static_cast<unsigned long>(rec_resend_us_), rec_duration_s_);
   } else {
     out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
-                  "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
+                  "GO HMOVE SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
                   "REC)\n", line);
   }
 }
@@ -768,6 +765,11 @@ void AppV3::printTunables() noexcept {
   out_.printf("V3 TUNE lqr lead: adaptive=%d (SET lqradapt) tall=%.3f low=%.3f s (lqrleadtall/lqrleadlow) fixed=%.3f s (SET lqrlead pins it)\n",
               ctrl_.config().lqr_lead_adaptive ? 1 : 0, ctrl_.config().lqr_lead_tall_s,
               ctrl_.config().lqr_lead_low_s, ctrl_.config().lqr_lead_s);
+  out_.printf("V3 TUNE lqr prediction: enabled=%d (SET lqrpredict) delay=%.3f s (lqrdelay) lag=%.3f s (lqrlag)\n",
+              ctrl_.config().lqr_prediction.enabled ? 1 : 0,
+              ctrl_.config().lqr_prediction.delay_s, ctrl_.config().lqr_prediction.lag_s);
+  out_.printf("V3 TUNE inertial gate: enabled=%d (SET tginertia, requires tgate) accel %.2f-%.2f m/s2\n",
+              tier.reflex_inertial_gate ? 1 : 0, tier.reflex_accel_lo, tier.reflex_accel_hi);
   out_.printf("V3 TUNE reflex gate: tgate=%d (SET tgate 0/1) rate %.2f-%.2f rad/s (tglo/tghi) lean %.3f-%.3f rad (tgllo/tglhi) release %.2f s (tgrel)\n",
               tier.reflex_gate ? 1 : 0, tier.reflex_rate_lo, tier.reflex_rate_hi,
               tier.reflex_lean_lo, tier.reflex_lean_hi, tier.reflex_release_s);
@@ -801,10 +803,11 @@ void AppV3::printTunables() noexcept {
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
   }
-  out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
+  out_.printf("V3 TUNE legmode=CURRENT_TORQUE leg_kp=%.1f leg_kd=%.2f iqcomp=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
-                tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
-                legs_.config().mit_kd_nm_s_per_rad, c.balance_trim_gain_rad_per_m,
+                legs_.config().joint_kp_nm_per_rad, legs_.config().joint_kd_nm_s_per_rad,
+                legs_.config().current_comp_gain,
+                c.balance_trim_gain_rad_per_m,
                 c.balance_trim_max_rad, ctrl_.balancer().balanceTrim(),
                 c.command_velocity_tracking_margin_m_s, c.max_ground_accel_m_s2,
                 c.wheel_pitch_feedback_scale, c.max_ground_velocity_m_s);
@@ -1010,6 +1013,19 @@ const char* AppV3::legAxisProblem(std::uint64_t now_us, bool need_closed_loop) c
 
 void AppV3::controlTick(std::uint64_t now_us) noexcept {
   feedback_.writeTo(state_);
+  {
+    std::array<float, LegLock::kLegs> position{}, velocity{}, current_a{};
+    std::array<bool, LegLock::kLegs> current_valid{};
+    const auto bindings = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
+      const auto joint = bindings[leg].joint_index;
+      position[leg] = legJointRad(leg);
+      velocity[leg] = legJointRate(leg);
+      current_a[leg] = feedback_.legCurrentA(joint) * bindings[leg].driver_sign;
+      current_valid[leg] = feedback_.legCurrentFresh(joint, now_us);
+    }
+    legs_.setFeedback(position, velocity, current_a, current_valid);
+  }
   const auto st = ctrl_.state();
   const bool active = st == V3Controller::State::Locking || st == V3Controller::State::Ready ||
       st == V3Controller::State::Balancing;
@@ -1036,6 +1052,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     static char text[96];
     if (!legsFresh(now_us)) {
       refuse = "leg encoder estimates (0x009) missing - motor supply on?";
+    } else if (!feedback_.allLegCurrentsFresh(now_us)) {
+      refuse = "GDS68 Iq feedback (0x014) missing/stale - configure iq_rate_ms on all leg drivers";
     } else if (!feedback_.allWheelsFresh(now_us)) {
       refuse = "wheel feedback missing";
     } else if (const char* axis = legAxisProblem(now_us, false)) {
@@ -1108,6 +1126,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   const bool closed_loop_due = legs_.engaged() && now_us - engage_us_ > kClosedLoopGraceUs;
   in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFresh(now_us) && legsFresh(now_us) &&
+      feedback_.allLegCurrentsFresh(now_us) &&
       legAxisProblem(now_us, closed_loop_due) == nullptr;
   bool legs_ready = legs_.atZero(now_us);
   for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
@@ -1120,8 +1139,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
                   "disabled\n", legJointRad(0), legJointRad(1), legJointRad(2), legJointRad(3));
   }
   if (!in.sensors_ok && active) {
-    out_.printf("V3 sensors: imu=%d wheels=%d legs=%d axis=%s\n", imuFresh(now_us),
+    out_.printf("V3 sensors: imu=%d wheels=%d legs=%d Iq=%d axis=%s\n", imuFresh(now_us),
                   feedback_.allWheelsFresh(now_us), legsFresh(now_us),
+                  feedback_.allLegCurrentsFresh(now_us),
                   legAxisProblem(now_us, closed_loop_due) ? legAxisProblem(now_us, closed_loop_due)
                                                           : "ok");
   }
@@ -1155,8 +1175,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     engage_us_ = now_us;
     legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
     (void)legs_.engage(start, now_us, transport_);
-    out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
-                  tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
+    out_.printf("V3 legs locking (CURRENT_TORQUE): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
+                  legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
   if (rec_active_ &&
@@ -1188,7 +1208,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
     if (stand && rec_kind_ == RecKind::KneeStand) {
-      knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
+      knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad,
+                            tap_fw::v3::LegHeight::kKneeMaxRad);
     }
     legs_.setOffsets(hip_cmd, knee_cmd);
     // Roll: per-side offsets (zero unless SET roll 1 and balancing).
@@ -1206,7 +1227,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     recordSample(now_us, hip_cmd, knee_cmd, 0.5F * (last_wheel_cmd_[0] + last_wheel_cmd_[1]));
   }
   if (rec_dumping_) dumpRecording();
-  (void)feedback_.poll(transport_, now_us, true);  // wheel reads + bus voltage, no MIT probes
+  (void)feedback_.poll(transport_, now_us, true);  // no MIT probes; Get_Iq must be streamed by each driver
   const std::uint64_t p4 = nowUs();
   prof(2, p4 - p3 + wheel_send_us);
 
@@ -1313,12 +1334,11 @@ void AppV3::startRecording(RecKind kind, float amp, float duration_s,
   rec_n_ = 0U;
   rec_cmd_ = 0.0F;
   rec_aborted_ = false;
-  // Knee swings stay inside [kKneeMinRad, 0]: at the hang pose (knee 0) the
-  // knee can only fold, so the swing is centred amp folded.
+  // Keep knee excitation inside the CAD range [0, 113 degrees].
   rec_centre_ = 0.0F;
   if (kind == RecKind::KneeStand || kind == RecKind::KneeFloor) {
     const float knee = ctrl_.legPose().knee_offset_rad;
-    if (knee + amp > 0.0F) rec_centre_ = -amp;
+    if (knee + amp > tap_fw::v3::LegHeight::kKneeMaxRad) rec_centre_ = -amp;
     if (knee - amp < tap_fw::v3::LegHeight::kKneeMinRad) rec_centre_ = amp;
   }
   rec_active_ = true;

@@ -64,8 +64,8 @@ below), not a freehand derivation presented as novel.
    partial feedback linearization) all came from grounding in a named,
    citable method first.
 2. Port the *idea*, not code verbatim - TAP's dynamics, joint conventions,
-   and actuator limits (GIM6010-8, see `masses.yaml`) differ from any of the
-   above robots; always re-derive constants from TAP's own CAD/MJCF model.
+   and actuator limits differ from any of the above robots; always re-derive
+   constants from the currently adopted CAD model.
 3. Always validate a ported method against Rule 3's canonical landing test
    (`docs/RULES.md`) with real trials before trusting it - a technique being
    "established" for a biped/quadruped is not proof it transfers cleanly to

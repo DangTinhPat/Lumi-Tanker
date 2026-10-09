@@ -134,13 +134,8 @@ class TapMujocoBackend:
         self.data = mujoco.MjData(self.model)
         self.sensor = sensor or SensorConfig()
         self.actuator = actuator or ActuatorConfig()
-        # The CAD-zero model is not statically balanced if it is dropped from
-        # a 2.4 mm gap while the controller is still waiting for the IMU seed.
-        # This is the same preload used by the canonical tap_robot.xml:
-        # wheels tangent to the plane and hips at the CAD-derived neutral
-        # equilibrium.
-        # It prevents a startup collision from becoming an artificial landing
-        # test; it does not constrain the free body once stepping begins.
+        # The initial pose prevents startup collision from becoming an
+        # artificial landing test; it does not constrain the free body.
         self.initial_root_z_m = float(initial_root_z_m)
         self.initial_hip_rad = float(initial_hip_rad)
         self.initial_knee_rad = float(initial_knee_rad)

@@ -158,14 +158,12 @@ class EmbeddedController {
     // Leg values remain provisional because their motor rating is unresolved.
     float leg_max_torque_nm = 1.0F;
     float wheel_max_torque_nm = 0.13F;
-    float hip_min_rad = -0.2F;
-    float hip_max_rad = 1.0F;
-    // The encoder knee zero is an interior mechanical reference, not a stop.
-    // The lowered natural ENABLE pose is configured in GeneratedGeometry;
-    // keep the controller envelope inside the native CAD range until the
-    // physical 30..145 deg limits are mapped to this encoder coordinate.
-    float knee_min_rad = -1.2F;
-    float knee_max_rad = 0.45F;
+    float hip_min_rad = geometry::native_hip_min_rad;
+    float hip_max_rad = geometry::native_hip_max_rad;
+    // GIM encoder reference is the 22 deg lower stop; positive knee coordinate
+    // increases the internal angle to the 135 deg upper stop.
+    float knee_min_rad = geometry::native_knee_min_rad;
+    float knee_max_rad = geometry::native_knee_max_rad;
     // 2026-09-16: LqrBalancer::Output::fallen means "the wheel-drive LQR's
     // OWN linear model no longer trusts a wheel command at this pitch" (see
     // LqrBalancer::Config::fall_pitch_rad) - a statement about the WHEELS

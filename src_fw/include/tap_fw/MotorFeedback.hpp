@@ -70,9 +70,23 @@ class MotorFeedback {
   [[nodiscard]] const LegEstimate& legEstimate(std::size_t joint) const noexcept {
     return estimate_[joint];
   }
-  // Torque the driver reports in its MIT reply (Iq x Kt, core sign) [N m];
-  // only fresh while the joint is commanded in MIT (not used in the POS-only legs).
+  // Torque estimate from the driver's MIT feedback; retained for diagnostics.
   [[nodiscard]] float legEffort(std::size_t joint) const noexcept { return effort_nm_[joint]; }
+  [[nodiscard]] float legCurrentA(std::size_t joint) const noexcept { return current_a_[joint]; }
+  [[nodiscard]] bool legCurrentFresh(std::size_t joint, std::uint64_t now_us) const noexcept {
+    return joint < robot_control::kJointCount && current_valid_[joint] &&
+        now_us >= current_stamp_us_[joint] &&
+        now_us - current_stamp_us_[joint] <= board::kFeedbackMaxAgeUs;
+  }
+  [[nodiscard]] bool legEffortFresh(std::size_t joint, std::uint64_t now_us) const noexcept {
+    return joint < robot_control::kJointCount && fresh(joint, now_us);
+  }
+  [[nodiscard]] bool allLegCurrentsFresh(std::uint64_t now_us) const noexcept {
+    for (const std::size_t joint : {0U, 1U, 3U, 4U}) {
+      if (!legCurrentFresh(joint, now_us)) return false;
+    }
+    return true;
+  }
   [[nodiscard]] const AxisStatus& legAxis(std::size_t joint) const noexcept {
     return axis_[joint];
   }
@@ -94,6 +108,9 @@ class MotorFeedback {
   robot_control::JointArray position_rad_{};
   robot_control::JointArray velocity_rad_s_{};
   robot_control::JointArray effort_nm_{};
+  robot_control::JointArray current_a_{};
+  std::array<std::uint64_t, robot_control::kJointCount> current_stamp_us_{};
+  std::array<bool, robot_control::kJointCount> current_valid_{};
   std::array<std::uint64_t, robot_control::kJointCount> stamp_us_{};
   // Leg positions before the zero offset (driver_sign * driver_raw).
   robot_control::JointArray leg_uncalibrated_rad_{};

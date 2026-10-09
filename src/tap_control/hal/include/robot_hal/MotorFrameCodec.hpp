@@ -38,12 +38,15 @@ constexpr std::uint8_t kHeartbeatCmdId = 0x001;
 constexpr std::uint8_t kGetEncoderEstimatesCmdId = 0x009;
 // Get_Bus_Voltage_Current: request with DLC 0, answer float V, float A (LE).
 constexpr std::uint8_t kGetBusVoltageCurrentCmdId = 0x017;
+constexpr std::uint8_t kSetInputTorqueCmdId = 0x00E;
+constexpr std::uint8_t kGetIqCmdId = 0x014;
 
 constexpr std::int32_t kAxisStateIdle = 1;
 constexpr std::int32_t kAxisStateClosedLoop = 8;
 constexpr std::int32_t kControlModePosition = 3;
+constexpr std::int32_t kControlModeTorque = 1;
 constexpr std::int32_t kInputModeMit = 9;
-// Position control, input passed straight to the driver's position loop.
+// Input value passed straight to the selected controller mode.
 constexpr std::int32_t kInputModePassthrough = 1;
 // Set_Input_Pos: float input_pos [rotor turns], int16 vel_ff [0.001 rev/s],
 // int16 torque_ff [0.001 N.m], little endian (ODrive CAN Simple).
@@ -240,6 +243,46 @@ inline MitBytes packSetLimits(float vel_limit_turns_s, float current_limit_a) {
   MitBytes b{};
   std::memcpy(&b[0], &vel_limit_turns_s, 4U);
   std::memcpy(&b[4], &current_limit_a, 4U);
+  return b;
+}
+struct SetLimits {
+  float velocity_limit_turns_s = 0.0F;
+  float current_limit_a = 0.0F;
+};
+inline SetLimits unpackSetLimits(const MitBytes& b) {
+  SetLimits out{};
+  std::memcpy(&out.velocity_limit_turns_s, &b[0], sizeof(float));
+  std::memcpy(&out.current_limit_a, &b[4], sizeof(float));
+  return out;
+}
+
+// Set_Input_Torque (0x00E), ODrive CAN Simple: torque setpoint in Nm, LE float.
+inline MitBytes packSetInputTorque(float torque_nm) {
+  MitBytes b{};
+  if (!std::isfinite(torque_nm)) torque_nm = 0.0F;
+  std::memcpy(&b[0], &torque_nm, sizeof(torque_nm));
+  return b;
+}
+inline float unpackSetInputTorque(const MitBytes& b) {
+  float out = 0.0F;
+  std::memcpy(&out, &b[0], sizeof(out));
+  return out;
+}
+
+struct IqFeedback {
+  float setpoint_a = 0.0F;
+  float measured_a = 0.0F;
+};
+inline IqFeedback unpackIqFeedback(const MitBytes& b) {
+  IqFeedback out{};
+  std::memcpy(&out.setpoint_a, &b[0], sizeof(float));
+  std::memcpy(&out.measured_a, &b[4], sizeof(float));
+  return out;
+}
+inline MitBytes packIqFeedback(float setpoint_a, float measured_a) {
+  MitBytes b{};
+  std::memcpy(&b[0], &setpoint_a, sizeof(float));
+  std::memcpy(&b[4], &measured_a, sizeof(float));
   return b;
 }
 

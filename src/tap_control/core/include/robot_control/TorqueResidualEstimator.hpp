@@ -9,7 +9,7 @@ namespace robot_control {
 // reads RobotState::joints::effort_nm for the four leg (hip/knee) joints
 // only -- never the wheel joints -- and compares it against an expected
 // torque computed from FK/Jacobian and design-time CAD mass constants
-// (GeneratedGeometry.hpp), never from simulator state.
+// (design-time model parameters), never from simulator state.
 //
 // Binding conditions this class exists to satisfy (see docs/RULES.md Rule 1
 // for the authoritative text):
@@ -30,7 +30,7 @@ namespace robot_control {
 //
 // KNOWN MODELING LIMITATIONS (documented, not hidden -- Rule 1 condition #2):
 //   - Gravity is currently a distributed-link model using the provisional
-//     thigh/shin/wheel COMs and origins in GeneratedGeometry.hpp. Body mass,
+//     link COMs and origins in generated geometry. Body mass,
 //     Coriolis terms and calibrated link friction are not yet included.
 //   - No friction/gearbox model: no Kt, gear-ratio, or friction constant
 //     exists anywhere in this repo for the leg CAN driver's 8:1 gearbox.

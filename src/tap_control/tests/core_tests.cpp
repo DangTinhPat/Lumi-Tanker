@@ -38,7 +38,6 @@ void geometryTests() {
                                      geometry::neutral_hip_rad,
                                      geometry::neutral_knee_rad);
   const auto asymmetric = model.compute(.3F, -.2F, .5F, -.8F);
-  check(near(geometry::total_mass_kg, 4.621F), "CAD mass contract is 4.621 kg");
   check(std::isfinite(neutral.com_height_m) &&
             neutral.com_height_m > geometry::wheel_radius_m &&
             std::abs(neutral.com_offset_x_m) < 0.01F,

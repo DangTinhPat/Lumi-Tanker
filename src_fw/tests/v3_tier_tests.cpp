@@ -29,6 +29,7 @@
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/WholeBodyModel.hpp"
 #include "LegPlant.hpp"
+#include "CurrentTorqueActuator.hpp"
 #ifdef TAP_HAVE_EIGEN
 #include "WbDesign.hpp"
 #endif
@@ -43,6 +44,7 @@ namespace geo = robot_control::geometry;
 using robot_control::ImuStateEstimator;
 using tap_fw::v3::LegHeight;
 using tap_fw::v3::V3Controller;
+using tap_fw::sim::CurrentTorqueActuator;
 
 constexpr double kG = 9.80665;
 constexpr double kPi = 3.14159265358979323846;
@@ -58,8 +60,8 @@ struct Case {
   double plan_accel = -1.0, plan_jerk = -1.0, preview_s = -1.0, lead_lpf = -1.0;
   double joint_rate_gain = -1.0;  // < 0: firmware default
   // Plant truth vs. the controller's model.
-  double body_dx = 0.021;       // true body CoM shift [m] (controller: 0.021)
-  double imu_mount = 0.03;      // IMU pitch reading minus body pitch [rad]
+  double body_dx = 0.0;         // residual beyond the provisional GIM CAD COM [m]
+  double imu_mount = 0.0;       // mount offset is unknown for this CAD [rad]
   double seed_error = 0.02;     // released this far from the balance point [rad]
   double mass_scale = 1.0;      // body mass
   // Wheels.
@@ -79,6 +81,18 @@ struct Case {
   // Hips (per joint, doubled for two legs).
   double hip_kp = 16.0, hip_vel_bw = 48.0, hip_rotor = 0.004, hip_tau_max = 4.0;
   std::size_t hip_delay_ticks = 2;
+  // Host-only torque/current path. Gains and actuator lag are assumptions to
+  // sweep; no measured Iq or real-robot calibration is available.
+  bool current_torque_mode = false;
+  double current_comp_gain = 0.0, current_limit_a = 8.0, current_lag_s = 0.02;
+  unsigned current_delay_ticks = 12;  // 3 ms at the 4 kHz plant substep
+  unsigned current_feedback_sample_ticks = 1, current_feedback_delay_ticks = 0;
+  unsigned current_feedback_max_age_ticks = 32, current_feedback_drop_period_ticks = 0;
+  unsigned current_feedback_drop_ticks = 0;
+  double current_feedback_noise_a = 0.0;
+  double current_plant_kt_nm_per_a = 0.47;
+  double torque_hip_kp = 13.5, torque_hip_kd = 0.84;
+  double torque_knee_kp = 30.0, torque_knee_kd = 2.0;
   // Knees: no KNEETEST yet. Position gain as the hips' fit (16 /s); the
   // velocity gain calibrated to the one loaded fact we have - plain LQR, which
   // reads every knee motion as body pitch, stood calm on the robot
@@ -229,6 +243,8 @@ struct Result {
   double rest_hip_rms = 0.0;      // hip rate rms over the last 4 s
   double x_end = 0.0, max_x = 0.0, x_stop_travel = 0.0;
   double max_tau_hip = 0.0, max_tau_knee = 0.0, max_knee_err = 0.0;
+  double iq_error_rms = 0.0, max_iq_a = 0.0, iq_saturation_joint_s = 0.0;
+  double iq_feedback_invalid_joint_s = 0.0;
   double body_vacc_peak = 0.0;     // |vertical body CoM acceleration| peak after 2 s (20 Hz)
   double body_vacc_bump_peak = 0.0;  // filtered peak while the wheel crosses the test bump
   double body_vacc_rms = 0.0;      // its rms after 2 s
@@ -772,6 +788,19 @@ Result simulate(const Case& c) {
   const double kv_joint = c.hip_vel_bw * (geo::leg_hip_inertia_kgm2 + c.hip_rotor);
   const double kv_knee = c.knee_vel_bw > 0.0
       ? c.knee_vel_bw * (geo::leg_knee_inertia_kgm2 + c.knee_rotor) : kv_joint;
+  auto currentConfig = [&](unsigned seed) {
+    return CurrentTorqueActuator::Config{
+        .47, c.current_limit_a, c.current_lag_s, c.current_comp_gain,
+        c.current_delay_ticks, c.current_feedback_sample_ticks,
+        c.current_feedback_delay_ticks, c.current_feedback_max_age_ticks,
+        c.current_feedback_drop_period_ticks, c.current_feedback_drop_ticks,
+        c.current_feedback_noise_a, seed, c.current_plant_kt_nm_per_a};
+  };
+  CurrentTorqueActuator hip_iq_left(currentConfig(1));
+  CurrentTorqueActuator hip_iq_right(currentConfig(2));
+  CurrentTorqueActuator knee_iq_left(currentConfig(3));
+  CurrentTorqueActuator knee_iq_right(currentConfig(4));
+  double iq_error_sq = 0.0, iq_n = 0.0, iq_sat_n = 0.0;
   double rate_sq = 0.0, body_sq = 0.0, x_stop = 0.0, rest_rate_sq = 0.0, rest_hip_sq = 0.0;
   double est_sq = 0.0, est_bias0 = 0.0;
   double ab_f = 0.0, ev_acc_sq = 0.0, ev_jerk_sq = 0.0, v_release = 0.0, v_start = 0.0;
@@ -873,7 +902,7 @@ Result simulate(const Case& c) {
     const double yaw = yaw_act;
     in.yaw_rate_rad_s = static_cast<float>(yaw);
     {
-      const double half = 0.5 * 0.309;
+      const double half = 0.5 * geo::axle_spacing_m;
       roll_cmd_q.push_back(double(ctrl.rollSideHeight()));
       double dh_cmd = roll_cmd_q.front();
       if (roll_cmd_q.size() > c.hip_delay_ticks + 1U) roll_cmd_q.pop_front();
@@ -1099,22 +1128,49 @@ Result simulate(const Case& c) {
         ws_acc += (wn * wn * (target - ud) - 2.0 * c.wheel_zeta * wn * ws_acc) * dt;
         udd_des = ws_acc;
       }
-      // Hip position servo (P position -> PI velocity -> torque), two joints.
+      // The default remains the fitted GDS68 position servo. The experiment
+      // branch replaces it with torque impedance plus simulated delta-I.
       const double hq = backlash ? mh : s[2], hqd = backlash ? mhd : sd[2];
       const double kq = backlash ? mk : s[3], kqd = backlash ? mkd : sd[3];
-      const double vel_sp = c.hip_kp * (hip_applied + hz - hq);
-      const double vel_err = vel_sp - hqd;
-      hip_integ = std::clamp(hip_integ + 2.0 * kv_joint * 2.0 * vel_err * dt, -2.0, 2.0);
-      const double tau_h = std::clamp(2.0 * kv_joint * vel_err + hip_integ,
-                                      -2.0 * c.hip_tau_max, 2.0 * c.hip_tau_max);
-      r.max_tau_hip = std::max(r.max_tau_hip, std::abs(tau_h));
-      // Knee position servo, same structure; its integrator carries the
-      // body's weight, so it may use the whole torque range.
-      const double vel_err_k = c.knee_kp * (knee_applied + kz - kq) - kqd;
-      const double cap_k = 2.0 * c.knee_tau_max;
-      knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
-      const double tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
-      if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
+      double tau_h = 0.0, tau_k = 0.0;
+      if (c.current_torque_mode) {
+        const auto gravity = plant.staticJointTorques(s);
+        const double hip_motor_ref = 0.5 * gravity[0] +
+            c.torque_hip_kp * (hip_applied + hz - hq) - c.torque_hip_kd * hqd;
+        const double knee_motor_ref = 0.5 * gravity[1] +
+            c.torque_knee_kp * (knee_applied + kz - kq) - c.torque_knee_kd * kqd;
+        const auto hl = hip_iq_left.step(hip_motor_ref, dt);
+        const auto hr = hip_iq_right.step(hip_motor_ref, dt);
+        const auto kl = knee_iq_left.step(knee_motor_ref, dt);
+        const auto kr = knee_iq_right.step(knee_motor_ref, dt);
+        tau_h = hl.applied_torque_nm + hr.applied_torque_nm;
+        tau_k = kl.applied_torque_nm + kr.applied_torque_nm;
+        for (const auto& iq : {hl, hr, kl, kr}) {
+          if (iq.feedback_valid) {
+            iq_error_sq += iq.delta_current_a * iq.delta_current_a;
+            ++iq_n;
+          } else {
+            r.iq_feedback_invalid_joint_s += dt;
+          }
+          r.max_iq_a = std::max(r.max_iq_a, std::abs(iq.applied_current_a));
+          if (std::abs(iq.applied_current_a) >= c.current_limit_a - 1.0e-3)
+            iq_sat_n += 1.0;
+        }
+        r.max_tau_hip = std::max(r.max_tau_hip, std::abs(tau_h));
+        if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
+      } else {
+        const double vel_sp = c.hip_kp * (hip_applied + hz - hq);
+        const double vel_err = vel_sp - hqd;
+        hip_integ = std::clamp(hip_integ + 2.0 * kv_joint * 2.0 * vel_err * dt, -2.0, 2.0);
+        tau_h = std::clamp(2.0 * kv_joint * vel_err + hip_integ,
+                           -2.0 * c.hip_tau_max, 2.0 * c.hip_tau_max);
+        r.max_tau_hip = std::max(r.max_tau_hip, std::abs(tau_h));
+        const double vel_err_k = c.knee_kp * (knee_applied + kz - kq) - kqd;
+        const double cap_k = 2.0 * c.knee_tau_max;
+        knee_integ = std::clamp(knee_integ + 2.0 * kv_knee * 2.0 * vel_err_k * dt, -cap_k, cap_k);
+        tau_k = std::clamp(2.0 * kv_knee * vel_err_k + knee_integ, -cap_k, cap_k);
+        if (t > 2.0) r.max_tau_knee = std::max(r.max_tau_knee, std::abs(tau_k) / 2.0);
+      }
       // Through the gears (backlash): the links get the gear torque, the
       // rotors the servo torque minus it.
       const double tau_hl = backlash ? gear(mh, s[2], mhd, sd[2], c.hip_backlash, c.hip_rotor, c.gear_k) : tau_h;
@@ -1368,6 +1424,8 @@ Result simulate(const Case& c) {
   if (anim) std::fclose(anim);
   r.level_hip_end = ctrl.levelHip();
   r.body_vacc_rms = vacc_n ? std::sqrt(vacc_sq / vacc_n) : 0.0;
+  r.iq_error_rms = iq_n > 0.0 ? std::sqrt(iq_error_sq / iq_n) : 0.0;
+  r.iq_saturation_joint_s = iq_sat_n * dt;
   r.body_z_range = zb_max > zb_min ? zb_max - zb_min : 0.0;
   r.body_z_range_late = zl_max > zl_min ? zl_max - zl_min : 0.0;
   r.drive_vacc_rms = dv_n ? std::sqrt(dv_sq / dv_n) : 0.0;
@@ -2445,6 +2503,101 @@ int main() {
     assert((fault != nullptr) == (flip == 1));
   }
   auto run = [](Case c) { const Result r = simulate(c); report(c, r); return r; };
+  if (std::getenv("TIER_IQ_SWEEP") != nullptr) {
+    const double gain = std::getenv("TIER_IQ_SWEEP_GAIN")
+        ? std::atof(std::getenv("TIER_IQ_SWEEP_GAIN")) : 0.1;
+    for (double kt : {0.423, 0.517}) for (double mass : {0.9, 1.1})
+      for (double seed : {-0.04, 0.04}) {
+        Case base = withMode(Case{}, 2);
+        base.current_torque_mode = true;
+        base.current_plant_kt_nm_per_a = kt;
+        base.mass_scale = mass;
+        base.seed_error = seed;
+        base.current_comp_gain = 0.0;
+        base.current_limit_a = 8.0;
+        base.current_lag_s = mass < 1.0 ? 0.01 : 0.03;
+        base.current_delay_ticks = mass < 1.0 ? 12 : 24;
+        base.current_feedback_sample_ticks = seed < 0.0 ? 20 : 80;
+        base.current_feedback_delay_ticks = seed < 0.0 ? 20 : 40;
+        base.current_feedback_max_age_ticks = 80;
+        base.current_feedback_drop_period_ticks = 400;
+        base.current_feedback_drop_ticks = 80;
+        base.current_feedback_noise_a = 0.15;
+        base.leg_fb_period_s = seed < 0.0 ? 0.0104 : 0.0208;
+        base.duration_s = 14.0;
+        base.push_n = 2.0;
+        base.push_start_s = 6.0;
+        base.push_end_s = 6.3;
+        const Result baseline = simulate(base);
+        base.current_comp_gain = gain;
+        const Result compensated = simulate(base);
+        std::printf("IQ sweep Kt=%.3f mass=%.2f seed=%+.2f encoder=%.1fms "
+                    "fell=%d/%d body=%.4f/%.4f iqRms=%.3f/%.3f maxI=%.2f/%.2fA\n",
+                    kt, mass, seed, base.leg_fb_period_s * 1000.0,
+                    baseline.fell, compensated.fell, baseline.body_dev_all,
+                    compensated.body_dev_all, baseline.iq_error_rms,
+                    compensated.iq_error_rms, baseline.max_iq_a,
+                    compensated.max_iq_a);
+        assert(std::isfinite(baseline.body_dev_all) &&
+               std::isfinite(compensated.body_dev_all));
+        assert(baseline.max_iq_a <= base.current_limit_a + 1.0e-6 &&
+               compensated.max_iq_a <= base.current_limit_a + 1.0e-6);
+      }
+    return 0;
+  }
+  if (std::getenv("TIER_IQ_COMP") != nullptr) {
+    Result result[2];
+    const double comp_gain = std::getenv("TIER_IQ_GAIN")
+        ? std::atof(std::getenv("TIER_IQ_GAIN")) : 0.2;
+    for (int compensated = 0; compensated < 2; ++compensated) {
+      Case c = withMode(Case{}, 2);
+      c.name = compensated ? "V3 current torque, delta-I" : "V3 current torque, baseline";
+      c.current_torque_mode = true;
+      c.current_comp_gain = compensated ? comp_gain : 0.0;
+      if (const char* limit = std::getenv("TIER_IQ_LIMIT"))
+        c.current_limit_a = std::atof(limit);
+      c.current_feedback_sample_ticks = 40;  // modeled 100 Hz Iq stream
+      c.current_feedback_delay_ticks = 20;   // 5 ms observation age
+      c.current_feedback_max_age_ticks = 80;
+      c.current_feedback_drop_period_ticks = 400;
+      c.current_feedback_drop_ticks = 80;    // lose two samples every 100 ms
+      c.current_feedback_noise_a = 0.15;
+      if (const char* kt = std::getenv("TIER_IQ_KT"))
+        c.current_plant_kt_nm_per_a = std::atof(kt);
+      c.duration_s = 14.0;
+      c.push_n = 2.0;
+      c.push_start_s = 6.0;
+      c.push_end_s = 6.3;
+      result[compensated] = simulate(c);
+      std::printf("IQ mode=%d fell=%d body=%.4f iq_err_rms=%.4f A max_iq=%.2f A "
+                  "sat=%.4f invalid=%.4f joint-s\n",
+                  compensated, result[compensated].fell, result[compensated].body_dev_all,
+                  result[compensated].iq_error_rms, result[compensated].max_iq_a,
+                  result[compensated].iq_saturation_joint_s,
+                  result[compensated].iq_feedback_invalid_joint_s);
+    }
+    // The 3 A case is a saturation safety check, not a promised balance point;
+    // the CAD model currently falls at that authority limit in both modes.
+    if (std::getenv("TIER_IQ_LIMIT") == nullptr ||
+        std::atof(std::getenv("TIER_IQ_LIMIT")) >= 8.0) {
+      assert(!result[0].fell && !result[1].fell);
+    }
+    assert(result[0].iq_error_rms > 0.0 && result[1].iq_error_rms > 0.0);
+    const double current_limit = std::getenv("TIER_IQ_LIMIT")
+        ? std::atof(std::getenv("TIER_IQ_LIMIT")) : 8.0;
+    assert(result[0].max_iq_a <= current_limit && result[1].max_iq_a <= current_limit);
+    assert(result[0].iq_feedback_invalid_joint_s > 0.0 &&
+           result[1].iq_feedback_invalid_joint_s > 0.0);
+    const bool nominal_kt = !std::getenv("TIER_IQ_KT") ||
+        std::abs(std::atof(std::getenv("TIER_IQ_KT")) - 0.47) < 1.0e-6;
+    const bool nominal_limit = !std::getenv("TIER_IQ_LIMIT") ||
+        std::abs(std::atof(std::getenv("TIER_IQ_LIMIT")) - 8.0) < 1.0e-6;
+    if (nominal_kt && nominal_limit) {
+      assert(result[1].body_dev_all < result[0].body_dev_all);
+      assert(result[1].iq_error_rms < result[0].iq_error_rms);
+    }
+    return 0;
+  }
   if (std::getenv("TIER_ALT_PRESS") != nullptr) {
     runAlternatingPressRegression();
     return 0;
