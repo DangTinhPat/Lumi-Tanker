@@ -145,7 +145,7 @@ bool AppV3::begin() noexcept {
   pinMode(tap_fw::board::kLed1Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed2Gpio, OUTPUT);
   pinMode(tap_fw::board::kLed3Gpio, OUTPUT);
-  out_.println("TAP firmware v3: two-wheel inverted pendulum, legs locked at the "
+  out_.println("TAP firmware v3.3beta: two-wheel inverted pendulum, legs locked at the "
                  "power-up pose (driver position mode), USB serial control");
   can_ready_ = can_.begin();
   uart_ready_ = uart1_.begin(tap_fw::board::kMotorUartBaud) &&

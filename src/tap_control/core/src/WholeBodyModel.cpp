@@ -47,6 +47,7 @@ WholeBodyModel::Result WholeBodyModel::compute(float lh, float lk,
   const Point axle{(axles[0].x+axles[1].x)/2,
                    (axles[0].z+axles[1].z)/2};
   Result out{};
+  out.pitch_inertia_at_axle_kg_m2 = 0.0F;
   float mx = 0.0F, mz = 0.0F;
   for (std::size_t i = 0; i < com.size(); ++i) {
     const auto& part = geometry::parts[i];
@@ -68,7 +69,8 @@ WholeBodyModel::LegHeight WholeBodyModel::legHeight(float hip,
                                                     float knee) noexcept {
   // Thigh (origins[1]) and shin (origins[2]) x,z offsets are identical for
   // both sides under native +Y axes (see header) - use the left-leg indices
-  // for either leg. Hip origin z is 0 for both hips, so it drops out.
+  // for either leg. This result is relative to the hip pivot; the pivot's
+  // body-frame height is applied by whole-robot height solvers.
   const Point thigh{geometry::origins[1].x, geometry::origins[1].z};
   const Point shin{geometry::origins[2].x, geometry::origins[2].z};
   const auto upper = rotation(hip);
@@ -257,17 +259,17 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricHeight(
   const auto natural = legHeight(geometry::neutral_hip_rad,
                                  geometry::neutral_knee_rad);
   const float target_x = natural.x_m;
-  const float target_z = geometry::wheel_radius_m - body_height_m;
+  const float hip_z = geometry::origins[0].z;
+  const float target_z = geometry::wheel_radius_m - hip_z - body_height_m;
   float hip = std::clamp(hip_seed_rad, hip_min_rad, hip_max_rad);
   float knee = std::clamp(knee_seed_rad, knee_min_rad, knee_max_rad);
-  const float seed_height = geometry::wheel_radius_m -
+  const float seed_height = geometry::wheel_radius_m - hip_z -
       legHeight(hip, knee).height_m;
-  // Near the straight-leg branch, unconstrained Newton can converge to the
-  // other valid FK branch. That made a lower target from max stand command an
-  // even higher knee pose. Keep the solve on the operator-requested branch.
+  // Keep Newton on the requested branch. On this CAD, increasing knee angle
+  // extends the hip-to-axle distance and lowers the body.
   const bool lowering = body_height_m < seed_height;
-  const float branch_knee_min = lowering ? knee_min_rad : knee_seed_rad;
-  const float branch_knee_max = lowering ? knee_seed_rad : knee_max_rad;
+  const float branch_knee_min = lowering ? knee_seed_rad : knee_min_rad;
+  const float branch_knee_max = lowering ? knee_max_rad : knee_seed_rad;
   knee = std::clamp(knee, branch_knee_min, branch_knee_max);
 
   // Newton on the exact analytic FK/Jacobian.  The step clamp prevents an
@@ -302,7 +304,7 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricHeight(
   const LegHeight solved = legHeight(hip, knee);
   out.hip_rad = hip;
   out.knee_rad = knee;
-  out.body_height_m = geometry::wheel_radius_m - solved.height_m;
+  out.body_height_m = geometry::wheel_radius_m - hip_z - solved.height_m;
   out.axle_x_m = solved.x_m;
   out.residual_m = std::hypot(target_x - solved.x_m,
                               target_z - solved.height_m);
@@ -327,7 +329,7 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricComHeight(
     const auto leg = legHeight(hip, knee);
     const auto body = WholeBodyModel{}.compute(hip, knee, hip, knee);
     const float height_error = body_height_m -
-        (geometry::wheel_radius_m - leg.height_m);
+        (geometry::wheel_radius_m - geometry::origins[0].z - leg.height_m);
     const float com_error = com_target_x_m - body.com_offset_x_m;
     if (std::hypot(height_error, com_error) < 1.0e-7F) break;
     const auto jacobian = symmetricComOffsetJacobian(hip, knee);
@@ -356,11 +358,11 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricComHeight(
   const auto leg = legHeight(hip, knee);
   const auto body = WholeBodyModel{}.compute(hip, knee, hip, knee);
   const float height_error = body_height_m -
-      (geometry::wheel_radius_m - leg.height_m);
+      (geometry::wheel_radius_m - geometry::origins[0].z - leg.height_m);
   const float com_error = com_target_x_m - body.com_offset_x_m;
   out.hip_rad = hip;
   out.knee_rad = knee;
-  out.body_height_m = geometry::wheel_radius_m - leg.height_m;
+  out.body_height_m = geometry::wheel_radius_m - geometry::origins[0].z - leg.height_m;
   out.axle_x_m = leg.x_m;
   out.residual_m = std::hypot(height_error, com_error);
   out.feasible = std::isfinite(out.residual_m) && out.residual_m <= 2.0e-5F;
@@ -391,7 +393,7 @@ WholeBodyModel::SymmetricPose WholeBodyModel::solveSymmetricKnee(
   const LegHeight solved = legHeight(hip, knee_rad);
   out.hip_rad = hip;
   out.knee_rad = knee_rad;
-  out.body_height_m = geometry::wheel_radius_m - solved.height_m;
+  out.body_height_m = geometry::wheel_radius_m - geometry::origins[0].z - solved.height_m;
   out.axle_x_m = solved.x_m;
   out.residual_m = std::abs(target_x - solved.x_m);
   out.feasible = std::isfinite(out.residual_m) && out.residual_m <= 2.0e-5F;

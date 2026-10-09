@@ -12,7 +12,7 @@ namespace tap_fw::v3 {
 
 V3Controller::V3Controller(Config config)
     : config_(config), lqr_(config.lqr),
-      com_hang_m_(LegHeight::forKnee(0.0F).com_above_axle_m) {
+      com_reference_m_(LegHeight::forKnee(LegHeight::kKneeMaxRad).com_above_axle_m) {
   // Initial pendulum length (legs at the power-up pose); lqrUpdate follows the pose.
   lqr_.setComHeight(config_.com_height_m);
 }
@@ -1132,7 +1132,8 @@ std::array<float, 2> V3Controller::wbUpdate(const Input& in, const Command& cmd)
     wb_hip_hist_[i] = wb_hip_hist_[i - 1];
     wb_knee_hist_[i] = wb_knee_hist_[i - 1];
   }
-  const float knee_cmd = std::clamp(k0 + knee_dev, LegHeight::kKneeMinRad, 0.0F);
+  const float knee_cmd = std::clamp(k0 + knee_dev, LegHeight::kKneeMinRad,
+                                    LegHeight::kKneeMaxRad);
   dhip_ = q_shift + q_lean + hip_dev;
   dknee_ = knee_cmd - pose_.knee_offset_rad;
   const float w = std::clamp(v_wheel_ff / radius + w_dev, -wmax, wmax);
@@ -1329,7 +1330,7 @@ void V3Controller::updateVirtualPitch(const Input& in) {
   const Tier& t = config_.tier;
   float rate_gain = t.joint_rate_gain;
   if (t.joint_rate_gain_low >= 0.0F) {
-    const float ratio = std::clamp(c.height_m / std::max(com_hang_m_, 0.01F), 0.1F, 1.0F);
+    const float ratio = std::clamp(c.height_m / std::max(com_reference_m_, 0.01F), 0.1F, 1.0F);
     const float low_w = std::clamp((t.ratio_tall - ratio) / std::max(t.ratio_tall - t.ratio_low, 1.0e-3F),
                                    0.0F, 1.0F);
     rate_gain += low_w * (t.joint_rate_gain_low - t.joint_rate_gain);
@@ -1513,7 +1514,7 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   // the gains on every CAN sample. sqrt(l/g) is the pendulum's natural time scale
   // (Pratt et al., Capture Point, Humanoids 2006).
   const float observed_h = tierVirtual() ? com_meas_height_m_ : pose_.com_above_axle_m;
-  const float measured_ratio = std::clamp(observed_h / std::max(com_hang_m_, 0.01F), 0.1F, 1.0F);
+  const float measured_ratio = std::clamp(observed_h / std::max(com_reference_m_, 0.01F), 0.1F, 1.0F);
   if (!adaptive_init_ || !active) {
     adaptive_ratio_ = measured_ratio;
     adaptive_init_ = true;
@@ -1883,12 +1884,13 @@ float V3Controller::kneeHold(float dhip) noexcept {
   }
   const float hip = LegHeight::hangHipCad() + pose_.hip_offset_rad + dhip;
   const float target = -pose_.axle_below_hip_m;  // legHeight's sign: z up
-  float k = std::clamp(pose_.knee_offset_rad + knee_hold_, LegHeight::kKneeMinRad, 0.0F);
+  float k = std::clamp(pose_.knee_offset_rad + knee_hold_, LegHeight::kKneeMinRad,
+                       LegHeight::kKneeMaxRad);
   for (int i = 0; i < 3; ++i) {
     const auto leg = robot_control::WholeBodyModel::legHeight(hip, k);
     if (std::abs(leg.d_height_d_knee) < 1.0e-4F) break;
     const float step = (leg.height_m - target) / leg.d_height_d_knee;
-    k = std::clamp(k - step, LegHeight::kKneeMinRad, 0.0F);
+    k = std::clamp(k - step, LegHeight::kKneeMinRad, LegHeight::kKneeMaxRad);
     if (std::abs(step) < 1.0e-5F) break;
   }
   knee_hold_ = k - pose_.knee_offset_rad;
@@ -1915,7 +1917,8 @@ void V3Controller::updatePlan(float target_v, float dt, bool reset) {
       : std::max(t.plan_accel_m_s2, 0.05F);
   float jmax = std::max(t.plan_jerk_m_s3, 0.1F);
   if (envelopeOn()) {
-    jmax *= std::sqrt(std::max(com_hang_m_, 0.01F) / std::max(pose_.com_above_axle_m, 0.01F));
+    jmax *= std::sqrt(std::max(com_reference_m_, 0.01F) /
+                       std::max(pose_.com_above_axle_m, 0.01F));
   }
   // Jerk-limited (S-curve) tracking of the operator speed: aim the
   // acceleration at the sign of the error left after ramping the current
@@ -2193,7 +2196,8 @@ void V3Controller::applyPoseOffsets(const Input& in) {
   if (excite_applied_ && std::abs(dk - applied_dk_) < 2.0e-4F && applied_base_ == knee_cmd_rad_) {
     return;
   }
-  pose_ = LegHeight::forKnee(std::clamp(knee_cmd_rad_ + dk, LegHeight::kKneeMinRad, 0.0F));
+  pose_ = LegHeight::forKnee(std::clamp(knee_cmd_rad_ + dk, LegHeight::kKneeMinRad,
+                                       LegHeight::kKneeMaxRad));
   applied_dk_ = dk;
   applied_base_ = knee_cmd_rad_;
   excite_applied_ = true;
@@ -2240,9 +2244,8 @@ V3Controller::Config defaultV3Config() {
   // V3Controller always passes hold_station=true and manages the anchor itself via
   // reanchorPosition).
   cfg.lqr.position_anchor_hold = true;
-  // CoM-above-axle range, deepest crouch to hang pose (LegHeight/WholeBodyModel:
-  // 0.0664-0.1593 m), with margin so the gain table's endpoints are never clamped.
-  cfg.lqr.min_pendulum_length_m = 0.05F;
+  // Provisional GIM CAD CoM range; keep margin around the low knee stop.
+  cfg.lqr.min_pendulum_length_m = 0.035F;
   cfg.lqr.max_pendulum_length_m = 0.20F;
   // Input cost for the real wheel delay (the BL4820 speed servo answers after
   // ~50 ms dead time + a ~75 ms lag): 20 with the lead and a deadband push of 0.3
@@ -2260,7 +2263,8 @@ V3Controller::Config defaultV3Config() {
   cfg.fall_pitch_rad = 0.60F;
   // COM height of the legs locked extended (hanging-straight pose).
   robot_control::WholeBodyModel model;
-  const float hip = 0.0754F, knee = robot_control::geometry::native_knee_max_rad;
+  const float knee = robot_control::geometry::native_knee_max_rad;
+  const float hip = LegHeight::hangHipCad() + LegHeight::forKnee(knee).hip_offset_rad;
   cfg.com_height_m = model.compute(hip, knee, hip, knee).com_height_m;
   return cfg;
 }

@@ -83,7 +83,7 @@ class V3Controller {
   struct Roll {
     bool enabled = false;
     float est_tau_s = 0.5F;     // accelerometer correction of the roll estimate
-    float track_m = 0.309F;     // wheel track (2 x half_wheel_base)
+    float track_m = 0.2654F;    // GIM STEP wheel-center spacing
     // Integral time constant and proportional part. Slow and filtered on
     // purpose: fast gains made the side legs hunt +-2 mm every 40 ms on the
     // robot (roll estimate jitter +-0.015 rad; the sim legs follow ideally and
@@ -256,7 +256,7 @@ class V3Controller {
     // Body CoM fore/aft correction of the CAD mass model [m, body frame], fitted
     // to the measured balance-angle shifts with height (CAD alone has the wrong
     // sign; HANDOFF 5.37).
-    float body_com_dx_m = 0.021F;
+    float body_com_dx_m = 0.0F;  // CAD estimate is in GeneratedGeometry
     float lean_share = 1.0F;   // full virtual-lean isolation inside the existing travel limits
     // Residual whole-system lean authority, separate from maneuver preview.
     float disturbance_share = 1.0F;
@@ -499,7 +499,7 @@ class V3Controller {
     Engage engage{};
     Pid pid{};
     robot_control::LqrBalancer::Config lqr{};
-    float com_height_m = 0.2145F;         // locked extended legs (CAD FK)
+    float com_height_m = 0.18F;            // provisional GIM CAD estimate
     // How many pendulum-length points of the LQR gain table to pre-solve per
     // tick once the controller runs (LqrBalancer::buildGainTableStep), so a live
     // height change only interpolates instead of re-solving the Riccati equation
@@ -1012,7 +1012,7 @@ class V3Controller {
   float level_beta_ = 0.0F;
   float body_lp_ = 0.0F;
   bool level_init_ = false;
-  float com_hang_m_ = 0.0F;  // CoM above the axle at the hang pose
+  float com_reference_m_ = 0.0F;  // CoM above axle at the extended 135 deg knee pose
   float chain_rate_meas_ = 0.0F;
   float body_pitch_ = 0.0F;  // IMU body pitch (the input pitch may be theta_v)
   float body_rate_ = 0.0F;   // IMU body pitch rate

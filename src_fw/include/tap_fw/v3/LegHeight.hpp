@@ -4,20 +4,10 @@ namespace tap_fw::v3 {
 
 // Height planner: leg poses as a function of the hip-to-axle height.
 //
-// Leg zero is the gravity-hang pose the operator arranges before powering
-// the motors. A leg measured in that pose read knee -1.069 rad against the CAD
-// natural pose -1.068, so the hang pose is knee = 0 in the CAD frame, with the
-// hip at the angle that puts the axle straight below the hip (x = 0):
-// hip = +0.388 rad CAD, 188.6 mm hip-axle.
-//
-// Lowering the body folds the knee (core knee folding is negative) and turns
-// the hip to keep the axle straight below the hip, as Impulse keeps its foot
-// at X = 0. The body (3.37 of 4.62 kg) then stays over the axle and the
-// wheels only absorb a small residual. Results are joint OFFSETS from each
-// leg's own power-up zero (core frame, rad), so hand-arranged legs that are
-// only roughly equal still move by the same amount.
+// GIM CAD zero is the 22 degree lower knee stop. The core knee coordinate is
+// the internal angle increase from this pose, hence [0, 113 degrees].
 struct LegPose {
-  float knee_offset_rad = 0.0F;   // core knee angle relative to zero (<= 0)
+  float knee_offset_rad = 0.0F;   // core knee angle relative to CAD zero (>= 0)
   float hip_offset_rad = 0.0F;    // core hip angle relative to zero
   float axle_below_hip_m = 0.0F;  // hip-to-axle vertical distance
   float com_above_axle_m = 0.0F;  // whole-body CoM height above the axle
@@ -39,20 +29,17 @@ struct LegAxleTarget {
 
 class LegHeight {
  public:
-  // Deepest fold allowed: -1.38 rad, about 78 mm hip-axle. The CAD knee
-  // envelope (-1.2 rad) is a simulation value, not a measured stop; the robot
-  // has reached 78 mm. The physics plant balances at CoM 43 % of the hang height.
-  static constexpr float kKneeMinRad = -1.38F;
+  static constexpr float kKneeMinRad = 0.0F;
+  static constexpr float kKneeMaxRad = 1.9722222222222222F;
 
-  // Pose for a knee fold (clamped to [kKneeMinRad, 0]).
+  // Pose for a knee angle relative to CAD zero (clamped to [0, 113 degrees]).
   [[nodiscard]] static LegPose forKnee(float knee_offset_rad) noexcept;
   // Pose for a hip-to-axle height (m); clamped to the allowed range.
   [[nodiscard]] static LegPose forHeight(float axle_below_hip_m) noexcept;
-  [[nodiscard]] static float maxHeight() noexcept;  // hang pose
-  [[nodiscard]] static float minHeight() noexcept;  // at kKneeMinRad
-  // CAD hip angle of the hang pose (hip offset 0): core offsets convert to
-  // CAD joint angles as hip_cad = hangHipCad() + hip, knee_cad = knee.
-  [[nodiscard]] static float hangHipCad() noexcept;
+  [[nodiscard]] static float maxHeight() noexcept;  // at the 135 deg knee limit
+  [[nodiscard]] static float minHeight() noexcept;  // at CAD knee zero (22 deg)
+  // CAD hip angle that places the axle directly below the hip at the requested knee.
+  [[nodiscard]] static float hangHipCad() noexcept;  // GIM CAD hip zero at knee 22 deg
   // Cartesian IK, height first: project X into the supported knee workspace
   // at the requested depth, then solve BOTH joints on the existing branch.
   // pitch uses the native +Y convention R(p): (cx+sz, -sx+cz).

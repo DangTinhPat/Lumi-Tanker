@@ -1,4 +1,12 @@
-# Firmware v3 — con lắc ngược hai bánh với điều khiển phân tầng
+# Firmware v3.3beta — POS baseline, con lắc ngược hai bánh với điều khiển phân tầng
+
+`v3.3beta` giữ đường điều khiển vị trí POS của V3.3 và dùng hình học GIM6010-8
+từ `ROBOT (GIM6010-8).STEP`. Khối lượng, COM và mô-men quán tính là ước lượng
+theo mô hình khối lượng đã gán; xem `docs/GIM_SIM_PHYSICS_SPEC.md`.
+
+Mô hình khớp gối lấy 22° làm mốc 0 và giới hạn trên 135° (1.9722 rad); đùi dùng
+trục CAD GIM. Gốc encoder của driver so với mốc CAD này chưa được xác nhận trên
+robot thật, nên thông số hình học là đầu vào mô phỏng, chưa phải hiệu chuẩn phần cứng.
 
 Tài liệu tham chiếu cho app `esp32-s3-v3` (`firmware_esp32/src/AppV3.cpp`, lõi `src_fw/src/v3/`). Trạng thái dự án, cấu hình
 boot, số đo phần cứng và các hướng đã loại nằm ở `docs/V3.3_HANDOFF.md`; nhật ký cũ ở

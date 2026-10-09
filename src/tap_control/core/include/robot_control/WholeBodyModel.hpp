@@ -4,9 +4,10 @@
 
 namespace robot_control {
 namespace geometry {
-// MPU6500 mount in the body frame; must match `mpu6500_site` in tap_robot.xml.
+// Approximate MPU6500 position at the center of the GIM PCB; rotation and
+// exact chip offset are not specified in the STEP.
 inline constexpr float imu_offset_x_m = 0.0F;
-inline constexpr float imu_offset_z_m = 0.020F;
+inline constexpr float imu_offset_z_m = 0.0561F;
 }  // namespace geometry
 
 // Exact planar FK from the seven current CAD-link inertials. Both legs use
@@ -17,13 +18,13 @@ class WholeBodyModel {
     float wheel_radius_m = geometry::wheel_radius_m;
   };
   struct Result {
-    float com_offset_x_m = 0.0F;
-    float com_height_m = 0.217302F;
-    float com_above_axle_m = 0.187302F;
+    float com_offset_x_m = -0.00668F;
+    float com_height_m = 0.07632F;
+    float com_above_axle_m = 0.03632F;
     // Angle of the axle-to-CoM line in the body frame. The virtual
     // pendulum state is IMU body pitch plus this geometry angle.
     float com_line_angle_rad = 0.0F;
-    float pitch_inertia_at_axle_kg_m2 = 0.0F;
+    float pitch_inertia_at_axle_kg_m2 = 0.0128F;
     float axle_height_difference_m = 0.0F;
   };
 

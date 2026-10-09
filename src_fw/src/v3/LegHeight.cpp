@@ -40,7 +40,7 @@ LegPose LegHeight::forKnee(float knee_offset_rad) noexcept {
   LegPose out{};
   if (!std::isfinite(knee_offset_rad)) return out;
   static const Reference ref = hangReference();
-  const float knee = std::clamp(knee_offset_rad, kKneeMinRad, 0.0F);
+  const float knee = std::clamp(knee_offset_rad, kKneeMinRad, kKneeMaxRad);
   const float hip = hipForAxleBelow(knee);
   const auto leg = WholeBodyModel::legHeight(hip, knee);
   const auto body = WholeBodyModel{}.compute(hip, knee, hip, knee);
@@ -81,7 +81,7 @@ LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
   const float a = std::hypot(ax, az), b = std::hypot(bx, bz);
   const float cos_delta = std::clamp((x*x + h*h - a*a - b*b) / (2.0F*a*b), -1.0F, 1.0F);
   const float knee = std::clamp(std::atan2(bz, bx) - std::atan2(az, ax) -
-      geo::knee_zero_rebase_rad - std::acos(cos_delta), kKneeMinRad, 0.0F);
+      geo::knee_zero_rebase_rad - std::acos(cos_delta), kKneeMinRad, kKneeMaxRad);
   const auto zero_hip = WholeBodyModel::legHeight(0.0F, knee);
   const float hip_below = std::atan2(zero_hip.height_m, zero_hip.x_m) + 1.57079632679F;
   out.hip_offset_rad = hip_below - hangHipCad() - std::atan2(x, h) - body_pitch_rad;
@@ -93,7 +93,7 @@ LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
 
 float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
                                float body_pitch_rad) noexcept {
-  const float knee = std::clamp(knee_offset_rad, kKneeMinRad, 0.0F);
+  const float knee = std::clamp(knee_offset_rad, kKneeMinRad, kKneeMaxRad);
   const auto zero_hip = WholeBodyModel::legHeight(0.0F, knee);
   const float r = std::hypot(zero_hip.x_m, zero_hip.height_m);
   const float x = std::clamp(x_world_m, -0.999F * r, 0.999F * r);
@@ -105,7 +105,7 @@ float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
 // Constant for the model: computed once (they were a full forKnee each call,
 // several times per control tick).
 float LegHeight::maxHeight() noexcept {
-  static const float h = forKnee(0.0F).axle_below_hip_m;
+  static const float h = forKnee(kKneeMaxRad).axle_below_hip_m;
   return h;
 }
 float LegHeight::minHeight() noexcept {

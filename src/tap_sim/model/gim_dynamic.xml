@@ -1,0 +1,197 @@
+<mujoco model="gim6010_v3_dynamic">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
+  <visual><global azimuth="135" elevation="-20" fovy="45"/><headlight ambient="0.65 0.65 0.65" diffuse="0.8 0.8 0.8" specular="0.25 0.25 0.25"/></visual>
+  <default>
+    <joint damping="0.02" armature="0.0001"/>
+    <geom friction="1.0 0.01 0.001" solref="0.006 1" solimp="0.95 0.99 0.001"/>
+  </default>
+  <asset>
+    <mesh name="cad_01_0" file="gim_components/part_01_Left_Knee_1_NAUO62_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_02_0" file="gim_components/part_02_Left_Knee_2_NAUO63_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_03_0" file="gim_components/part_03_dong_co_chan_1_NAUO64_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_04_0" file="gim_components/part_04_2_5x6xM2_1_NAUO65_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_05_0" file="gim_components/part_05_2_5x8xM2_1_NAUO66_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_06_0" file="gim_components/part_06_Wheel_80mm_NAUO67_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_07_0" file="gim_components/part_07_Link_2_1_NAUO60_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_08_0" file="gim_components/part_08_Left_Link_NAUO61_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_09_0" file="gim_components/part_09_Spring_cover_1_1_NAUO58_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_10_0" file="gim_components/part_10_Spring_cover_2_1_NAUO59_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_11_0" file="gim_components/part_11_Left_Hip_1_NAUO44_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_12_0" file="gim_components/part_12_Left_Hip_2_NAUO45_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_13_0" file="gim_components/part_13_GIM6010_8_NAUO46_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_14_0" file="gim_components/part_14_GIM6010_8_NAUO47_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_15_0" file="gim_components/part_15_Motor_Bracket_1_NAUO48_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_16_0" file="gim_components/part_16_Join_Link_NAUO49_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_17_0" file="gim_components/part_17_Bearing_6809_NAUO50_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_18_0" file="gim_components/part_18_M3x6_ISO_7045_NAUO51_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_19_0" file="gim_components/part_19_M3x6_ISO_7045_NAUO52_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_20_0" file="gim_components/part_20_M3x6_ISO_7045_NAUO53_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_21_0" file="gim_components/part_21_M3x6_ISO_7045_NAUO54_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_22_0" file="gim_components/part_22_Motor_Bracket_2_NAUO55_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_23_0" file="gim_components/part_23_4x10xM3_NAUO56_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_24_0" file="gim_components/part_24_M3x6_ISO_4762_1_NAUO57_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_25_0" file="gim_components/part_25_Wheel_80mm_NAUO35_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_26_0" file="gim_components/part_26_Right_Knee_1_1_NAUO36_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_27_0" file="gim_components/part_27_Right_Knee_2_1_NAUO37_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_28_0" file="gim_components/part_28_dong_co_chan_2_NAUO38_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_29_0" file="gim_components/part_29_2_5x6xM2_2_NAUO39_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_30_0" file="gim_components/part_30_2_5x8xM2_2_NAUO40_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_31_0" file="gim_components/part_31_Link_2_2_NAUO33_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_32_0" file="gim_components/part_32_Right_Link_1_NAUO34_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_33_0" file="gim_components/part_33_Spring_cover_1_1_NAUO31_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_34_0" file="gim_components/part_34_Spring_cover_2_1_NAUO32_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_35_0" file="gim_components/part_35_GIM6010_8_NAUO22_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_36_0" file="gim_components/part_36_GIM6010_8_NAUO23_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_37_0" file="gim_components/part_37_Motor_Bracket_1_NAUO24_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_38_0" file="gim_components/part_38_Join_Link_NAUO25_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_39_0" file="gim_components/part_39_Bearing_6809_NAUO26_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_40_0" file="gim_components/part_40_Motor_Bracket_2_NAUO27_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_41_0" file="gim_components/part_41_4x10xM3_NAUO28_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_42_0" file="gim_components/part_42_Right_Hip_1_1_NAUO29_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_43_0" file="gim_components/part_43_Right_Hip_2_1_NAUO30_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_44_0" file="gim_components/part_44_Bearing_Clamping_NAUO3_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_45_0" file="gim_components/part_45_Bearing_Clamping_NAUO4_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_46_0" file="gim_components/part_46_Motor_Bracket_3_NAUO5_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_47_0" file="gim_components/part_47_Motor_Bracket_3_NAUO6_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_48_0" file="gim_components/part_48_PCB_NAUO7_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_49_0" file="gim_components/part_49_14_4V_Baterry_NAUO8_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_50_0" file="gim_components/part_50_Body_1_NAUO9_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_51_0" file="gim_components/part_51_M3x10_ISO_7045_NAUO10_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_52_0" file="gim_components/part_52_M3x10_ISO_7045_NAUO11_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_53_0" file="gim_components/part_53_M3x10_ISO_7045_NAUO12_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_54_0" file="gim_components/part_54_M3x10_ISO_7045_NAUO13_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_55_0" file="gim_components/part_55_Body_2_NAUO14_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_56_0" file="gim_components/part_56_C_c_dong_D_C_M3x10_NAUO15_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_57_0" file="gim_components/part_57_C_c_dong_D_C_M3x10_NAUO16_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_58_0" file="gim_components/part_58_C_c_dong_D_C_M3x10_NAUO17_0.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="cad_59_0" file="gim_components/part_59_C_c_dong_D_C_M3x10_NAUO18_0.stl" scale="0.001 0.001 0.001"/>
+    <material name="gim_structure" rgba="0.68 0.70 0.72 1"/>
+    <material name="gim_motor" rgba="0.24 0.26 0.29 1"/>
+    <material name="gim_wheel" rgba="0.08 0.09 0.10 1"/>
+    <material name="gim_electronics" rgba="0.12 0.48 0.24 1"/>
+    <material name="gim_battery" rgba="0.72 0.20 0.14 1"/>
+    <material name="gim_spring" rgba="0.78 0.80 0.82 1"/>
+    <material name="gim_hardware" rgba="0.48 0.50 0.53 1"/>
+  </asset>
+  <worldbody>
+    <light name="key" pos="0 -1 1.5" dir="0 1 -1"/>
+    <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
+    <body name="gim_body" pos="0 0 0.06988">
+      <freejoint name="root"/>
+      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <geom name="cad_07_0" type="mesh" mesh="cad_07_0" material="gim_structure" pos="2.64662958e-13 0.10245 0.00827948982" contype="1" conaffinity="1"/>
+      <geom name="cad_08_0" type="mesh" mesh="cad_08_0" material="gim_structure" pos="-0.00723794046 0.1122 0.0109132013" contype="1" conaffinity="1"/>
+      <geom name="cad_13_0" type="mesh" mesh="cad_13_0" material="gim_structure" pos="-5.45696821e-15 0.0237 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_14_0" type="mesh" mesh="cad_14_0" material="gim_structure" pos="-3.41060513e-15 0.0692 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_15_0" type="mesh" mesh="cad_15_0" material="gim_structure" pos="-4.77484718e-15 0.09335 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_17_0" type="mesh" mesh="cad_17_0" material="gim_hardware" pos="-9.09494702e-16 0.095 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_18_0" type="mesh" mesh="cad_18_0" material="gim_hardware" pos="0.0306743902 0.0844 -0.0124106476" contype="0" conaffinity="0"/>
+      <geom name="cad_19_0" type="mesh" mesh="cad_19_0" material="gim_hardware" pos="-0.0206901374 0.0844 -0.0223949004" contype="0" conaffinity="0"/>
+      <geom name="cad_20_0" type="mesh" mesh="cad_20_0" material="gim_hardware" pos="-0.0306743902 0.0844 0.0289696272" contype="0" conaffinity="0"/>
+      <geom name="cad_21_0" type="mesh" mesh="cad_21_0" material="gim_hardware" pos="0.0206901374 0.0844 0.03895388" contype="0" conaffinity="0"/>
+      <geom name="cad_22_0" type="mesh" mesh="cad_22_0" material="gim_structure" pos="-1.13686838e-15 0.0502 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_24_0" type="mesh" mesh="cad_24_0" material="gim_hardware" pos="-0.0306743902 0.0577 0.0289696272" contype="0" conaffinity="0"/>
+      <geom name="cad_31_0" type="mesh" mesh="cad_31_0" material="gim_structure" pos="6.36646291e-15 -0.10245 0.00827948981" contype="1" conaffinity="1"/>
+      <geom name="cad_32_0" type="mesh" mesh="cad_32_0" material="gim_structure" pos="-0.00723794046 -0.1122 0.0109132013" contype="1" conaffinity="1"/>
+      <geom name="cad_35_0" type="mesh" mesh="cad_35_0" material="gim_structure" pos="1.06865627e-14 -0.0692 0.00825735556" contype="0" conaffinity="0"/>
+      <geom name="cad_36_0" type="mesh" mesh="cad_36_0" material="gim_structure" pos="-1.59161573e-15 -0.0237 0.00825735556" contype="0" conaffinity="0"/>
+      <geom name="cad_37_0" type="mesh" mesh="cad_37_0" material="gim_structure" pos="1.06865627e-14 -0.09335 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_39_0" type="mesh" mesh="cad_39_0" material="gim_hardware" pos="2.95585778e-15 -0.095 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_40_0" type="mesh" mesh="cad_40_0" material="gim_structure" pos="1.11413101e-14 -0.0502 0.00827948981" contype="0" conaffinity="0"/>
+      <geom name="cad_44_0" type="mesh" mesh="cad_44_0" material="gim_hardware" pos="0 -0.095 0.0250203989" contype="0" conaffinity="0"/>
+      <geom name="cad_45_0" type="mesh" mesh="cad_45_0" material="gim_hardware" pos="0 0.095 0.0250203989" contype="0" conaffinity="0"/>
+      <geom name="cad_46_0" type="mesh" mesh="cad_46_0" material="gim_structure" pos="-5.91171556e-15 0.0067 0.00552948981" contype="0" conaffinity="0"/>
+      <geom name="cad_47_0" type="mesh" mesh="cad_47_0" material="gim_structure" pos="0 -0.0067 0.00552948981" contype="0" conaffinity="0"/>
+      <geom name="cad_48_0" type="mesh" mesh="cad_48_0" material="gim_electronics" pos="0 -3.41060513e-16 0.0560794898" contype="0" conaffinity="0"/>
+      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="-0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
+      <geom name="cad_50_0" type="mesh" mesh="cad_50_0" material="gim_structure" pos="0 -3.41060513e-16 0.00677948981" contype="1" conaffinity="1"/>
+      <geom name="cad_51_0" type="mesh" mesh="cad_51_0" material="gim_hardware" pos="-0.036 0.095 0.00697948981" contype="0" conaffinity="0"/>
+      <geom name="cad_52_0" type="mesh" mesh="cad_52_0" material="gim_hardware" pos="0.036 -0.095 0.00697948981" contype="0" conaffinity="0"/>
+      <geom name="cad_53_0" type="mesh" mesh="cad_53_0" material="gim_hardware" pos="0.036 0.095 0.00697948981" contype="0" conaffinity="0"/>
+      <geom name="cad_54_0" type="mesh" mesh="cad_54_0" material="gim_hardware" pos="-0.036 -0.095 0.00697948981" contype="0" conaffinity="0"/>
+      <geom name="cad_55_0" type="mesh" mesh="cad_55_0" material="gim_structure" pos="-2.04636308e-15 3.75166564e-15 0.0437794898" contype="1" conaffinity="1"/>
+      <geom name="cad_56_0" type="mesh" mesh="cad_56_0" material="gim_hardware" pos="0.071 -0.07 0.0588794898" contype="0" conaffinity="0"/>
+      <geom name="cad_57_0" type="mesh" mesh="cad_57_0" material="gim_hardware" pos="0.071 0.07 0.0588794898" contype="0" conaffinity="0"/>
+      <geom name="cad_58_0" type="mesh" mesh="cad_58_0" material="gim_hardware" pos="-0.071 -0.07 0.0588794898" contype="0" conaffinity="0"/>
+      <geom name="cad_59_0" type="mesh" mesh="cad_59_0" material="gim_hardware" pos="-0.071 0.07 0.0588794898" contype="0" conaffinity="0"/>
+      <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
+      <body name="left_thigh" pos="0 0.1025 0.00828">
+        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
+      <geom name="cad_09_0" type="mesh" mesh="cad_09_0" material="gim_spring" pos="-0.0534809567 0.01 -0.0107805682" contype="1" conaffinity="1"/>
+      <geom name="cad_10_0" type="mesh" mesh="cad_10_0" material="gim_spring" pos="-0.0392454865 0.01 -0.00911584016" contype="1" conaffinity="1"/>
+      <geom name="cad_11_0" type="mesh" mesh="cad_11_0" material="gim_structure" pos="-0.0477246599 0.00235 -0.001362105" contype="1" conaffinity="1"/>
+      <geom name="cad_12_0" type="mesh" mesh="cad_12_0" material="gim_structure" pos="-0.0477246599 0.015 -0.001362105" contype="1" conaffinity="1"/>
+      <geom name="cad_16_0" type="mesh" mesh="cad_16_0" material="gim_structure" pos="-0.0670572401 0.0103 -0.000773537019" contype="1" conaffinity="1"/>
+        <body name="left_shin" pos="-0.09816 0.0105 -0.01908">
+          <joint name="knee_left" type="hinge" axis="0 1 0" range="0 1.9722222222" limited="true" damping="0" frictionloss="0.1"/>
+          <inertial pos="0.08998 0 -0.01749" mass="0.24" diaginertia="0.001 0.000220 0.001"/>
+      <geom name="cad_01_0" type="mesh" mesh="cad_01_0" material="gim_structure" pos="0.0487157564 -0.0005 -0.0137832041" contype="1" conaffinity="1"/>
+      <geom name="cad_02_0" type="mesh" mesh="cad_02_0" material="gim_structure" pos="0.0692139091 -0.00125 -0.0190823093" contype="1" conaffinity="1"/>
+      <geom name="cad_03_0" type="mesh" mesh="cad_03_0" material="gim_motor" pos="0.09816 0.0161 -0.0190823093" contype="1" conaffinity="1"/>
+      <geom name="cad_04_0" type="mesh" mesh="cad_04_0" material="gim_hardware" pos="-0.0179785993 -0.0002 0.00876601321" contype="1" conaffinity="1"/>
+      <geom name="cad_05_0" type="mesh" mesh="cad_05_0" material="gim_hardware" pos="0.0199485627 -0.0005 0.00139371975" contype="1" conaffinity="1"/>
+      <geom name="cad_23_0" type="mesh" mesh="cad_23_0" material="gim_hardware" pos="-2.71834477e-06 -0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
+          <body name="left_wheel" pos="0.09816 0.0197 -0.01908">
+            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0.002"/>
+            <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
+      <geom name="cad_06_0" type="mesh" mesh="cad_06_0" material="gim_wheel" pos="-2.27373675e-15 7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
+            <geom name="left_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
+          </body>
+        </body>
+      </body>
+      <body name="right_thigh" pos="0 -0.1025 0.00828">
+        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
+      <geom name="cad_33_0" type="mesh" mesh="cad_33_0" material="gim_spring" pos="-0.0534809567 -0.01 -0.0107805682" contype="1" conaffinity="1"/>
+      <geom name="cad_34_0" type="mesh" mesh="cad_34_0" material="gim_spring" pos="-0.0392454865 -0.01 -0.00911584016" contype="1" conaffinity="1"/>
+      <geom name="cad_38_0" type="mesh" mesh="cad_38_0" material="gim_structure" pos="-0.0670572401 -0.0103 -0.000773537019" contype="1" conaffinity="1"/>
+      <geom name="cad_42_0" type="mesh" mesh="cad_42_0" material="gim_structure" pos="-0.0477246599 -0.00235 -0.001362105" contype="1" conaffinity="1"/>
+      <geom name="cad_43_0" type="mesh" mesh="cad_43_0" material="gim_structure" pos="-0.0477246599 -0.015 -0.001362105" contype="1" conaffinity="1"/>
+        <body name="right_shin" pos="-0.09816 -0.0105 -0.01908">
+          <joint name="knee_right" type="hinge" axis="0 1 0" range="0 1.9722222222" limited="true" damping="0" frictionloss="0.1"/>
+          <inertial pos="0.08998 0 -0.01749" mass="0.24" diaginertia="0.001 0.000220 0.001"/>
+      <geom name="cad_26_0" type="mesh" mesh="cad_26_0" material="gim_structure" pos="0.0487157564 0.0005 -0.0137832041" contype="1" conaffinity="1"/>
+      <geom name="cad_27_0" type="mesh" mesh="cad_27_0" material="gim_structure" pos="0.0692139091 0.00125 -0.0190823093" contype="1" conaffinity="1"/>
+      <geom name="cad_28_0" type="mesh" mesh="cad_28_0" material="gim_motor" pos="0.09816 -0.0161 -0.0190823093" contype="1" conaffinity="1"/>
+      <geom name="cad_29_0" type="mesh" mesh="cad_29_0" material="gim_hardware" pos="-0.0179785993 0.0002 0.00876601321" contype="1" conaffinity="1"/>
+      <geom name="cad_30_0" type="mesh" mesh="cad_30_0" material="gim_hardware" pos="0.0199485627 0.0005 0.00139371975" contype="1" conaffinity="1"/>
+      <geom name="cad_41_0" type="mesh" mesh="cad_41_0" material="gim_hardware" pos="-2.71834476e-06 0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
+          <body name="right_wheel" pos="0.09816 -0.0197 -0.01908">
+            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0.002"/>
+            <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
+      <geom name="cad_25_0" type="mesh" mesh="cad_25_0" material="gim_wheel" pos="7.86712917e-14 -7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
+            <geom name="right_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <pair geom1="ground" geom2="left_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
+    <pair geom1="ground" geom2="right_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
+  </contact>
+  <actuator>
+    <motor name="left_hip_torque" joint="hip_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
+    <motor name="left_knee_torque" joint="knee_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
+    <motor name="right_hip_torque" joint="hip_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
+    <motor name="right_knee_torque" joint="knee_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
+    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+  </actuator>
+  <sensor>
+    <accelerometer name="mpu6500_accel" site="imu_site"/>
+    <gyro name="mpu6500_gyro" site="imu_site"/>
+    <jointpos name="enc_left_hip_pos" joint="hip_left"/><jointvel name="enc_left_hip_vel" joint="hip_left"/>
+    <jointpos name="enc_left_knee_pos" joint="knee_left"/><jointvel name="enc_left_knee_vel" joint="knee_left"/>
+    <jointpos name="enc_left_wheel_pos" joint="wheel_left"/><jointvel name="enc_left_wheel_vel" joint="wheel_left"/>
+    <jointpos name="enc_right_hip_pos" joint="hip_right"/><jointvel name="enc_right_hip_vel" joint="hip_right"/>
+    <jointpos name="enc_right_knee_pos" joint="knee_right"/><jointvel name="enc_right_knee_vel" joint="knee_right"/>
+    <jointpos name="enc_right_wheel_pos" joint="wheel_right"/><jointvel name="enc_right_wheel_vel" joint="wheel_right"/>
+  </sensor>
+  <keyframe>
+    <key name="spawn_extended" qpos="0 0 0.216490386 1 0 0 0 -0.986111111 1.97222222 0 -0.986111111 1.97222222 0"/>
+    <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
