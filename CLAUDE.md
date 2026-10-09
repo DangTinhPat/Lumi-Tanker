@@ -1,17 +1,15 @@
-# TAP workspace notes
+# Lab branch notes
 
-This repository contains firmware v3.3, portable controller code and host
-simulation tools. The supplied CAD input is `ROBOT (GIM6010-8).STEP`; it has
-not yet been converted into a validated simulation model. Do not launch the
-native MuJoCo runner or viewer until a replacement model is derived and checked
-from that CAD.
+This branch is the MuJoCo AI-training workspace. Use the GIM6010-8 model at
+`src/tap_sim/model/gim_dynamic.xml` and `V3Controller` from `src_fw/` as the
+simulation baseline. The dashboard launches only `tap_mujoco_gim_v3`.
 
-The firmware controller is `src_fw/src/v3/V3Controller.cpp`. Host planar
-simulation harnesses are in `src_fw/tests`; the native runner in `src/tap_sim`
-uses the separate `EmbeddedController` and is not evidence for firmware
-behavior. Existing generated geometry has not been verified against the
-supplied STEP, so report its simulation results as provisional.
+Read `AGENTS.md`, `README.md`, `docs/NATIVE_RUNTIME.md`, and the GIM physics
+spec before changing simulation behavior. Keep simulated controller inputs to
+the MPU6500 and six encoders; MuJoCo world pose and contacts are not sensors.
+Mass and actuator parameters remain estimates. Do not describe simulation as
+hardware validation or operate/flash hardware without a current request.
 
-Preserve the sensor contract and evidence distinctions in `AGENTS.md` and
-`docs/RULES.md`. Do not operate hardware, flash firmware, or issue motor
-commands without an explicit request.
+Training focus: the branch does not yet define a Gymnasium API, policy action
+space, or reward. Keep AI code separate from the portable V3 controller and
+make reset, seed, scenario and observation provenance reproducible.

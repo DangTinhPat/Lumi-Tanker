@@ -8,12 +8,12 @@ selection is four GIM6010-8 leg motors and two BL4820M12 wheel motors:
 
 | Joint | Function | Motor |
 | --- | --- | --- |
-| `cad_left_hip` | Left hip | GIM6010-8 |
-| `cad_left_knee` | Left knee | GIM6010-8 |
-| `cad_left_wheel` | Left wheel | BL4820M12 |
-| `cad_right_hip` | Right hip | GIM6010-8 |
-| `cad_right_knee` | Right knee | GIM6010-8 |
-| `cad_right_wheel` | Right wheel | BL4820M12 |
+| `hip_left` | Left hip | GIM6010-8 |
+| `knee_left` | Left knee | GIM6010-8 |
+| `wheel_left` | Left wheel | BL4820M12 |
+| `hip_right` | Right hip | GIM6010-8 |
+| `knee_right` | Right knee | GIM6010-8 |
+| `wheel_right` | Right wheel | BL4820M12 |
 
 ## Wheel Motor: CJC BL4820M12
 
@@ -22,9 +22,10 @@ User-supplied manufacturer source: https://www.cjcmotor.com/motor/bl4820m12
 Retrieved 2026-09-12; unmodified HTML snapshot:
 `source_assets/datasheets/cjc_bl4820m12_20260912.html`.
 SHA256: `4334f5f2ecd5c97f759c863e799dc7d407430dca5b45b0a9c7ec35a734234484`.
-The datasheet snapshot above is the only copy kept in the repository. No
-structured motor file is loaded by the controller, and nothing here enforces
-actuator limits in the simulator.
+The datasheet snapshot above is the only copy kept in the repository. The
+MuJoCo actuator assumptions are configured separately in
+`src/tap_sim/model/gim_dynamic.xml` and documented in
+`docs/GIM_SIM_PHYSICS_SPEC.md`.
 
 | Published property | Value |
 | --- | --- |
@@ -34,14 +35,17 @@ actuator limits in the simulator.
 | Rated speed | 400 rpm = 41.887902 rad/s |
 | No-load current | 0.15 A |
 | No-load speed | 1000, row omits unit |
-| Torque | 130 mN.m = 0.130 Nm, rating type unspecified |
+| Continuous torque | 130 mN.m = 0.130 Nm |
+| Peak torque | 0.150 Nm (user clarification) |
 | Outer diameter / length | 48 / 20, rows omit units |
 | Integrated controller | Yes |
 | Communication | UART in page title; detailed protocol not supplied |
 
 The page says parameters are reference values and customization is available.
-Do not treat 0.130 Nm as a verified continuous or peak allowance, or no-load
-speed as a loaded speed limit. With the current 0.040 m wheel and assumed
+The user clarified that 0.130 Nm is the continuous torque and 0.150 Nm is the
+peak torque; the simulator therefore keeps its 0.150 Nm peak command limit.
+Do not treat no-load speed as a loaded speed limit. With the current 0.040 m
+wheel and assumed
 direct drive, 400 rpm corresponds to 1.675516 m/s, not a robot speed command.
 The page does not establish gearing; GIM's 8:1 ratio does NOT apply here.
 
@@ -100,7 +104,7 @@ before converting speed/torque or applying the 8:1 reduction again.
 
 Manual page 6 includes a bitmap plot that plain text extraction omits. A
 rendered page is saved as `source_assets/datasheets/steadywin_gim6010_8_rev2_2_page6.png`.
-Visual inspection during jump development shows the red speed curve near
+Visual inspection shows the red speed curve near
 200 rpm at 5.1 Nm and approximately 285 rpm at near-zero torque. These are
 approximate graphical readings, not numeric calibration data. The page does
 not specify the plot's supply voltage, temperature or duty cycle. In particular,
@@ -124,23 +128,24 @@ Obtain the datasheet and protocol for the exact purchased variant:
 - Position of each stator/gearbox assembly in the robot, output/rotor inertia,
   and bare wheel mass separate from its old motor.
 
-The reported knee encoder range 30..145 degrees remains a separate joint-limit
-calibration issue. The CAD-zero encoder reading and sign are still unknown.
-That range must not be imposed on the continuous wheel joints.
+The simulation maps the knee CAD pose to 22..135 degrees of internal angle
+(`q_knee = 0..113 degrees`). Physical encoder zero, sign and stop calibration
+remain unverified; do not transfer that simulator mapping to hardware without
+calibration. Wheel joints remain continuous.
 
-No robot mass allocation is currently attached to the native simulation.
-Derive it from the adopted CAD and BOM before using model-based torque or
-balance results.
+The active GIM simulation uses the provisional mass allocation in
+`src/tap_sim/model/gim_mass_properties.yaml`. Treat it as an estimate until
+solid mass properties or hardware measurements replace it.
 
-Motor stator/gearbox mass must follow its supporting link rather than all being
-assigned to the spinning wheel. Revised COM/inertia require mounting geometry,
-not only a total mass. CAD fit and wheel/leg interference must be checked again.
+The current provisional model groups each wheel motor stator with the shin and
+only the wheel with its rotating link. Its COM and inertia remain estimates;
+replace them when verified motor mounting geometry or solid mass properties
+become available. CAD fit and wheel/leg interference still need verification.
 
-Existing 3 Nm leg command caps, damping, speed limits and ideal wheel velocity
-servos remain simulation assumptions. No runtime parameter, model file, inertia,
-encoder limit or live desktop process was changed for this selection record.
-Previous balance/deep-squat passes apply to the recorded legacy model only;
-they do not validate the selected four-GIM/two-CJC actuator combination.
+The current GIM torque, friction and wheel-response assumptions are recorded in
+`docs/GIM_SIM_PHYSICS_SPEC.md`; they are simulation parameters, not verified
+continuous motor limits. Previous balance/deep-squat results for the legacy
+model do not validate the GIM simulation.
 
 After variant verification, update mass allocation and actuator modeling,
 regenerate COM/pose data, then repeat balance and drive tests in

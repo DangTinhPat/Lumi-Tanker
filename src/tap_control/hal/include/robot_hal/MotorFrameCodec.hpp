@@ -11,7 +11,7 @@
 // file - it is meant to be the SAME code compiled into the native sim's fake
 // driver AND the eventual ESP32 firmware. If a "if (sim) ..." branch ever
 // shows up here, the conformance value of the whole HAL layer is gone; see
-// docs/MOTOR_HAL_PLAN.md section 5.5.
+// the protocol references below.
 //
 // Source of truth for every constant below:
 //   docs/actuatal_driver/GDS68_DRIVER.md          (4x leg joints, CAN "MIT")
@@ -349,9 +349,8 @@ inline float wheelRawSpeedToRadPerSec(std::int16_t raw) {
   return static_cast<float>(raw) * 2.0F * 3.14159265358979323846F / 60.0F;
 }
 // Single-turn position, NOT unwrapped (WHEEL §4: 0..1023 = 0..360 deg, one
-// revolution). Callers doing odometry must unwrap statefully themselves, or
-// (recommended, see docs/MOTOR_HAL_PLAN.md §5.2) use Speed as the primary
-// velocity source instead, which is immune to wrap.
+// revolution). Callers doing odometry must unwrap statefully; use measured
+// speed as the velocity source because it is not affected by position wrap.
 inline float wheelRawPositionToRad(std::uint16_t raw) {
   return static_cast<float>(raw & 0x03FFU) * 2.0F * 3.14159265358979323846F / 1024.0F;
 }

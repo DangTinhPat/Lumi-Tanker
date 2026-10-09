@@ -94,19 +94,23 @@ def main():
     right_shin = "\n".join(geoms["right_shin"])
     right_wheel = "\n".join(geoms["right_wheel"])
     material_defs = "\n".join((
-        '    <material name="gim_structure" rgba="0.68 0.70 0.72 1"/>',
+        '    <material name="gim_structure" rgba="0.14 0.62 0.84 1"/>',
         '    <material name="gim_motor" rgba="0.24 0.26 0.29 1"/>',
         '    <material name="gim_wheel" rgba="0.08 0.09 0.10 1"/>',
         '    <material name="gim_electronics" rgba="0.12 0.48 0.24 1"/>',
         '    <material name="gim_battery" rgba="0.72 0.20 0.14 1"/>',
-        '    <material name="gim_spring" rgba="0.78 0.80 0.82 1"/>',
-        '    <material name="gim_hardware" rgba="0.48 0.50 0.53 1"/>'))
+        '    <material name="gim_spring" rgba="0.96 0.34 0.12 1"/>',
+        '    <material name="gim_hardware" rgba="0.36 0.38 0.42 1"/>'))
     knee = 1.9722222222222222
     hip = -knee / 2
     axle_z = (0.00828 - math.sin(hip) * -0.09816 + math.cos(hip) * -0.01908
               - math.sin(hip + knee) * 0.09816 + math.cos(hip + knee) * -0.01908)
     spawn_qpos = vec((0, 0, 0.040 - axle_z, 1, 0, 0, 0,
                       hip, knee, 0, hip, knee, 0))
+    hip_home = math.radians(74.8)
+    knee_home = 0.0
+    home_qpos = vec((0, 0, 0.04172, 1, 0, 0, 0, hip_home, knee_home, 0,
+                     hip_home, knee_home, 0))
     xml = f'''<mujoco model="gim6010_v3_dynamic">
   <compiler angle="radian" autolimits="true"/>
   <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
@@ -116,15 +120,17 @@ def main():
     <geom friction="1.0 0.01 0.001" solref="0.006 1" solimp="0.95 0.99 0.001"/>
   </default>
   <asset>
+    <texture name="ground_grid_tex" type="2d" builtin="checker" rgb1="0.46 0.48 0.50" rgb2="0.28 0.30 0.32" mark="edge" markrgb="0.68 0.70 0.72" width="512" height="512"/>
+    <material name="ground_grid" texture="ground_grid_tex" texuniform="true" texrepeat="8 8" reflectance="0.12"/>
 {chr(10).join(meshes)}
 {material_defs}
   </asset>
   <worldbody>
     <light name="key" pos="0 -1 1.5" dir="0 1 -1"/>
-    <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
+    <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" material="ground_grid"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <inertial pos="-0.00509198 0.00012916 0.01377824" mass="2.4" fullinertia="0.00896273 0.00482998 0.00936716 -0.0000152898 0.0000180070 0.0000002404"/>
 {body_geom}
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
@@ -136,10 +142,10 @@ def main():
           <inertial pos="0.08998 0 -0.01749" mass="0.24" diaginertia="0.001 0.000220 0.001"/>
 {left_shin}
           <body name="left_wheel" pos="0.09816 0.0197 -0.01908">
-            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0.002"/>
+            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0.002" frictionloss="0.01"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
 {left_wheel}
-            <geom name="left_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
+            <geom name="left_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" material="gim_wheel" contype="1" conaffinity="1"/>
           </body>
         </body>
       </body>
@@ -152,10 +158,10 @@ def main():
           <inertial pos="0.08998 0 -0.01749" mass="0.24" diaginertia="0.001 0.000220 0.001"/>
 {right_shin}
           <body name="right_wheel" pos="0.09816 -0.0197 -0.01908">
-            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0.002"/>
+            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0.002" frictionloss="0.01"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
 {right_wheel}
-            <geom name="right_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
+            <geom name="right_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" material="gim_wheel" contype="1" conaffinity="1"/>
           </body>
         </body>
       </body>
@@ -170,8 +176,8 @@ def main():
     <motor name="left_knee_torque" joint="knee_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_hip_torque" joint="hip_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_knee_torque" joint="knee_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
-    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.13 0.13"/>
-    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.15 0.15"/>
+    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.15 0.15"/>
   </actuator>
   <sensor>
     <accelerometer name="mpu6500_accel" site="imu_site"/>
@@ -186,6 +192,7 @@ def main():
   <keyframe>
     <key name="spawn_extended" qpos="{spawn_qpos}"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
+    <key name="home" qpos="{home_qpos}"/>
   </keyframe>
 </mujoco>
 '''

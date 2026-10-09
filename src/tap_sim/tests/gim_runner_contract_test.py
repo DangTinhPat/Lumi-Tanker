@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Black-box contract for the native MuJoCo runner.
+"""Black-box contract for the GIM V3 MuJoCo runner.
 
 This test checks the boundary, not balance capability.  VIEW is allowed only
 as a visualization/debug stream; the controller-facing STATE stream must not
@@ -40,7 +40,7 @@ def main() -> int:
         for value in state.values():
             assert "nan" not in value.lower()
     assert any(line.startswith("VIEW|") for line in lines), "debug view channel missing"
-    print("PASS native runner boundary: 3k fixed-step, sensor-only STATE, debug-only VIEW")
+    print("PASS GIM V3 boundary: 3k fixed-step, sensor-only STATE, debug-only VIEW")
     return 0
 
 

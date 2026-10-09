@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import subprocess
 
-from native_runner_contract_test import fields
+from gim_runner_contract_test import fields
 
 
 def run(args, name, duration, schedule, extra=()):

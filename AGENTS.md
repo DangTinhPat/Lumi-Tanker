@@ -31,28 +31,33 @@ These are persistent expert instructions, not claims of running agent processes.
 
 ## Robot Model
 
-No CAD model is currently configured for simulation. Keep the supplied GIM
-STEP as source input; derive joint frames, link inertias, collision geometry
-and limits from it before enabling a simulator model. Do not reuse cached
-geometry or physical constants from the removed model. The deployable sensor
-inventory is one MPU6500 (3-axis accelerometer and
-  3-axis gyroscope) plus six motor encoders (four leg joints, two wheel
-  joints). Wheel-contact switches, force/torque sensors, motor current feedback
-  (except the leg-driver exception in `docs/RULES.md` Rule 1), range sensors,
-  cameras and external localization are excluded from the control design and
-  must not become hidden dependencies. Simulator contacts, efforts and pose are
-  telemetry only; derive support hypotheses from MPU6500 and encoder data.
-- Record verified model parameters and their source when a replacement model
-  is adopted.
+The default MuJoCo model on `lab` is derived from `ROBOT (GIM6010-8).STEP`:
+`src/tap_sim/model/gim_dynamic.xml`. Joint frames and geometry are CAD-derived;
+mass, inertia and actuator response are documented estimates, not identified
+hardware values. Keep their provenance in `src/tap_sim/model/PHYSICS.md` and
+`docs/GIM_SIM_PHYSICS_SPEC.md`.
+
+The deployable sensor inventory is one MPU6500 (3-axis accelerometer and
+3-axis gyroscope) plus six motor encoders (four leg joints, two wheel joints).
+Leg-driver current feedback is allowed only under Rule 1 in `docs/RULES.md`.
+Do not add hidden control inputs from cameras, localization or MuJoCo truth.
+Simulator contacts, efforts and pose are telemetry/rendering only.
 
 ## Architecture And Evidence
 
-The layout and the firmware/simulator split are in `architecture.md`. The robot
-runs `V3Controller` (`src_fw/src/v3`); the MuJoCo simulator runs the older
-`EmbeddedController`, so a simulator result is not a result about the firmware.
+Firmware and the GIM MuJoCo runner both call `V3Controller`
+(`src_fw/src/v3`). The runner is `src/tap_sim/native/gim_v3_runner.cpp`; the
+GUI loads the GIM model above. The legacy `EmbeddedController` remains in the
+host core for its tests and examples, but is not a MuJoCo runtime controller.
 Keep the control core free of desktop middleware and robot-specific parameters
 explicit. Use portable resource lookup, not machine-specific paths in runtime
-code. Current firmware state and rejected ideas: `docs/V3.3_HANDOFF.md`.
+code.
+
+This branch focuses on AI training in MuJoCo. The recovery Gymnasium environment
+and PPO entrypoints are in `src/tap_sim/training`; no policy is trained or
+firmware-integrated yet. Preserve seeded resets and record each model, actuator
+setting, seed and fall scenario. Firmware state and hardware evidence remain in
+`docs/V3.3_HANDOFF.md`.
 
 Do not modify `docs/RULES.md` or `architecture.md` unless the user explicitly
 authorizes that document change. Reading and proposing changes is allowed;

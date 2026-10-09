@@ -1,4 +1,9 @@
-# Kế hoạch lớp HAL động cơ (CAN GDS68 + UART bánh xe)
+# Ghi chép lịch sử: kế hoạch HAL động cơ (CAN GDS68 + UART bánh xe)
+
+> Tài liệu này mô tả simulator/controller cũ và các hướng HAL đã khảo sát; các
+> lệnh build, đường dẫn `native_runner.cpp` và kế hoạch bên dưới không còn là
+> cấu hình hiện hành của nhánh `lab`. Runtime AI/MuJoCo hiện tại là GIM +
+> `V3Controller`; xem [`NATIVE_RUNTIME.md`](NATIVE_RUNTIME.md).
 
 Kế hoạch HAL và mô phỏng, đối chiếu với `docs/actuatal_driver/*`,
 `src/tap_control/core` và `src/tap_sim/native/native_runner.cpp`. Phần adapter
@@ -140,7 +145,7 @@ joint state không trễ, còn target chỉ làm mới ở tốc độ CAN.
 phụ lục ghi rõ trường này không dùng cho khớp CAN, nhưng sim dùng nó làm
 ngưỡng clamp momen mỗi tick (`:1141`). May mắn nó là hằng số —
 `EmbeddedController.cpp:1786,1864,1868` luôn gán 3.0 N·m (chân) và
-0.13 N·m (bánh), không bao giờ đổi theo tick.
+0.15 N·m (bánh), không bao giờ đổi theo tick.
 
 Hướng xử lý: đặt một lần lúc bring-up qua `Set_Limits` (0x00F), HAL assert
 giá trị bất biến giữa các tick.
@@ -271,9 +276,9 @@ hoá này vào sim để biết nó có làm hỏng landing không.
 ### 5.4 Trần vật lý
 
 Chân: GDS68 danh định 5 N·m, stall 11 N·m; sim dùng 3.0 N·m (`:588`), còn
-biên. Bánh: BL4820M12 130 mN·m, không hộp số; sim dùng đúng 0.13 N·m
-(`:473`, `:1039`), trung thực. Đây là con số khắc nghiệt: 0.13/0.04 = 3.25 N
-lực kéo mỗi bánh, 6.5 N tổng lực kéo — authority bắt thăng bằng thấp.
+biên. Bánh: BL4820M12 có mô-men liên tục 0.13 N·m và mô-men đỉnh 0.15 N·m
+theo thông tin người dùng cung cấp. Mô phỏng giữ giới hạn đỉnh 0.15 N·m:
+0.15/0.04 = 3.75 N lực kéo mỗi bánh, 7.5 N tổng lực kéo.
 
 Bánh xe 400 RPM có tải → ±400 raw ↔ ±41.888 rad/s ↔ 1.6755 m/s. Sim clamp
 đúng ±41.887902 (`:1080`) và mọi đường code khác cũng vậy. Con số 1.2566 m/s
@@ -282,7 +287,7 @@ Bánh xe 400 RPM có tải → ±400 raw ↔ ±41.888 rad/s ↔ 1.6755 m/s. Sim 
 dòng code nào từng dùng nó, nhưng nó đang bị dùng để giải thích thất bại
 landing: "1.5 m/s trong khi phần cứng chỉ chịu 1.2566". Với 1.6755, lời giải
 thích đó không đứng vững: 1.5 m/s nằm trong envelope tốc độ bánh. Ràng buộc
-thật là momen — 0.13 N·m × 2 bánh chặn gia tốc mặt đất ở 1.41 m/s²
+thật là momen — 0.15 N·m × 2 bánh chặn gia tốc mặt đất ở khoảng 2.48 m/s²
 (`native_runner.cpp:474-477`). Landing đang hỏng vì thiếu gia tốc, không vì
 thừa tốc độ.
 

@@ -6,14 +6,27 @@ mass_unit: kg
 
 rigid_groups:
   body:
-    mass: 2.5
+    mass: 2.4
+    mass_breakdown_kg:
+      body_frame_and_mounts: 0.278
+      four_GIM6010_8_motors: 1.600
+      battery: 0.210
+      pcb_screws_wiring_residual: 0.312
     includes:
-      - plastic frame
+      - body enclosure/frame
       - battery
       - four hip/knee motors
       - PCB
       - screws and wiring
-    basis: user-specified aggregate, rounded from approximately 2.4 kg
+    enclosure_contents:
+      - body shell
+      - four GIM6010-8 motors
+      - battery
+      - PCB
+    basis: >-
+      User estimate: 278 g body + 210 g battery + 1600 g four GIM motors =
+      2088 g; screws, wiring and PCB bring the estimate to about 2400 g.
+      Use the unrounded estimate of 2400 g for the body assembly.
   thigh_each:
     mass: 0.05
     basis: user-specified
@@ -28,7 +41,7 @@ rigid_groups:
     basis: inferred from the previously accepted 0.22 kg wheel-plus-motor lump
 
 derived:
-  total_robot_mass: 3.12
+  total_robot_mass: 3.02
   wheel_plus_motor_each: 0.22
 
 dissipation:
@@ -102,17 +115,36 @@ cad_derived_geometry:
     dynamics or wheel odometry.
 
 inertial_properties:
-  status: provisional rigid-group estimates from CAD envelopes and assigned masses
+  status: CAD BREP volume-based module estimates using user-assigned group masses
   cad_frame: centered at the STEP assembly bounding box; +X forward, +Y left, +Z up
   body:
-    mass_kg: 2.5
-    com_m: [-0.0048, 0.0, 0.0140]
-    iyy_kg_m2: 0.0070
-    diagonal_inertia_about_com_kg_m2: [0.020, 0.007, 0.020]
+    mass_kg: 2.4
+    com_m: [-0.00509198, 0.00012916, 0.01377824]
+    iyy_kg_m2: 0.004829976
+    diagonal_inertia_about_com_kg_m2: [0.008962725, 0.004829976, 0.009367159]
+    full_inertia_about_com_kg_m2:
+      - [0.008962725, -0.000015290, 0.000018007]
+      - [-0.000015290, 0.004829976, 0.000000240]
+      - [0.000018007, 0.000000240, 0.009367159]
+    module_masses_kg:
+      body_frame_and_fixed_mounts: 0.278
+      each_GIM6010_8: 0.400
+      battery: 0.210
+      PCB_fasteners_wiring_residual: 0.312
+    module_counts:
+      GIM6010_8: 4
+    mass_allocation_method: >-
+      GIM motor, battery and body-frame group masses are assigned to their STEP
+      component geometry. The 278 g frame group is volume-weighted across fixed
+      structural/support components; the 312 g PCB/fastener/wiring residual is
+      volume-weighted across the PCB and CAD fasteners because wiring geometry
+      and its separate mass are unavailable. Component BREP volume inertias use
+      uniform density within each group. The assigned module masses sum to the
+      2.40 kg body estimate; no rounding mass is added at the aggregate COM.
     note: >-
-      COM uses the user mass split (1.6 kg in four hip/knee motors, 0.278 kg
-      plastic, 0.210 kg battery, and remaining PCB/wiring/fasteners) and CAD
-      component locations. Iyy is a coarse group estimate, not a solid-mesh result.
+      Module inertials are combined into one rigid-body inertial because these
+      modules do not move relative to the body. This is dynamically equivalent
+      to separate welded modules. Iyy is the body pitch inertia about its COM.
   thigh_each:
     mass_kg: 0.05
     com_from_hip_m: [-0.04908, 0.0, -0.00954]
@@ -137,8 +169,8 @@ inertial_properties:
     - Wheel-center spacing from STEP is 0.2654 m; the old 0.309 m contract is unresolved.
     - Do not treat these estimated inertias or the simulator as hardware calibration.
   cad_neutral_whole_robot:
-    com_relative_to_wheel_axle_m: [-0.00668, 0.0, 0.03632]
-    com_height_above_ground_m: 0.07632
-    pitch_inertia_about_axle_kg_m2: 0.01278
-    effective_pendulum_length_m: 0.11094
+    com_relative_to_wheel_axle_m: [-0.00697190, 0.0, 0.03589569]
+    com_height_above_ground_m: 0.07589569
+    pitch_inertia_about_axle_kg_m2: 0.01037823
+    effective_pendulum_length_m: 0.09397951
     basis: rigid-group estimates above, symmetric two-leg CAD-zero pose

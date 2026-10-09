@@ -1,10 +1,16 @@
-# Native TAP dashboard
+# MuJoCo dashboard
 
-The dashboard is a Python/Tk client for the native MuJoCo runner. No robot
-model is currently configured in this workspace; the dashboard refuses to
-start the simulation. Keep it closed until a validated model derived from the
-current CAD is available.
+The dashboard runs the GIM MuJoCo model with firmware `V3Controller` and the
+simulated current-difference leg actuator. It does not run the legacy
+`EmbeddedController`.
 
-The runner uses `EmbeddedController`, while firmware behavior is exercised by
-the planar host harness in `src_fw/tests`. A viewer display does not show that
-the firmware controller balances.
+Build `tap_mujoco_gim_v3`, then start the dashboard from the repository root:
+
+```bash
+python3 tools/tap_native_gui.py
+```
+
+The 3-D viewer is for rendering and diagnostics. Controller feedback uses the
+simulated MPU6500 and six encoders, not MuJoCo world pose or contacts. The
+dashboard is an operator UI, not an AI training environment; the runner's
+current commands and telemetry are documented in `docs/NATIVE_RUNTIME.md`.

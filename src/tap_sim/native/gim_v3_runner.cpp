@@ -152,7 +152,7 @@ class GimV3Runner {
     config.lqr_inertia_length = true;
     config.lqr.max_pendulum_length_m = 0.24F;
     config.lqr.max_ground_accel_m_s2 = std::min(config.lqr.wheel_ground_mu * 9.81F,
-        2.0F * 0.13F / (geometry::wheel_radius_m * geometry::total_mass_kg));
+        2.0F * 0.15F / (geometry::wheel_radius_m * geometry::total_mass_kg));
     config.lqr_prediction = {options.lqr_prediction, static_cast<float>(options.wheel_delay_s),
                                   static_cast<float>(options.wheel_lag_s)};
     config.lqr_lead_adaptive = false;
@@ -226,7 +226,7 @@ class GimV3Runner {
         throw std::runtime_error("GIM IMU must measure acceleration/gyro at its site");
     }
     if (model_->nq != 13 || model_->nv != 12 || model_->nu != 6 ||
-        model_->nbody != 8 || std::abs(mj_getTotalmass(model_) - 3.12) > 1.0e-5)
+        model_->nbody != 8 || std::abs(mj_getTotalmass(model_) - 3.02) > 1.0e-5)
       throw std::runtime_error("GIM MJCF joint or mass contract mismatch");
   }
 

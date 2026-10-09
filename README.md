@@ -1,40 +1,28 @@
-# Lumi-Tanker
+# Lumi-Tanker AI lab
 
-Firmware v3.3 and host simulation tools for a two-wheel legged robot.
+The `lab` branch is for AI experiments in MuJoCo using the GIM6010-8 robot
+model and firmware V3.3 as the reference controller. The default GUI runs
+`tap_mujoco_gim_v3` with `src/tap_sim/model/gim_dynamic.xml`.
 
-The control firmware is in `firmware_esp32/` and `src_fw/`; the portable
-control code and motor interfaces are in `src/tap_control/`. Host planar
-simulation harnesses are in `src_fw/tests`. The MuJoCo runner and GUI remain
-available as software, but this workspace currently has no robot model
-configured for them. Do not use their old generated geometry as a replacement
-model. `ROBOT (GIM6010-8).STEP` is the supplied CAD input and has not yet been
-converted into a validated simulation model.
+The model geometry comes from `ROBOT (GIM6010-8).STEP`. Mass, inertia and
+actuator response are documented estimates; simulator results are not hardware
+validation. V3 balance feedback uses simulated MPU6500 data and six joint
+encoders; simulated leg-driver current is used only by the ΔI actuator layer.
+MuJoCo pose and contact data are for rendering and diagnostics.
 
-Read [`architecture.md`](architecture.md), [`docs/RULES.md`](docs/RULES.md),
-and [`docs/V3.3_HANDOFF.md`](docs/V3.3_HANDOFF.md) before control or model
-changes. Simulation and host tests are evidence only for the models they
-actually exercise; they do not certify physical performance.
-
-## Host build
+## Build and run
 
 ```bash
-cmake -S . -B build/native -DBUILD_TESTING=ON -DTAP_BUILD_SIMULATOR=OFF
-cmake --build build/native -j4
-ctest --test-dir build/native --output-on-failure
+cmake -S . -B build -DBUILD_TESTING=OFF -DTAP_BUILD_SIMULATOR=ON
+cmake --build build --target tap_mujoco_gim_v3 -j4
+python3 tools/tap_native_gui.py
 ```
 
-The planar firmware simulation harnesses are selected with environment
-variables, for example:
+The GUI starts the GIM V3.3 runner and opens its MuJoCo viewer. For controller,
+model and sensor details, see [Native runtime](docs/NATIVE_RUNTIME.md) and the
+[GIM physics specification](docs/GIM_SIM_PHYSICS_SPEC.md).
 
-```bash
-TIER_IQ_COMP=1 build/native/bin/v3_tier_tests
-```
-
-## Firmware build
-
-```bash
-~/.platformio/penv/bin/pio run -e esp32-s3-v3
-```
-
-Hardware operation, flashing, and motor commands require a separate explicit
-request.
+The branch now includes a Gymnasium recovery environment and PPO train/evaluate
+entrypoints. No learned policy has been trained or integrated into firmware yet;
+see [recovery training](docs/RECOVERY_TRAINING.md). Do not operate or flash
+hardware as part of AI experiments.

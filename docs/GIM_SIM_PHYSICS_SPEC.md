@@ -17,19 +17,19 @@ khớp bên phải. Gốc STEP trước tịnh tiến xấp xỉ
 
 | Đại lượng | Giá trị dùng | Nguồn |
 | --- | --- | --- |
-| Khối lượng thân | 2,50 kg | Người dùng, làm tròn |
+| Khối lượng thân | 2,40 kg | Người dùng: 278 g thân + 210 g pin + 1.600 g bốn motor GIM = 2.088 g; PCB, vít và dây đưa tổng ước lượng lên khoảng 2.400 g; không làm tròn |
 | Khối lượng mỗi đùi | 0,050 kg | Người dùng |
 | Khối lượng mỗi ống chân | 0,040 kg | Người dùng |
 | Khối lượng mỗi motor bánh | 0,200 kg | Người dùng |
 | Khối lượng mỗi bánh riêng | 0,020 kg | Suy ra từ tổng bánh + motor 0,220 kg trước đây |
-| Tổng khối lượng | 3,120 kg | Tổng các nhóm trên |
+| Tổng khối lượng | 3,020 kg | Tổng các nhóm trên |
 | Bán kính bánh | 0,040 m | Hình học CAD |
 | Khoảng cách tâm hai bánh | 0,2654 m; nửa khoảng cách 0,1327 m | CAD GIM |
 | Hành trình gối | 22° đến 135° | Người dùng; CAD zero được ánh xạ tới 22° |
 | Khớp đùi | Quay liên tục | Người dùng |
 | Ma sát bánh–sàn | μ = 0,8 | Người dùng, cập nhật trong phiên này |
 | Ma sát khô mỗi đùi/gối | 0,1 N·m | Người dùng, cập nhật trong phiên này |
-| COM và tensor quán tính | Bảng mục 3 | Ước lượng hiện tại, chưa tích phân thể tích STEP |
+| COM và tensor quán tính | Bảng mục 3 | Tích phân thể tích BREP từ STEP, khối lượng nhóm do người dùng cung cấp; phân bố đồng nhất trong từng nhóm |
 | Ma sát thân/ống chân với sàn, độ mềm tiếp xúc | Mục 4 | Giả định mô phỏng |
 | Armature, ma sát ổ bánh, băng thông vòng dòng/tốc độ | Mục 5 | Giả định mô phỏng |
 
@@ -76,8 +76,11 @@ khớp bằng 0. Nó không phải mặc định spawn.
 
 ## 3. Khối lượng, COM và quán tính
 
-Model dùng 7 vật rắn. Thân chứa cả bốn motor đùi/gối, pin, PCB, nhựa, vít và
-dây. Mỗi shin chứa 40 g ống chân + 200 g motor bánh. Mỗi wheel chứa 20 g bánh.
+Model dùng 7 vật rắn. Khối hộp thân gồm vỏ hộp, bốn motor GIM, pin và PCB;
+khối lượng thân còn tính vít và dây theo phân bổ tổng hợp. Các gá/link/bạc đạn
+bên ngoài được gán cùng rigid link thân khi chúng cố định với khung; đó là cách
+gom động học, không có nghĩa chúng nằm trong khối hộp. Mỗi shin chứa 40 g ống
+chân + 200 g motor bánh. Mỗi wheel chứa 20 g bánh.
 Phân bố rotor/stator nội bộ motor chưa được xác định riêng.
 
 COM dưới đây tương đối với frame vật rắn tương ứng. Tensor đang dùng là
@@ -86,15 +89,21 @@ về gốc khớp một lần nữa khi khai báo MJCF.
 
 | Vật rắn | m, kg | COM local, m | `(Ixx,Iyy,Izz)`, kg·m² |
 | --- | --- | --- | --- |
-| Thân | 2,50 | `(-0.0048,0,0.0140)` | `(0.020,0.007,0.020)` |
+| Thân | 2,40 | `(-0.005092,0.000129,0.013778)` | đường chéo `(0.008963,0.004830,0.009367)` |
 | Mỗi đùi | 0,050 | `(-0.04908,0,-0.00954)` | `(0.000420,0.0000417,0.000420)` |
 | Mỗi shin + motor bánh | 0,240 | `(0.08998,0,-0.01749)` | `(0.001,0.000220,0.001)` |
 | Mỗi bánh | 0,020 | `(0,0,0)` | `(0.000008,0.000016,0.000008)` |
 
-Các tensor có trị riêng dương và thỏa bất đẳng thức tam giác quán tính.
-Điều này xác nhận tính hợp lệ toán học, không xác nhận phân bố khối lượng thật.
-Đặc biệt Ixx/Izz của thân và chân là ước lượng; chưa dùng kết quả roll/ngã 3D
-để chứng minh độ chính xác của chúng.
+Tensor thân đầy đủ tại COM trong frame CAD là:
+`[[0.008962725, -0.000015290, 0.000018007],`
+` [-0.000015290, 0.004829976, 0.000000240],`
+` [0.000018007, 0.000000240, 0.009367159]] kg·m²`.
+MuJoCo nhận tensor này qua `fullinertia`. Các trị riêng dương và thỏa bất đẳng
+thức tam giác; điều đó xác nhận tính hợp lệ toán học, không xác nhận khối lượng
+riêng thực. Motor GIM được gán 0,400 kg mỗi chiếc, pin 0,210 kg, khung/gá cố
+định 0,278 kg; 0,312 kg còn lại cho PCB/vít/dây được phân bố theo thể tích CAD.
+Dây không có mesh riêng. Phân bố trong mỗi nhóm dùng mật độ đồng nhất. Tổng
+khối lượng thân là 2,40 kg; không thêm khối lượng làm tròn tại COM.
 
 Quán tính quanh trục bánh được tính đúng một lần theo trục song song:
 `I_axle = Σ[Iyy_i + m_i((x_i−x_axle)²+(z_i−z_axle)²)]`.
@@ -102,16 +111,17 @@ COM là trung bình có trọng số khối lượng của cả 7 vật rắn.
 
 | Tư thế | COM tương đối trục bánh `(x,z)`, m | COM cao trên sàn, m | I quanh trục bánh, kg·m² |
 | --- | --- | --- | --- |
-| CAD zero | `(-0.006677692,0.036322180)` | 0,076322180 | 0,012782763 |
-| Spawn duỗi | `(-0.004950027,0.158262549)` | 0,198262549 | 0,100319790 |
+| CAD zero | `(-0.006971905,0.035895687)` | 0,075895687 | 0,010378231 |
+| Spawn duỗi | `(-0.005187031,0.157019169)` | 0,197019169 | 0,094323086 |
 
-Góc cân bằng tĩnh dự đoán ở spawn khoảng +1,7915° theo trục +Y;
+Góc cân bằng tĩnh dự đoán ở spawn khoảng -1,8920° theo trục +Y;
 đây là dự đoán từ COM ước lượng, không phải góc đã đo trên robot.
 Đã loại phần quán tính mặc định `0.0128 kg·m²` từng bị cộng thêm vào tổng
 trong `WholeBodyModel::compute()`; kiểm tra độc lập với MuJoCo bắt được lỗi này.
 
 59 mesh CAD là visual; 28 chi tiết thân/chân cũng dùng làm convex collider.
-Không mesh nào tự suy ra khối lượng; bảy inertial link vẫn khai báo riêng.
+Khối lượng module được gán từ phân bổ người dùng và tích phân thể tích STEP;
+bảy rigid links vẫn khai báo inertial tổng hợp riêng.
 Việc gán mỗi chi tiết vào một nhóm vật rắn được kiểm tra không trùng/không thiếu
 trong generator; STEP không chứa mates xác nhận cây động học này.
 
@@ -185,10 +195,14 @@ nhiễu Iq hoặc trễ CAN trong runner này. `SimGds68Joint` MIT cũ không ph
 actuator chân của GIM V3 runner.
 
 **Hai bánh:** V3 đưa lệnh tốc độ cho `SimBl4820Wheel`; chưa có bù ΔI cho bánh.
-Thông số hiện hành: torque cap=0,13 N·m; speed-servo gain=3 N·m/(rad/s);
+Mô-men liên tục là 0,13 N·m, mô-men đỉnh là 0,15 N·m; sim giữ giới hạn lệnh
+đỉnh 0,15 N·m, không hạ trần để giới hạn ở mức liên tục. Mô phỏng chưa có
+mô hình nhiệt nên không tự giảm mô-men khi chạy lâu ở mức đỉnh. Speed-servo
+gain=3 N·m/(rad/s);
 torque lag nội bộ=1 ms; torque-enable settle=20 ms; ma sát viscous nội bộ=0,001
 N·m·s/rad; Coulomb nội bộ=0,006 N·m. Tham số đáp ứng/ma sát này còn ước lượng.
-MuJoCo bổ sung wheel-bearing damping=0,002 N·m·s/rad.
+MuJoCo bổ sung wheel-bearing damping=0,002 N·m·s/rad và frictionloss trục
+bánh=0,01 N·m theo giá trị người dùng chỉ định.
 Runner bổ sung **command dead time 50 ms + speed-reference lag 75 ms**;
 lag tốc độ không được diễn giải thành lag mô-men. Các giá trị dựa vào các
 ước lượng đáp ứng motor trước đây, còn khác nhau giữa các log; chưa xác định
@@ -200,15 +214,17 @@ Các hinge còn có `armature=0.0001 kg·m²`, là quán tính rotor quy đổi 
 lượng**. Nó tham gia ma trận quán tính khớp, không cộng vào tổng khối lượng
 hoặc bảng quán tính vật rắn/COM ở mục 3. Stiffness thụ động bằng 0.
 
-Trọng lượng tổng ở g=9,81 là 30,6072 N. Nếu thân không chạm sàn và chia tải
-đều: mỗi bánh có N≈15,3036 N, giới hạn bám μN≈12,2429 N. Torque cap bánh
-0,13 N·m tương ứng lực 3,25 N/bánh; tổng lực danh nghĩa tối đa 6,50 N và
-gia tốc tịnh tiến lý tưởng khoảng 2,0833 m/s², trước quán tính bánh và ma sát.
-Profile GIM đã thay giới hạn LQR 8 m/s² kế thừa bằng **2,0833 m/s²**,
+Trọng lượng tổng ở g=9,81 là 29,6262 N. Nếu thân không chạm sàn và chia tải
+đều: mỗi bánh có N≈14,8131 N, giới hạn bám μN≈11,8505 N. Torque cap bánh
+0,15 N·m tương ứng lực 3,75 N/bánh; tổng lực danh nghĩa tối đa 7,50 N và
+gia tốc tịnh tiến lý tưởng khoảng 2,4834 m/s², trước quán tính bánh và ma sát.
+Profile GIM giới hạn LQR ở **2,4834 m/s²**,
 lấy min giữa lực bám và torque cap trên. Motor bánh là giới hạn chính trong
 ước tính này. LQR dùng chiều dài hiệu dụng `I_axle/(m × COM_distance)`;
 khoảng bảng gain là 0,035–0,240 m, không clamp tư thế duỗi ở 0,200 m nữa.
-Torque cap bánh vẫn là giả định; chưa được xác nhận từ thông số BL4820 mới.
+Torque cap 0,15 N·m là giới hạn trục tối đa do người dùng cung cấp. Bảng
+động cơ tham khảo ghi mô-men liên tục 0,130 N·m; mô-men đỉnh 0,150 N·m theo
+thông tin người dùng cung cấp.
 
 ## 6. Tích phân, cảm biến và vòng đời
 

@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import subprocess
 
-from native_runner_contract_test import fields
+from gim_runner_contract_test import fields
 
 
 def check_cad_contact(path, view, fallen=False):

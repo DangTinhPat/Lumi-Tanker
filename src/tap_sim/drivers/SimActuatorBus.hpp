@@ -11,17 +11,12 @@
 #include "robot_hal/MotorMapping.hpp"
 #include "robot_hal/MotorTransport.hpp"
 
-// Fake drivers standing in for the real GDS68 (leg) and BL4820M12 (wheel)
-// hardware in the native sim. Native runner code must talk to these the same
-// way it will eventually talk to the real bus: pack a MotorFrameCodec frame,
-// hand it the raw bytes, ask for the resulting torque. No shortcut path may
-// read MotorCommand fields directly - see docs/MOTOR_HAL_PLAN.md section 4.
-//
-// These classes are MuJoCo-agnostic (plain floats in, floats out); the sim
-// integration lives in native_runner.cpp.
+// Wheel driver model used by the GIM V3 runner. SimGds68Joint is retained as a
+// legacy MIT-frame test fixture; GIM leg torque uses the V3 current-difference
+// actuator path instead. These models use plain values and do not depend on MuJoCo.
 namespace robot_control {
 
-// Fake GDS68: models the state machine (IDLE/CLOSED_LOOP) and the onboard
+// Legacy GDS68 MIT test fixture: models the state machine (IDLE/CLOSED_LOOP) and the onboard
 // MIT PD loop, matching GDS68_DRIVER.md §4's own formula:
 //   T = Kp*(Pos_target - Pos) + Kd*(Vel_target - Vel) + T_ff
 // evaluated against whatever position/velocity the CALLER passes in -
@@ -107,21 +102,17 @@ class SimGds68Joint {
 //  - Torque Disable coasts (zero torque), it is not a hold-at-zero-speed
 //    brake (§6 quickstart / §8 appendix).
 // The internal velocity->torque servo's real dynamics are unmeasured
-// (WHEEL §8 appendix); this is a placeholder bounded first-order model,
-// flagged pending a real bench measurement - see docs/MOTOR_HAL_PLAN.md
-// Phase 6.
+// (WHEEL §8 appendix); this bounded first-order model is provisional. See
+// docs/GIM_SIM_PHYSICS_SPEC.md for the active simulation assumptions.
 class SimBl4820Wheel {
  public:
   struct Config {
     std::uint8_t motor_id = 1;
-    float max_torque_nm = 0.13F;
+    float max_torque_nm = 0.15F;
     // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
     // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
-    // picked stiff enough to saturate at a small velocity error (~43 mrad/s)
-    // so the servo behaves close to the old direct torque/acceleration path
-    // for the small per-tick corrections MPC actually issues, rather than
-    // lagging behind them. Flagged pending a real bench measurement, see
-    // docs/MOTOR_HAL_PLAN.md Phase 6.
+    // Provisional response fit for small wheel-speed commands. Hardware motor
+    // bandwidth has not been measured; see docs/GIM_SIM_PHYSICS_SPEC.md.
     float velocity_servo_gain_nm_per_rad_s = 3.0F;
     float settle_s = 0.020F;
     float torque_lag_s = 0.001F;
@@ -231,7 +222,7 @@ class SimMotorTransport final : public motor_transport::Transport {
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[1].node_id, 3.0F}),
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[2].node_id, 3.0F}),
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[3].node_id, 3.0F})}},
-        wheels_{{SimBl4820Wheel({1, 0.13F}), SimBl4820Wheel({1, 0.13F})}} {}
+        wheels_{{SimBl4820Wheel({1, 0.15F}), SimBl4820Wheel({1, 0.15F})}} {}
 
   bool sendCan(std::uint16_t id,
                const motor_frame::MitBytes& data) noexcept override {
@@ -283,7 +274,7 @@ class SimMotorTransport final : public motor_transport::Transport {
       legs_[i] = SimGds68Joint(
           {motor_mapping::kVerifiedLegCanBindings[i].node_id, 3.0F});
     }
-    for (auto& wheel : wheels_) wheel = SimBl4820Wheel({1, 0.13F});
+    for (auto& wheel : wheels_) wheel = SimBl4820Wheel({1, 0.15F});
     can_rx_head_ = 0;
     can_rx_count_ = 0;
     uart_rx_head_.fill(0);

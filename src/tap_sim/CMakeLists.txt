@@ -38,16 +38,7 @@ endif()
 if(NOT TARGET tap_fw)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src_fw tap_fw_build)
 endif()
-
-add_executable(tap_mujoco_native native/native_runner.cpp)
-target_compile_features(tap_mujoco_native PRIVATE cxx_std_17)
-target_compile_options(tap_mujoco_native PRIVATE -Wall -Wextra -Wpedantic)
-target_include_directories(tap_mujoco_native PRIVATE
-  "${MUJOCO_ROOT}/include"
-  "${CMAKE_CURRENT_SOURCE_DIR}/drivers")
-target_link_libraries(tap_mujoco_native PRIVATE
-  tap_control_core tap_control_hal "${MUJOCO_LIBRARY}" Threads::Threads dl)
-set_target_properties(tap_mujoco_native PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
+set_target_properties(tap_control_core tap_fw PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_executable(tap_mujoco_gim_v3 native/gim_v3_runner.cpp)
 target_compile_features(tap_mujoco_gim_v3 PRIVATE cxx_std_17)
@@ -59,22 +50,16 @@ target_link_libraries(tap_mujoco_gim_v3 PRIVATE
   tap_fw tap_control_core tap_control_hal "${MUJOCO_LIBRARY}" Threads::Threads dl)
 set_target_properties(tap_mujoco_gim_v3 PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
 
+add_library(tap_v3_balance_bridge SHARED training/v3_balance_bridge.cpp)
+target_compile_features(tap_v3_balance_bridge PRIVATE cxx_std_17)
+target_compile_options(tap_v3_balance_bridge PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(tap_v3_balance_bridge PRIVATE tap_fw tap_control_core)
+set_target_properties(tap_v3_balance_bridge PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
 include(CTest)
 
-install(TARGETS tap_mujoco_native tap_mujoco_gim_v3 RUNTIME DESTINATION bin)
-install(PROGRAMS
-  scripts/mujoco_sensor_actuator_backend.py
-  tests/native_runner_contract_test.py
-  tests/native_runner_lifecycle_test.py
-  tests/native_drive_stop_guard_test.py
-  tests/native_stop_balance_test.py
-  tests/native_leg_speed_loop_test.py
-  tests/native_neutral_balance_test.py
-  tests/native_assist_mechanism_test.py
-  tests/native_yaw_station_test.py
-  tests/native_posture_transition_test.py
-  tests/native_dance_skill_test.py
-  DESTINATION lib/${PROJECT_NAME})
+install(TARGETS tap_mujoco_gim_v3 RUNTIME DESTINATION bin)
 
 if(BUILD_TESTING)
   enable_testing()

@@ -317,10 +317,6 @@ class NativeDashboard:
         self.logbox.see("end")
         self._last_log_text = log_text
 
-    def _load_pose_curves(self):
-        return {"natural_enable_pose": SPAWN_POSE,
-                "rest_pose": SPAWN_POSE, "tables": {}}
-
     def _natural_enable_pose(self):
         """Return the extended spawn pose in CAD joint coordinates."""
         return SPAWN_POSE
