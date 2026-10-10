@@ -216,6 +216,10 @@ class NativeDashboard:
                    command=lambda: self.start_dance(1.0), state="disabled").pack(side="left", padx=2)
         ttk.Button(skill, text="Múa ↺",
                    command=lambda: self.start_dance(-1.0), state="disabled").pack(side="left", padx=2)
+        self.jump_status = tk.StringVar(value="")
+        ttk.Button(skill, text="Nhảy 12 cm", command=self.start_jump).pack(side="left", padx=2)
+        ttk.Label(skill, textvariable=self.jump_status, style="Card.TLabel").pack(
+            side="left", padx=(4, 8))
         ttk.Button(skill, text="Dừng skill",
                    command=self.stop_skill, state="disabled").pack(side="left", padx=2)
 
@@ -713,6 +717,17 @@ class NativeDashboard:
             self._show_waiting = True
             self._posture_quiet_since = None
             self.show_started_s = None
+
+    def start_jump(self):
+        """JUMP: the controller plans the dip, thrust, tuck and landing from its own FK/IK."""
+        if not self.backend.running or not self.enabled or self.estop:
+            self.jump_status.set("Cần Start SIM và ENABLE trước")
+            return
+        self.stop_skill()
+        self.drive = (0.0, 0.0)
+        self._cancel_pending_posture()
+        self.backend.command_jump()
+        self.jump_status.set("Đã gửi JUMP (tự nhún, nhảy, co/duỗi chân, tiếp đất)")
 
     def stop_skill(self):
         if self.vision_process.running:

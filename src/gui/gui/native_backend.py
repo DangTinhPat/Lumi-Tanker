@@ -44,6 +44,7 @@ class NativeBackend:
 
     def runner_path(self) -> Path:
         candidates = [
+            self.root / "build/native/bin/tap_mujoco_gim_v3",
             self.root / "build/bin/tap_mujoco_gim_v3",
             self.root / "build/tap_mujoco_gim_v3/tap_mujoco_gim_v3",
         ]
@@ -71,9 +72,14 @@ class NativeBackend:
                 raise RuntimeError(f"GIM dynamic model is missing: {model}")
             self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._ready.clear()
+            command = [str(runner), "--model", str(model), "--rate", str(self.rate_hz),
+                       "--command-port", str(self._command_port), "--realtime"]
+            # v3.5 jump tuning override for trials: TAP_JUMP_SPEC="key=val,key=val,..."
+            # (keys: applyJumpSpec in gim_v3_runner.cpp).
+            if os.environ.get("TAP_JUMP_SPEC"):
+                command += ["--jump", os.environ["TAP_JUMP_SPEC"]]
             self.process = subprocess.Popen(
-                [str(runner), "--model", str(model), "--rate", str(self.rate_hz),
-                 "--command-port", str(self._command_port), "--realtime"],
+                command,
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1)
             self._reader = threading.Thread(target=self._read_output, daemon=True)
@@ -237,6 +243,10 @@ class NativeBackend:
         """Request a symmetric FK height target; C++ owns the inverse FK."""
         if math.isfinite(body_height_m):
             self.send(f"HEIGHT {body_height_m:.7g}")
+
+    def command_jump(self) -> None:
+        """v3.5 vertical jump; the controller refuses it away from the crouch height."""
+        self.send("JUMP")
 
     def command_dance(self, direction: float = 1.0) -> None:
         if math.isfinite(direction):

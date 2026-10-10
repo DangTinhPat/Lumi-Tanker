@@ -392,6 +392,16 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     out_.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
                                 "max 12 rad/s, no balance loop)"
                               : "V3 START");
+  } else if (std::strcmp(line, "JUMP") == 0) {
+    // v3.5 vertical jump. Default OFF (SET jump 1); only while balancing.
+    if (!ctrl_.config().jump.enabled) {
+      out_.println("V3 JUMP refused: SET jump 1 first (v3.5 jump is off by default)");
+    } else if (ctrl_.state() != V3Controller::State::Balancing) {
+      out_.println("V3 JUMP refused: not balancing");
+    } else {
+      jump_pending_ = true;
+      out_.println("V3 JUMP");
+    }
   } else if (std::strcmp(line, "GO") == 0) {
     // Operator flow: GO is pressed with the robot on the stand. It only arms:
     // legs lock, wheels hold, and the balance loop engages by itself once the
@@ -624,6 +634,32 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "leg_kp")) legs_.setJointGains(std::clamp(v, 0.0F, tap_fw::board::kLegMaxKpNmPerRad), legs_.config().joint_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setJointGains(legs_.config().joint_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else if (!std::strcmp(key, "iqcomp")) legs_.setCurrentCompGain(v);
+    else if (!std::strcmp(key, "jump")) {
+      // The planner takes tens of ms (FK/IK scans): only while the balance loop is off.
+      if (v >= 0.5F && ctrl_.state() != V3Controller::State::Idle &&
+          ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET jump refused: DISABLE first (the jump planner must not run inside the balance loop)");
+        return;
+      }
+      ctrl_.config().jump.enabled = v >= 0.5F;
+      if (ctrl_.config().jump.enabled) {
+        const auto& plan = ctrl_.prepareJump();
+        out_.printf("V3 JUMP plan: %s | dip to %.1f mm, lift-off %.2f m/s, CoM rise %.0f mm, tuck lift %.1f mm, "
+                    "flight %.0f ms, predicted wheel clearance %.1f mm\n",
+                    plan.reason, 1000.0F * plan.crouch_height_m, plan.takeoff_speed_m_s,
+                    1000.0F * plan.com_rise_m, 1000.0F * plan.predicted_tuck_lift_m,
+                    1000.0F * plan.flight_time_s,
+                    1000.0F * plan.predicted_clearance_m);
+      }
+    }
+    else if (!std::strcmp(key, "jumptarget")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET jumptarget refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().jump.planner.target_clearance_m = std::clamp(v, 0.02F, 0.15F);
+      if (ctrl_.config().jump.enabled) (void)ctrl_.prepareJump();
+    }
     else {
       out_.printf("V3 SET unknown key '%s'\n", key);
       return;
@@ -1090,6 +1126,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const bool ready_now = ctrl_.state() == V3Controller::State::Ready;
   cmd.go = go_pending_ || (tilt_test_ && ready_now);
   go_pending_ = false;
+  cmd.jump = jump_pending_;
+  jump_pending_ = false;
 
   V3Controller::Input in{};
   in.now_us = now_us;
@@ -1158,6 +1196,12 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   const std::uint64_t p0 = nowUs();
   const auto out = ctrl_.update(in, cmd);
+  if (out.jump_refused != 0) {
+    out_.printf("V3 JUMP refused: %s\n",
+                out.jump_refused == 1 ? "tilted or held"
+                : out.jump_refused == 3 ? "no plan (SET jump 1 while disabled)"
+                                        : "legs still moving (stand still first)");
+  }
   const std::uint64_t p1 = nowUs();
   prof(0, p1 - p0);
   prof_upd_sum_ += static_cast<std::uint32_t>(p1 - p0);
@@ -1204,14 +1248,20 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand) rec_cmd_ = recExcitation(now_us);
     // The height pose plus the tier-2 hip offset (0 unless trunk is on and
     // balancing); the stand tests drive the bare pose.
-    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
-    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
+    // During a v3.5 jump the controller's output carries the leg path.
+    const bool jumping = !stand && ctrl_.jump().running();
+    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad
+                    : jumping ? out.leg_hip_offset_rad : ctrl_.hipCommand();
+    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad
+                     : jumping ? out.leg_knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
     if (stand && rec_kind_ == RecKind::KneeStand) {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad,
                             tap_fw::v3::LegHeight::kKneeMaxRad);
     }
     legs_.setOffsets(hip_cmd, knee_cmd);
+    legs_.setImpedanceScale(stand ? 1.0F : out.leg_hip_kp_scale, stand ? 1.0F : out.leg_hip_kd_scale,
+                            stand ? 1.0F : out.leg_kp_scale, stand ? 1.0F : out.leg_kd_scale);
     // Roll: per-side offsets (zero unless SET roll 1 and balancing).
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,

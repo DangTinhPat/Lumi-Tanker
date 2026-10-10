@@ -7,6 +7,7 @@
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
 #include "robot_control/LqrActuationPredictor.hpp"
+#include "tap_fw/v3/JumpSequence.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
@@ -497,6 +498,8 @@ class V3Controller {
     #endif
     Tier tier{};
     Roll roll;
+    // v3.5 vertical jump (JumpSequence.hpp). Off by default.
+    JumpSequence::Config jump;
     WheelPredict wheel_pred;
     Height height{};
     Engage engage{};
@@ -658,6 +661,7 @@ class V3Controller {
     bool start = false;       // edge
     bool go = false;          // edge: engage balancing now (from Ready)
     bool disable = false;     // level: stop everything
+    bool jump = false;        // edge: start the v3.5 jump (Config::jump.enabled)
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
     // Requested hip-axle height [m]; <= 0 keeps the current request.
@@ -682,6 +686,13 @@ class V3Controller {
     std::array<float, 2> leg_roll_hip_rate{};
     std::array<float, 2> leg_roll_knee_rate{};
     bool legs_moving = false;
+    // Leg joint impedance scale (jump thrust / landing); 1 = normal.
+    float leg_kp_scale = 1.0F;
+    float leg_kd_scale = 1.0F;           // knees
+    float leg_hip_kp_scale = 1.0F;       // hips stay stiff to keep the CoM over the axle
+    float leg_hip_kd_scale = 1.0F;
+    int jump_phase = 0;         // JumpSequence::Phase, for the log
+    int jump_refused = 0;       // one tick: 1 = tilted/held, 3 = no plan, 4 = legs still moving
     const char* fault = nullptr;  // set on the tick a fault is raised
   };
 
@@ -742,6 +753,21 @@ class V3Controller {
   [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
   [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  [[nodiscard]] const JumpSequence& jump() const noexcept { return jump_; }
+  // Plans the jump from Config::jump.planner (FK/IK, mass, torque budget). Takes tens of
+  // milliseconds on the ESP32, so call it when the target changes, never inside the
+  // control tick; JUMP is refused until a plan exists.
+  const JumpPlan& prepareJump() noexcept {
+    jump_plan_ = planJump(config_.jump.planner);
+    return jump_plan_;
+  }
+  [[nodiscard]] const JumpPlan& jumpPlan() const noexcept { return jump_plan_; }
+  [[nodiscard]] float jumpVz() const noexcept { return jump_vz_f_; }
+  [[nodiscard]] const BodyMomentum& jumpMomentum() const noexcept { return jump_momentum_; }
+  [[nodiscard]] float jumpTouchdownOffset() const noexcept { return jump_align_; }
+  [[nodiscard]] float jumpTouchdownTarget() const noexcept { return jump_td_target_; }
+  [[nodiscard]] float jumpTouchdownPredicted() const noexcept { return jump_td_pred_; }
+  [[nodiscard]] float jumpAz() const noexcept { return jump_az_f_; }
   // Roll and coordinated trunk motion both need knee extension in reserve.
   // START/Ready still hold the exact power-up pose; this ceiling applies
   // only to the subsequent supported height profile.
@@ -883,6 +909,21 @@ class V3Controller {
   float height_speed_m_s_ = 0.0F;  // signed hip-axle speed, + = up
   float height_accel_m_s2_ = 0.0F; // signed acceleration of the height profile
   LegPose pose_{};
+  JumpSequence jump_{};
+  JumpPlan jump_plan_{};
+  JumpSequence::Phase jump_prev_phase_ = JumpSequence::Phase::Idle;
+  float jump_hip0_ = 0.0F, jump_knee0_ = 0.0F, jump_com_angle_ = 0.0F;  // at the jump start
+  float jump_pitch0_ = 0.0F;
+  float jump_align_ = 0.0F;       // hip offset from the zero-reaction curve that the touchdown law commands (flight)
+  BodyMomentum jump_momentum_{};   // angular momentum / inertia / CoM height from the encoders and the gyro
+  float jump_l_f_ = 0.0F;         // angular momentum in the air (constant; low-passed)
+  float jump_td_target_ = 0.0F;   // solved hip offset (diagnostic)
+  float jump_td_pred_ = 0.0F;     // virtual pitch predicted at the touchdown for that offset (diagnostic)
+  bool jump_td_valid_ = false;    // the touchdown law was seeded this flight
+  float jump_az_f_ = 0.0F;
+  float jump_vz_f_ = 0.0F;        // filtered CoM vertical speed (FK of the leg encoders)
+  float jump_land_angle_ = 0.0F;  // CoM line angle of the adopted standing pose
+  float jump_last_hip_ = 0.0F, jump_last_knee_ = 0.0F;  // last leg command sent by the jump
   float chain_prev_rad_ = 0.0F;
   float chain_rate_f_ = 0.0F;
   bool chain_init_ = false;
@@ -1092,6 +1133,7 @@ class V3Controller {
   void engageBalance(const Input& in, float seed);
   void heldRezero(const Input& in);
   [[nodiscard]] float releaseBalance(const Input& in) const;
+  void applyJump(const Input& raw, const Input& in, const Command& cmd, Output& out);
   void updateLearnedTrim(const Input& in, float ex, float current_trim_rad);
   float learned_trim_rad_ = 0.0F;
   bool learned_trim_valid_ = false;

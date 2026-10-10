@@ -104,10 +104,11 @@ bool LegLock::sendTargets(std::uint64_t now_us,
     // Torque mode uses output-joint Nm. A stale Iq sample suppresses the command.
     const float target_rad = turns * kTwoPi / config_.gear_ratio;
     const float target_rate = velFfTurns(i) * kTwoPi / config_.gear_ratio;
-    const float requested_nm = gravity_torque_nm[i] + config_.joint_kp_nm_per_rad *
+    const float kp = config_.joint_kp_nm_per_rad * kp_scale_[i % 2U];
+    const float kd = config_.joint_kd_nm_s_per_rad * kd_scale_[i % 2U];
+    const float requested_nm = gravity_torque_nm[i] + kp *
             (target_rad - feedback_position_rad_[i]) +
-        config_.joint_kd_nm_s_per_rad *
-            (target_rate - feedback_velocity_rad_s_[i]);
+        kd * (target_rate - feedback_velocity_rad_s_[i]);
     const auto current = currentTorqueCommand(requested_nm, feedback_current_a_[i],
         feedback_valid_[i], config_.kt_nm_per_a, config_.current_limit_a,
         config_.current_comp_gain);

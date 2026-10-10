@@ -11,10 +11,10 @@ requires an explicit request from the user.
 
 | | Robot firmware (v3.3) | Native simulator |
 | --- | --- | --- |
-| Purpose | Balances and drives the physical RB R1 | MuJoCo model + GUI for inspection and experiments |
-| Controller | `V3Controller` (`src_fw/src/v3`) | `EmbeddedController` (`src/tap_control/core`) |
+| Purpose | Balances and drives the physical RB v2 | MuJoCo model + GUI for inspection and experiments |
+| Controller | `V3Controller` (`src_fw/src/v3`) | `V3Controller` in `tap_mujoco_gim_v3`; `EmbeddedController` (`src/tap_control/core`) in the older `tap_mujoco_native` |
 | Runs on | ESP32-S3 N16R8, FreeRTOS | Host PC, MuJoCo 3 |
-| Build | PlatformIO env `esp32-s3-v3` | CMake target `tap_mujoco_native` (`TAP_BUILD_SIMULATOR=ON`, needs MuJoCo) |
+| Build | PlatformIO env `esp32-s3-v3` | CMake target `tap_mujoco_gim_v3` (`TAP_BUILD_SIMULATOR=ON`, needs MuJoCo) |
 | Operator | `tools/tap_serial_control_gui.py` over USB serial | `tools/tap_native_gui.py` over line IPC |
 
 **The native simulator does not run `V3Controller`.** It drives the older
@@ -45,8 +45,8 @@ src/tap_control/
                        TunedConfig, EmbeddedController and its native-only pieces
   hal/                 MotorFrameCodec, MotorMapping, MotorTransport (GDS68 CAN, BL4820 UART)
   apps/, tests/        demos and core tests
-src/tap_sim/           MuJoCo runner (native/), MJCF + CAD manifest + PHYSICS.md (model/),
-                       sensor/actuator drivers, model validation scripts
+src/tap_sim/           MuJoCo runner (native/), RB v2 MJCF (`gim_*.xml`) + mass properties + PHYSICS.md (model/),
+                       sensor/actuator drivers, model physics tests
 src/gui/               Tk dashboard + 3-D viewer for the simulator, command router, vision client
 tools/                 serial GUI, log analysis (hip_chatter_stats, hf_vibration_stats,
                        tr_rest_stats, fit_leg_servo), tier-sim helpers, leg-jog bench firmware
@@ -83,10 +83,11 @@ Fixed conventions:
 - Joint order `[LH, LK, LW, RH, RK, RW]`; native CAD axes are `+Y` on both
   sides and are not mirrored. Driver sign conversion happens only in
   `MotorMapping.hpp`.
-- Wheel radius `0.040 m`, axle spacing `0.309 m` (half-track `0.1545 m`).
-- Mass `4.621 kg` (body 3.371, each thigh 0.296, each shin 0.109, each wheel
-  plus motor 0.220). Mass, CoM and inertia are CAD/BOM estimates; the firmware
-  compensates a measured CoM offset (`SET cdx`). See `src/tap_sim/model/PHYSICS.md`.
+- Wheel radius `0.040 m`, axle spacing `0.2654 m` (half-track `0.1327 m`).
+- Mass `3.12 kg` (body 2.50, each thigh 0.05, each shin tube 0.04, each wheel
+  motor 0.20, each wheel 0.02). Mass, CoM and inertia are CAD/BOM estimates (see
+  `src/tap_sim/model/gim_mass_properties.yaml`); the firmware compensates a
+  measured CoM offset (`SET cdx`). See `src/tap_sim/model/PHYSICS.md`.
 - Height is the hip-to-axle distance, 188.6 mm (legs hanging) down to 78 mm.
 
 ## 4. Firmware v3.3
@@ -137,12 +138,15 @@ phenomena that the 25 Hz trace cannot show.
 
 ## 5. Native simulator
 
-`tap_mujoco_native` loads `src/tap_sim/model/tap_robot.xml` (free-root body,
-seven links, six `+Y` hinge joints, CAD visuals, primitive collisions, one
-MPU6500-like IMU, six encoders). The runner steps physics at 3 kHz (4 kHz stress
+`tap_mujoco_gim_v3` (`src/tap_sim/native/gim_v3_runner.cpp`) loads
+`src/tap_sim/model/gim_dynamic.xml`, the RB v2 (GIM6010-8) model from
+`ROBOT (GIM6010-8).STEP` (free-root body, six `+Y` hinge joints, CAD visuals,
+convex-hull collisions, one MPU6500-like IMU, six encoders), and runs the
+firmware's `V3Controller`. The older `tap_mujoco_native` runner takes its model
+by `--model` and has no checked-in RB v2 default. The runner steps physics at 3 kHz (4 kHz stress
 target) and produces sensor packets at 500 Hz with noise, bias, quantization,
 latency, dropout, actuator lag, torque saturation and friction; leg torque
-feedback can be mocked. Only these sensor packets reach `EmbeddedController`.
+feedback can be mocked. Only these sensor packets reach the controller.
 
 The GUI talks to the child process over line IPC. Commands: `ENABLE`, `DISABLE`,
 `RESET`, `ESTOP`, `CLEAR_ESTOP`, `STOP`, `DRIVE <v> <yaw>`, `POSE <LH> <LK> <RH> <RK>`

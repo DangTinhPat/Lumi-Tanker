@@ -5,7 +5,8 @@ add_library(tap_fw STATIC
   src/MotorFeedback.cpp
   src/v3/LegLock.cpp
   src/v3/V3Controller.cpp
-  src/v3/LegHeight.cpp)
+  src/v3/LegHeight.cpp
+  src/v3/JumpPlanner.cpp)
 target_include_directories(tap_fw PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -60,6 +61,22 @@ if(BUILD_TESTING)
     target_compile_options(v3_physics_tests PRIVATE -UNDEBUG)
   endif()
   add_test(NAME v3_physics_tests COMMAND v3_physics_tests)
+  add_executable(v3_jump_planner_tests tests/v3_jump_planner_tests.cpp)
+  target_link_libraries(v3_jump_planner_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(v3_jump_planner_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(v3_jump_planner_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME v3_jump_planner_tests COMMAND v3_jump_planner_tests)
+  add_executable(v3_jump_tests tests/v3_jump_tests.cpp)
+  target_link_libraries(v3_jump_tests PRIVATE tap_fw)
+  if(MSVC)
+    target_compile_options(v3_jump_tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(v3_jump_tests PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME v3_jump_tests COMMAND v3_jump_tests)
   add_executable(v3_current_torque_tests tests/v3_current_torque_tests.cpp)
   target_link_libraries(v3_current_torque_tests PRIVATE tap_fw)
   if(MSVC)

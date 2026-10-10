@@ -90,6 +90,12 @@ class LegLock {
     config_.joint_kp_nm_per_rad = kp;
     config_.joint_kd_nm_s_per_rad = kd;
   }
+  // Joint impedance scale per joint type (v3.5 jump thrust / soft landing);
+  // 1 = the configured gains. Leg order is MotorIds::leg_can: hips even, knees odd.
+  void setImpedanceScale(float hip_kp, float hip_kd, float knee_kp, float knee_kd) noexcept {
+    kp_scale_ = {hip_kp, knee_kp};
+    kd_scale_ = {hip_kd, knee_kd};
+  }
   void setCurrentCompGain(float gain) noexcept {
     config_.current_comp_gain = std::clamp(gain, 0.0F, 1.0F);
   }
@@ -105,6 +111,8 @@ class LegLock {
   std::array<float, kLegs> feedback_velocity_rad_s_{};
   std::array<float, kLegs> feedback_current_a_{};
   std::array<bool, kLegs> feedback_valid_{};
+  std::array<float, 2> kp_scale_{1.0F, 1.0F};
+  std::array<float, 2> kd_scale_{1.0F, 1.0F};
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};

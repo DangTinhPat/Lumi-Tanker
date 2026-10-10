@@ -78,7 +78,7 @@ implementation runs in simulation:
   are things a real sensor could produce.
 - Design-time constants known in advance from CAD/BOM (mass, CoM, inertia in
   `src/tap_control/core/include/robot_control/GeneratedGeometry.hpp` and
-  `src/tap_sim/model/mesh_inertials.yaml`), the way the robot's designer also
+  `src/tap_sim/model/gim_mass_properties.yaml`), the way the robot's designer also
   knows them. The line is "measured live from the simulator" vs. "known in
   advance from the CAD/BOM".
 
