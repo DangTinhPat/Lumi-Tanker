@@ -512,14 +512,17 @@ void V3Controller::applyJump(const Input& raw, const Input& in, const Command& c
   last_ready_ = jo.ready;
   const bool thrust_started = jo.phase == JumpSequence::Phase::Dip &&
       (jump_prev_phase_ == JumpSequence::Phase::Idle || jump_prev_phase_ == JumpSequence::Phase::Approach);      // the legs start to move: reference pose
+  if (jo.phase == JumpSequence::Phase::Recover && jump_prev_phase_ == JumpSequence::Phase::Land) {
+    jump_return_ = true;                       // stand up to the operator's height in one go
+  }
   jump_prev_phase_ = jo.phase;
   if (thrust_started) {
     jump_hip0_ = ji.nominal_hip_rad;
     jump_knee0_ = ji.nominal_knee_rad;
     jump_com_angle_ = comLine(jump_hip0_, jump_knee0_).angle;
     jump_pitch0_ = raw.pitch_rad;
-    jump_wheel_hold_set_ = false;
     jump_theta0_ = theta_v_;
+    jump_wheel_hold_set_ = false;
     takeoff_.reset();
   }
   if (jo.adopt) {
@@ -2465,6 +2468,7 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
     }
   }
   if (knee_cmd_rad_ == knee_target_rad_) {
+    jump_return_ = false;
     height_speed_m_s_ = 0.0F;
     height_accel_m_s2_ = 0.0F;
     // Keep the delay even on a retry already at the reserved height.
@@ -2498,12 +2502,14 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   // height planner must not integrate that offset back into its own target.
   const auto planned = LegHeight::forKnee(knee_cmd_rad_);
   const float remaining = height_target_m_ - planned.axle_below_hip_m;
-  const float accel = std::max(height_startup_
-      ? std::min(h.accel_m_s2, h.startup_accel_m_s2) : h.accel_m_s2, 1.0e-3F);
-  const float jerk = std::max(height_startup_
-      ? std::min(h.jerk_m_s3, h.startup_jerk_m_s3) : h.jerk_m_s3, 1.0e-3F);
-  const float rate = std::max(height_startup_
-      ? std::min(h.rate_m_s, h.startup_rate_m_s) : h.rate_m_s, 0.0F);
+  // After a jump (from its Recover phase) the legs go back to the operator's height faster.
+  const auto& jc = config_.jump;
+  const float accel = std::max(height_startup_ ? std::min(h.accel_m_s2, h.startup_accel_m_s2)
+      : jump_return_ ? std::max(h.accel_m_s2, jc.return_accel_m_s2) : h.accel_m_s2, 1.0e-3F);
+  const float jerk = std::max(height_startup_ ? std::min(h.jerk_m_s3, h.startup_jerk_m_s3)
+      : jump_return_ ? std::max(h.jerk_m_s3, jc.return_jerk_m_s3) : h.jerk_m_s3, 1.0e-3F);
+  const float rate = std::max(height_startup_ ? std::min(h.rate_m_s, h.startup_rate_m_s)
+      : jump_return_ ? std::max(h.rate_m_s, jc.return_rate_m_s) : h.rate_m_s, 0.0F);
   const float direction = std::copysign(1.0F, remaining);
   const float max_speed = rate * quality;
   // Reserve enough speed headroom to ramp a positive acceleration back to

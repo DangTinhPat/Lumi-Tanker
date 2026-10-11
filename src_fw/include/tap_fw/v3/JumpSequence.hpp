@@ -81,12 +81,16 @@ class JumpSequence {
     float hop_accel_m_s2 = 0.6880F;        // forward plan limits while hopping (the operator's plan uses 0.3 / 1.0):
     float hop_accel_per_m_s = 0.0F;     // speeding up in the load: hop_accel + this x hop speed
     float hop_decel_m_s2 = 0.9287F;        // braking after the touchdown
-    float hop_jerk_m_s3 = 5.8259F;
     // Hop thrust: the CoM line leans by this x hop speed (rad per m/s) while the legs extend - the wheels a
     // few mm behind (or ahead of) the CoM, so the leg force's moment about the CoM trims the angular
     // momentum the thrust from a moving crouch builds (sim: -0.009 N.m.s at 0.3 m/s; the vertical impulse
     // ~4 N.s needs only ~2 mm of offset).
     float hop_thrust_lean_per_m_s = 0.4589F;
+    // A vertical jump that starts the thrust from rest (stand at or below the crouch: no dip) builds the same
+    // backward momentum without the dip's to cancel it (sim, 0.12 m stand: the body turned back 0.37 rad in
+    // the air and fell); its CoM line leans by this in the thrust.
+    float rest_thrust_lean_rad = 0.15F;
+    float hop_jerk_m_s3 = 5.8259F;
     float forward_speed_max_m_s = 0.6F;
     bool flight_wheel_match = true;     // hop: in the air the wheels spin at the CoM's horizontal speed
     // The dip is a half-cosine from the current leg height to the dip height; its length
@@ -100,6 +104,7 @@ class JumpSequence {
     float touchdown_accel_m_s2 = 14.0F;  // impact spike ends the flight early
     float flight_fb_delay_s = 0.0489F;  // wheels are off the ground this long after the thrust path ends
     float min_flight_s = 0.15F;       // impact spikes earlier than this are leg motion
+    float touchdown_window_s = 0.05F; // ... and earlier than this before the predicted touchdown
     float land_lead_s = 0.0164F;      // compliance starts this much before the plan's touchdown
     float land_kp_scale = 0.3362F;    // soft knees: the landing is a damped spring
     float land_kd_scale = 1.8836F;
@@ -109,6 +114,13 @@ class JumpSequence {
     float land_wait_s = 0.0689F;      // legs compliant, wheels free: wait this long for the impact
     float land_s = 0.3801F;           // total compliant time before the impedance recovers
     float recover_s = 0.35F;          // impedance back to nominal
+    // From the Recover phase on, the height planner takes the legs back from the touchdown pose (the legs
+    // extend only ~80% before the touchdown, so it is lower than the stand) to the operator's height this
+    // fast instead of its normal 0.025 m/s: one continuous stand-up instead of a quick rise to the
+    // touchdown pose and a slow second one (~1 s). The Land phase keeps the normal rate (tuned impact).
+    float return_rate_m_s = 0.08F;
+    float return_accel_m_s2 = 0.4F;
+    float return_jerk_m_s3 = 4.0F;
     float max_pitch_rad = 0.12F;      // refuse to start beyond this (error from the balance angle)
     float abort_pitch_rad = 1.0F;     // abort the thrust softly beyond this
     // Hip feedback on the body pitch (rad of hip per rad / per rad/s) while the wheels push (dip, thrust).
@@ -276,8 +288,11 @@ class JumpSequence {
           }
         }
         const float land_at = flight_.flight_time_s + config_.flight_delay_s - config_.land_lead_s;
+        // An IMU spike ends the flight only near the predicted touchdown: the legs extending in the air
+        // also spike it (sim, 0.127 m stand: Land 0.15 s early, the soft knees folded flat at the impact).
         if (t_ >= land_at ||
-            (t_ >= config_.min_flight_s && in.accel_norm_m_s2 > config_.touchdown_accel_m_s2)) {
+            (t_ >= std::max(config_.min_flight_s, land_at - config_.touchdown_window_s) &&
+             in.accel_norm_m_s2 > config_.touchdown_accel_m_s2)) {
           enter(Phase::Land);
           adopt_pending_ = true;   // the flight pose becomes the standing pose
           touched_ = false;
@@ -400,7 +415,10 @@ class JumpSequence {
       if (phase_ == Phase::Dip) out.lean = minJerkShape(t_ / std::max(dip_time_, 0.05F));
       else if (phase_ == Phase::Thrust || phase_ == Phase::Flight) out.lean = 1.0F;
     }
-    if (phase_ == Phase::Thrust) out.thrust_lean_rad = config_.hop_thrust_lean_per_m_s * hop_v_;
+    if (phase_ == Phase::Thrust) {
+      out.thrust_lean_rad = hop_v_ != 0.0F ? config_.hop_thrust_lean_per_m_s * hop_v_
+                          : dip_time_ <= 0.0F ? config_.rest_thrust_lean_rad : 0.0F;
+    }
     if (phase_ == Phase::Idle && !braking_ && !begin_pending_) hop_v_ = 0.0F;
     return out;
   }

@@ -32,6 +32,9 @@ class NativeBackend:
         self.process: Optional[subprocess.Popen[str]] = None
         self.lines: queue.Queue[str] = queue.Queue(maxsize=256)
         self.telemetry: Dict[str, str] = {}
+        # TAP_SIM_LOG=<file>: append the telemetry (STATE) and the commands sent, for offline analysis.
+        log_path = os.environ.get("TAP_SIM_LOG")
+        self._sim_log = open(log_path, "a", buffering=1) if log_path else None
         self.telemetry_received_monotonic_s = 0.0
         self.view: Dict[str, str] = {}
         self.log = deque(maxlen=200)
@@ -173,6 +176,8 @@ class NativeBackend:
                 break
             count += 1
             if line.startswith("STATE|"):
+                if self._sim_log is not None:
+                    self._sim_log.write(line + "\n")
                 self.telemetry = self._parse(line)
                 self.telemetry_received_monotonic_s = time.monotonic()
             elif line.startswith("VIEW|"):
@@ -185,6 +190,8 @@ class NativeBackend:
         return count
 
     def send(self, command: str) -> None:
+        if self._sim_log is not None:
+            self._sim_log.write(f"CMD|{command}|t={self.telemetry.get('t', '')}\n")
         process = self.process
         if process is None or process.poll() is not None:
             return

@@ -227,6 +227,8 @@ class GimV3Runner {
       else if (key == "to_tau") jump.takeoff.lean_tau_s = v;
       else if (key == "to_sign") jump.takeoff.sign = v;
       else if (key == "to_wl") jump.takeoff.momentum_weight = v;
+      else if (key == "thrust_lean") jump.hop_thrust_lean_per_m_s = v;
+      else if (key == "rest_lean") jump.rest_thrust_lean_rad = v;
       else if (key == "hop_lean") jump.hop_lean_rad = v;
       else if (key == "hop_stop") jump.hop_stop_s = v;
       else if (key == "run_up") jump.hop_run_up = v > 0.5F;
@@ -235,8 +237,8 @@ class GimV3Runner {
       else if (key == "ready_time") jump.ready_time_s = v;
       else if (key == "hop_gimbal") jump.hop_gimbal = v;
       else if (key == "appr_settle") jump.approach_settle_s = v;
-      else if (key == "thrust_lean") jump.hop_thrust_lean_per_m_s = v;
       else if (key == "ready_first") jump.ready_before_drive = v >= 0.5;
+      else if (key == "td_window") jump.touchdown_window_s = v;
       else if (key == "appr_tol") jump.approach_tolerance_m_s = v;
       else if (key == "hop_acc1") jump.hop_accel_per_m_s = v;
       else if (key == "hop_scale") jump.hop_speed_scale = v;

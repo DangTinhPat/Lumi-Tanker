@@ -212,20 +212,26 @@ void eventsFireOnce() {
   assert(adopt == 1 && landed == 1 && wheels_held_in_land && saw_recover && !jump.running());
 }
 
-void impactEndsTheFlightEarlyOnlyAfterMinFlight() {
+void impactEndsTheFlightEarlyOnlyNearTheTouchdown() {
+  // An IMU spike ends the flight only within touchdown_window_s of the planned touchdown (the legs
+  // extending in the air spike it too) and after min_flight_s.
   const JumpPlan plan = planJump({});
   auto cfg = enabled();
-  cfg.flight_delay_s = 0.5F;       // plan landing far away, so only the spike can end it
   cfg.min_flight_s = 0.10F;
+  cfg.touchdown_window_s = 0.05F;
   JumpSequence jump(cfg);
   assert(jump.begin(plan));
   (void)dipToThrust(jump);
   while (jump.phase() == Phase::Thrust) (void)jump.update(inputAt(kStand));
+  const float land_at = jump.flightPlan().flight_time_s + cfg.flight_delay_s - cfg.land_lead_s;
   float t = 0.0F;
-  while (t < 0.09F) { assert(jump.update(inputAt(kStand, 40.0F)).phase == Phase::Flight); t += kDt; }
+  while (t < land_at - cfg.touchdown_window_s - kDt) {
+    assert(jump.update(inputAt(kStand, 40.0F)).phase == Phase::Flight);   // spikes ignored mid-air
+    t += kDt;
+  }
   bool landed = false;
-  while (t < 0.3F && !landed) { landed = jump.update(inputAt(kStand, 40.0F)).phase == Phase::Land; t += kDt; }
-  assert(landed && t < 0.2F);
+  while (t < land_at && !landed) { landed = jump.update(inputAt(kStand, 40.0F)).phase == Phase::Land; t += kDt; }
+  assert(landed && t < land_at - 0.5F * cfg.touchdown_window_s);
 }
 
 void abortsSoftlyAndNeverRunsWithoutBalancing() {
@@ -369,7 +375,7 @@ int main() {
   runUpHopWaitsForTheSpeedThenDipsAndBrakesAtTheTouchdown();
   hopDefaultsAndVerticalJump();
   eventsFireOnce();
-  impactEndsTheFlightEarlyOnlyAfterMinFlight();
+  impactEndsTheFlightEarlyOnlyNearTheTouchdown();
   abortsSoftlyAndNeverRunsWithoutBalancing();
   std::puts("v3 jump tests passed");
   return 0;

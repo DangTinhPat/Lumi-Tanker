@@ -951,15 +951,16 @@ class V3Controller {
   JumpSequence jump_{};
   AirborneEstimator aac_est_{};
   FlightAttitude flight_att_{};
-  TakeoffMomentum takeoff_{};
-  TakeoffMomentum::Output takeoff_state_{};
   std::array<float, 2> jump_wheel_hold_{};
   bool jump_wheel_hold_set_ = false;
+  TakeoffMomentum takeoff_{};
+  TakeoffMomentum::Output takeoff_state_{};
   float jump_theta0_ = 0.0F;            // virtual pitch when the dip started
   float last_ready_ = 0.0F;              // run-up: progress into the ready pose
   bool ready_solved_ = false;
   float ready_dhip_ = 0.0F;              // ready pose: CoM-line lean through the hip
   float ready_knee0_ = 0.0F, ready_knee1_ = 0.0F;   // ready pose: knee command from / to (height state)
+  bool jump_return_ = false;              // after a jump: the height planner uses JumpSequence return_*
   bool jump_height_saved_ = false;        // the operator's height target, kept during a hop's ready pose
   float jump_saved_height_m_ = 0.0F, jump_saved_knee_target_ = 0.0F;
   float jump_com_xw_ = 0.0F;            // CoM world-frame offset from the axle (for its rate)
