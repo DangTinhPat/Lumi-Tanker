@@ -15,8 +15,8 @@ import time
 
 # Native runner hard clamps. These are software ceilings, not validated
 # physical robot operating limits.
-NATIVE_MAX_LINEAR_M_S = 0.5
-NATIVE_MAX_YAW_RAD_S = 0.8
+NATIVE_MAX_LINEAR_M_S = 4.1888   # the wheel's no-load limit (1000 rpm x 0.04 m); the API defaults stay conservative
+NATIVE_MAX_YAW_RAD_S = 1.5   # the controller's own yaw cap (lqr.max_yaw_rate_rad_s)
 WHEEL_TRACK_M = 0.2654
 MAX_DISTANCE_ACTION_M = 5.0
 MAX_TURN_ACTION_RAD = 2.0 * math.pi

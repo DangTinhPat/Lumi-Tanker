@@ -244,9 +244,13 @@ class NativeBackend:
         if math.isfinite(body_height_m):
             self.send(f"HEIGHT {body_height_m:.7g}")
 
-    def command_jump(self) -> None:
-        """v3.5 vertical jump; the controller refuses it away from the crouch height."""
-        self.send("JUMP")
+    def command_jump(self, forward_m: float = 0.0) -> None:
+        """v3.5 jump: vertical, or forward over forward_m metres (run-up, jump, land, stop)."""
+        # "JUMP 0" is the vertical jump ("JUMP" alone is the default forward hop)
+        if math.isfinite(forward_m) and forward_m > 0.0:
+            self.send(f"JUMP {forward_m:.3f}")
+        else:
+            self.send("JUMP 0")
 
     def command_dance(self, direction: float = 1.0) -> None:
         if math.isfinite(direction):

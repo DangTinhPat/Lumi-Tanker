@@ -18,51 +18,26 @@ inline Pt rot(Pt p, float th) noexcept {
   const float c = std::cos(th), s = std::sin(th);
   return {c * p.x + s * p.z, -s * p.x + c * p.z};
 }
-inline Pt perp(Pt v) noexcept { return {v.z, -v.x}; }
 inline Pt add(Pt a, Pt b) noexcept { return {a.x + b.x, a.z + b.z}; }
 inline float minJerk(float u) noexcept {
   u = std::clamp(u, 0.0F, 1.0F);
   return u * u * u * (10.0F + u * (-15.0F + 6.0F * u));
 }
 
-// Both legs move together. Links: body, thigh, shin (with the wheel motor), wheel; the CAD chain of
-// WholeBodyModel::compute (thigh turns with the hip, shin and wheel with hip+knee).
+// Planner views of the AirborneModel (aac/AirborneModel.hpp).
 struct LegDynamics {
   float cab = 0.0F;      // CoM above the axle
   float inertia = 0.0F;  // about the CoM
-  float l_hip = 0.0F;    // angular momentum about the CoM per unit hip rate (body held)
-  float l_knee = 0.0F;   // ... per unit knee rate
+  float l_hip = 0.0F;
+  float l_knee = 0.0F;
 };
-
 LegDynamics legDynamics(float hip_cad, float knee) noexcept {
-  namespace geo = robot_control::geometry;
-  const float a = hip_cad;
-  const float b = hip_cad + knee + geo::knee_zero_rebase_rad;
-  const Pt h{geo::origins[0].x, geo::origins[0].z};
-  const Pt o1{geo::origins[1].x, geo::origins[1].z}, o2{geo::origins[2].x, geo::origins[2].z};
-  const Pt c1{geo::parts[1].x, geo::parts[1].z}, c2{geo::parts[2].x, geo::parts[2].z};
-  const Pt ro1 = rot(o1, a), ro2 = rot(o2, b), rc1 = rot(c1, a), rc2 = rot(c2, b);
-  const Pt knee_origin = add(h, ro1), axle = add(knee_origin, ro2);
-  struct Link { float m, i; Pt p, dp_hip, dp_knee; float w_hip, w_knee; };
-  const Link links[4] = {
-      {geo::parts[0].mass, geo::parts[0].iyy, {geo::parts[0].x, geo::parts[0].z}, {0, 0}, {0, 0}, 0, 0},
-      {2.0F * geo::parts[1].mass, 2.0F * geo::parts[1].iyy, add(h, rc1), perp(rc1), {0, 0}, 1, 0},
-      {2.0F * geo::parts[2].mass, 2.0F * geo::parts[2].iyy, add(knee_origin, rc2),
-       add(perp(ro1), perp(rc2)), perp(rc2), 1, 1},
-      {2.0F * geo::parts[3].mass, 2.0F * geo::parts[3].iyy, axle,
-       add(perp(ro1), perp(ro2)), perp(ro2), 1, 1}};
-  float mass = 0.0F, cx = 0.0F, cz = 0.0F;
-  for (const auto& l : links) { mass += l.m; cx += l.m * l.p.x; cz += l.m * l.p.z; }
-  cx /= mass; cz /= mass;
-  LegDynamics out{};
-  out.cab = cz - axle.z;
-  for (const auto& l : links) {
-    const float dx = l.p.x - cx, dz = l.p.z - cz;
-    out.inertia += l.i + l.m * (dx * dx + dz * dz);
-    out.l_hip += l.m * (dz * l.dp_hip.x - dx * l.dp_hip.z) + l.i * l.w_hip;
-    out.l_knee += l.m * (dz * l.dp_knee.x - dx * l.dp_knee.z) + l.i * l.w_knee;
-  }
-  return out;
+  const LegInertia d = legInertia(hip_cad, knee);
+  return {d.com_from_axle.z, d.inertia, d.l_hip, d.l_knee};
+}
+Pt axleFromCom(float hip_cad, float knee) noexcept {
+  const Vec2 c = legInertia(hip_cad, knee).com_from_axle;
+  return {-c.x, -c.z};
 }
 
 float comAboveAxle(float height_m) noexcept {
@@ -81,45 +56,6 @@ float legForce(const JumpPlannerConfig& c, float h) noexcept {
 }
 
 }  // namespace
-
-float bodyRateFromLegMotion(float hip_cad, float knee, float hip_rate, float knee_rate) noexcept {
-  const auto d = legDynamics(hip_cad, knee);
-  return -(d.l_hip * hip_rate + d.l_knee * knee_rate) / std::max(d.inertia, 1.0e-6F);
-}
-
-float bodyTurnFromLegPath(float hip0_cad, float knee0, float hip1_cad, float knee1) noexcept {
-  // Zero total angular momentum: the body turns by -(L_h dh + L_k dk) / I along the leg path (a
-  // 1-form, taken along the straight line between the two poses with Simpson weights).
-  const float dh = hip1_cad - hip0_cad, dk = knee1 - knee0;
-  float turn = 0.0F;
-  constexpr float w[3] = {1.0F / 6.0F, 4.0F / 6.0F, 1.0F / 6.0F};
-  for (int i = 0; i < 3; ++i) {
-    const float u = 0.5F * static_cast<float>(i);
-    const auto d = legDynamics(hip0_cad + u * dh, knee0 + u * dk);
-    turn -= w[i] * (d.l_hip * dh + d.l_knee * dk) / std::max(d.inertia, 1.0e-6F);
-  }
-  return turn;
-}
-
-BodyMomentum bodyMomentum(float hip_cad, float knee, float hip_rate, float knee_rate,
-                          float body_rate) noexcept {
-  const auto d = legDynamics(hip_cad, knee);
-  BodyMomentum m{};
-  m.inertia = d.inertia;
-  m.cab = d.cab;
-  m.angular_momentum = d.inertia * body_rate + d.l_hip * hip_rate + d.l_knee * knee_rate;
-  // d(cab)/dt = (dcab/dhip) hip_rate + (dcab/dknee) knee_rate by a small finite difference of the FK
-  constexpr float kEps = 1.0e-3F;
-  const float dcab_h = (legDynamics(hip_cad + kEps, knee).cab - d.cab) / kEps;
-  const float dcab_k = (legDynamics(hip_cad, knee + kEps).cab - d.cab) / kEps;
-  m.com_vz = dcab_h * hip_rate + dcab_k * knee_rate;
-  return m;
-}
-
-float hipPerBodyRate(float hip_cad, float knee) noexcept {
-  const auto d = legDynamics(hip_cad, knee);
-  return std::abs(d.l_hip) > 1.0e-6F ? d.inertia / d.l_hip : 0.0F;
-}
 
 static float gridInterp(const std::array<float, FlightPlan::kGrid>& a, float lo, float step, float x) noexcept {
   const float u = std::clamp((x - lo) / std::max(step, 1.0e-6F), 0.0F, static_cast<float>(FlightPlan::kGrid - 1));
@@ -143,21 +79,60 @@ float FlightPlan::kneeAt(float t) const noexcept {
     return knee_start_rad + knee_rate_start_rad_s * u + u * u * u * (c3 + u * (c4 + u * c5));
   }
   if (t < extend_start_s) return knee_tuck_rad;
-  return knee_tuck_rad + (knee_top_rad - knee_tuck_rad) * minJerk((t - extend_start_s) / std::max(extend_time_s, 1.0e-3F));
+  return knee_tuck_rad + (kneeEnd() - knee_tuck_rad) * minJerk((t - extend_start_s) / std::max(extend_time_s, 1.0e-3F));
+}
+
+float FlightPlan::tuckHip(float knee) const noexcept {
+  const float span = knee_top_rad - knee_tuck_rad;
+  const float s = span > 1.0e-4F ? std::clamp((knee_top_rad - knee) / span, 0.0F, 1.0F) : 0.0F;
+  return zeroReactionHip(knee) + hip_dev_rad * s;
+}
+
+float FlightPlan::pathTurn(float knee_from, float knee_to) const noexcept {
+  return gridInterp(path_turn_rad, knee_lo_rad, knee_step_rad, knee_to) -
+         gridInterp(path_turn_rad, knee_lo_rad, knee_step_rad, knee_from);
 }
 
 float FlightPlan::hipAt(float t) const noexcept {
   const float k = kneeAt(t);
   const float fade = tuck_planned && t >= tuck_start_s && tuck_time_s > 0.0F
       ? 1.0F - minJerk((t - tuck_start_s) / tuck_time_s) : (tuck_planned ? 1.0F : 0.0F);
-  return zeroReactionHip(k) + hip_offset_cad_rad * fade;
+  return tuckHip(k) + hip_offset_cad_rad * fade;
 }
+
+namespace {
+
+// Tuck path to tuck_knee with pull-up dev: hip = zero-reaction + dev * s. Returns the body turn at the
+// tuck (zero total angular momentum, from the top pose) and the wheel lift toward the CoM in the world
+// frame there (the frame in which the axle is straight below the CoM at the top pose).
+struct TuckEval { float turn, lift; };
+TuckEval evalTuck(const FlightPlan& f, float dev, float tuck_knee, float base_angle, Pt top_world) noexcept {
+  FlightPlan g = f;
+  g.knee_tuck_rad = tuck_knee;
+  g.hip_dev_rad = dev;
+  constexpr int kSegments = 8;
+  float turn = 0.0F;
+  float k0 = g.knee_top_rad, h0 = g.tuckHip(k0);
+  for (int i = 1; i <= kSegments; ++i) {
+    const float k1 = g.knee_top_rad + (tuck_knee - g.knee_top_rad) * static_cast<float>(i) / kSegments;
+    const float h1 = g.tuckHip(k1);
+    turn += bodyTurnFromLegPath(h0, k0, h1, k1);
+    k0 = k1;
+    h0 = h1;
+  }
+  const Pt w = rot(axleFromCom(h0, k0), turn - base_angle);
+  return {turn, w.z - top_world.z};
+}
+
+}  // namespace
 
 bool FlightPlan::buildCurve(const JumpPlannerConfig& c) noexcept {
   // Zero-reaction curve through the top pose: hip as a function of the knee, both ways.
   const auto top = LegHeight::forHeight(c.top_height_m);
   const float hip_top = LegHeight::hangHipCad() + top.hip_offset_rad;
   knee_top_rad = top.knee_offset_rad;
+  knee_tuck_rad = knee_top_rad;
+  hip_dev_rad = 0.0F;
   knee_lo_rad = c.tuck_min_knee_rad;
   const float knee_hi = std::min(knee_top_rad + 0.7F, LegHeight::kKneeMaxRad);
   knee_step_rad = (knee_hi - knee_lo_rad) / static_cast<float>(kGrid - 1);
@@ -182,6 +157,37 @@ bool FlightPlan::buildCurve(const JumpPlannerConfig& c) noexcept {
       cab_m[static_cast<std::size_t>(i)] = legDynamics(hip, k).cab;
     }
   }
+  // Tuck tables: for every tuck depth the hip pull-up that lifts the wheels most while the body turns
+  // at most tuck_body_turn_rad (coarse scan, then a fine one around the best).
+  const Pt top_axle = axleFromCom(hip_top, knee_top_rad);
+  const float base_angle = std::atan2(top_axle.x, -top_axle.z);
+  const Pt top_world = rot(top_axle, -base_angle);
+  const float turn_max = std::max(c.tuck_body_turn_rad, 0.0F);
+  for (int i = 0; i < kGrid; ++i) {
+    const auto u = static_cast<std::size_t>(i);
+    const float k = knee_lo_rad + knee_step_rad * static_cast<float>(i);
+    dev_rad[u] = 0.0F;
+    turn_rad[u] = 0.0F;
+    path_turn_rad[u] = 0.0F;
+    if (i >= i_top) {
+      lift_m[u] = 0.0F;
+      continue;
+    }
+    TuckEval best = evalTuck(*this, 0.0F, k, base_angle, top_world);
+    float best_dev = 0.0F;
+    if (turn_max > 0.0F) {
+      const auto tryDev = [&](float dev) {
+        const TuckEval e = evalTuck(*this, dev, k, base_angle, top_world);
+        if (std::abs(e.turn) <= turn_max && e.lift > best.lift) { best = e; best_dev = dev; }
+      };
+      for (float dev = -0.6F; dev <= 0.6001F; dev += 0.1F) tryDev(dev);
+      const float centre = best_dev;
+      for (float dev = centre - 0.09F; dev <= centre + 0.0901F; dev += 0.01F) tryDev(dev);
+    }
+    dev_rad[u] = best_dev;
+    lift_m[u] = best.lift;
+    turn_rad[u] = best.turn;
+  }
   return true;
 }
 
@@ -194,14 +200,19 @@ bool FlightPlan::planTuck(const JumpPlannerConfig& c, float v, float t_now, floa
   tuck_start_s = t_now;
   knee_start_rad = knee;
   knee_rate_start_rad_s = std::clamp(knee_rate, -25.0F, 25.0F);
-  hip_offset_cad_rad = hip_cad - zeroReactionHip(knee);
   knee_tuck_rad = knee_top_rad;
+  extend_fraction_ = std::clamp(c.extend_fraction, 0.3F, 1.0F);
+  hip_dev_rad = 0.0F;
+  hip_offset_cad_rad = hip_cad - tuckHip(knee);
   tuck_time_s = 0.0F;
   extend_time_s = 0.0F;
   extend_start_s = flight_time_s;
   predicted_clearance_m = com_rise_m;
   tuck_lift_m = 0.0F;
+  tuck_turn_rad = 0.0F;
   peak_knee_accel_rad_s2 = 0.0F;
+  peak_hip_accel_rad_s2 = 0.0F;
+  path_turn_rad.fill(0.0F);
   reason = "ok";
   ok = true;
   const float usable = flight_time_s - t_now - c.hold_s - c.touchdown_margin_s;
@@ -209,50 +220,65 @@ bool FlightPlan::planTuck(const JumpPlannerConfig& c, float v, float t_now, floa
     reason = "flight too short to fold the legs";
     return true;
   }
-  // Tuck and extension share the usable time; the tuck starts from the measured state (so it also
-  // has to turn the knee around if it is still extending) and must stay inside the acceleration budget.
-  const float t1 = 0.5F * usable, t2 = 0.5F * usable;
+  // The tuck starts at once, from the measured state (so it also has to turn the knee around if it is still
+  // extending), and is complete when the CoM reaches its apex (tuck_done_frac of the flight): that is when
+  // the wheels are highest. Then the legs are lowered gradually until shortly before the touchdown. Both
+  // joints must stay inside their acceleration budgets along the whole timeline.
+  const float t_tuck_end = std::clamp(c.tuck_done_frac * flight_time_s, t_now + 0.03F, flight_time_s - c.touchdown_margin_s - 0.05F);
+  const float t1 = t_tuck_end - t_now;
+  const float t2 = flight_time_s - c.touchdown_margin_s - t_tuck_end - c.hold_s;
   tuck_time_s = t1;
   extend_time_s = t2;
-  extend_start_s = flight_time_s - c.touchdown_margin_s - t2;
+  extend_start_s = t_tuck_end + c.hold_s;
   const float lift_needed = c.target_clearance_m - com_rise_m;
-  const float cab_top = cabAt(knee_top_rad);
   const float depth_max = knee_top_rad - c.tuck_min_knee_rad;
-  const auto peakAccel = [&](float tuck_knee) {
+  const auto liftAt = [&](float tuck_knee) { return gridInterp(lift_m, knee_lo_rad, knee_step_rad, tuck_knee); };
+  const auto devAt = [&](float tuck_knee) { return gridInterp(dev_rad, knee_lo_rad, knee_step_rad, tuck_knee); };
+  struct Peaks { float knee, hip; };
+  const auto peaks = [&](float tuck_knee) {
     FlightPlan g = *this;
     g.knee_tuck_rad = tuck_knee;
-    float peak = 0.0F;
-    const float dt = t1 / 16.0F;
-    float prev = g.kneeAt(t_now), prev_rate = g.knee_rate_start_rad_s;
-    for (int i = 1; i <= 16; ++i) {
-      const float x = g.kneeAt(t_now + dt * static_cast<float>(i));
-      const float rate = (x - prev) / dt;
-      peak = std::max(peak, std::abs(rate - prev_rate) / dt);
-      prev = x;
-      prev_rate = rate;
+    g.hip_dev_rad = devAt(tuck_knee);
+    Peaks pk{0.0F, 0.0F};
+    constexpr int kSamples = 48;
+    const float dt = (flight_time_s - t_now) / kSamples;
+    float k_prev = g.kneeAt(t_now), h_prev = g.hipAt(t_now);
+    float kr_prev = g.knee_rate_start_rad_s, hr_prev = 0.0F;
+    bool first = true;
+    for (int i = 1; i <= kSamples; ++i) {
+      const float t = t_now + dt * static_cast<float>(i);
+      const float k = g.kneeAt(t), h = g.hipAt(t);
+      const float kr = (k - k_prev) / dt, hr = (h - h_prev) / dt;
+      pk.knee = std::max(pk.knee, std::abs(kr - kr_prev) / dt);
+      if (!first) pk.hip = std::max(pk.hip, std::abs(hr - hr_prev) / dt);   // the hip's start rate is not measured
+      first = false;
+      k_prev = k; h_prev = h; kr_prev = kr; hr_prev = hr;
     }
-    peak = std::max(peak, kMinJerkAccel * std::abs(g.knee_top_rad - tuck_knee) / (t2 * t2));   // the extension
-    return peak;
+    return pk;
+  };
+  const auto withinBudget = [&](float tuck_knee) {
+    const Peaks pk = peaks(tuck_knee);
+    return pk.knee <= c.knee_accel_rad_s2 && pk.hip <= c.hip_accel_rad_s2;
   };
   float depth = 0.0F;
   if (lift_needed > 0.0F && depth_max > 0.0F) {
     float lo = 0.0F, hi = depth_max;
-    if (cab_top - cabAt(knee_top_rad - hi) < lift_needed) {
+    if (liftAt(knee_top_rad - hi) < lift_needed) {
       depth = hi;
       reason = "tuck limited by the deepest allowed knee";
     } else {
       for (int i = 0; i < 24; ++i) {
         const float mid = 0.5F * (lo + hi);
-        if (cab_top - cabAt(knee_top_rad - mid) >= lift_needed) hi = mid;
+        if (liftAt(knee_top_rad - mid) >= lift_needed) hi = mid;
         else lo = mid;
       }
       depth = hi;
     }
-    if (peakAccel(knee_top_rad - depth) > c.knee_accel_rad_s2) {      // ... inside the acceleration budget
+    if (!withinBudget(knee_top_rad - depth)) {      // ... inside the acceleration budgets
       float a = 0.0F, b = depth;
       for (int i = 0; i < 20; ++i) {
         const float mid = 0.5F * (a + b);
-        if (peakAccel(knee_top_rad - mid) <= c.knee_accel_rad_s2) a = mid;
+        if (withinBudget(knee_top_rad - mid)) a = mid;
         else b = mid;
       }
       depth = a;
@@ -260,8 +286,32 @@ bool FlightPlan::planTuck(const JumpPlannerConfig& c, float v, float t_now, floa
     }
   }
   knee_tuck_rad = knee_top_rad - depth;
-  peak_knee_accel_rad_s2 = peakAccel(knee_tuck_rad);
-  tuck_lift_m = cab_top - cabAt(kneeAt(0.5F * flight_time_s));
+  hip_dev_rad = depth > 1.0e-4F ? devAt(knee_tuck_rad) : 0.0F;
+  hip_offset_cad_rad = hip_cad - tuckHip(knee);
+  const Peaks pk = peaks(knee_tuck_rad);
+  peak_knee_accel_rad_s2 = pk.knee;
+  peak_hip_accel_rad_s2 = pk.hip;
+  // Body turn along the planned path, cumulative from the top pose (used by the touchdown law).
+  const int i_top = static_cast<int>(std::lround((knee_top_rad - knee_lo_rad) / knee_step_rad));
+  for (int dir = -1; dir <= 1; dir += 2) {
+    float acc = 0.0F;
+    for (int i = i_top + dir; i >= 0 && i < kGrid; i += dir) {
+      const float ka = knee_lo_rad + knee_step_rad * static_cast<float>(i - dir);
+      const float kb = knee_lo_rad + knee_step_rad * static_cast<float>(i);
+      acc += bodyTurnFromLegPath(tuckHip(ka), ka, tuckHip(kb), kb);
+      path_turn_rad[static_cast<std::size_t>(i)] = acc;
+    }
+  }
+  tuck_turn_rad = pathTurn(knee_top_rad, knee_tuck_rad);
+  // Wheel lift at the apex, on the planned path, in the world frame.
+  {
+    const float k_apex = kneeAt(0.5F * flight_time_s);
+    const auto top = axleFromCom(zeroReactionHip(knee_top_rad), knee_top_rad);
+    const float base_angle = std::atan2(top.x, -top.z);
+    const Pt w0 = rot(top, -base_angle);
+    const Pt w = rot(axleFromCom(tuckHip(k_apex), k_apex), pathTurn(knee_top_rad, k_apex) - base_angle);
+    tuck_lift_m = w.z - w0.z;
+  }
   predicted_clearance_m = com_rise_m + tuck_lift_m;
   return true;
 }
@@ -292,12 +342,15 @@ JumpPlan planJump(const JumpPlannerConfig& c) noexcept {
   // Smallest CoM flight in [min, max] whose flight lets the joints tuck the wheels the rest of the way.
   const auto top = LegHeight::forHeight(c.top_height_m);
   const float hip_top = LegHeight::hangHipCad() + top.hip_offset_rad;
+  FlightPlan curve{};
+  curve.buildCurve(c);                 // the expensive part, once
   FlightPlan best{};
   float rise = c.com_rise_max_m;
   bool reached = false;
   for (int i = 0; i <= 12; ++i) {
     const float r = c.com_rise_min_m + (c.com_rise_max_m - c.com_rise_min_m) * static_cast<float>(i) / 12.0F;
-    const FlightPlan f = planFlight(c, std::sqrt(2.0F * kGravity * r), hip_top, top.knee_offset_rad, 0.0F);
+    FlightPlan f = curve;
+    f.planTuck(c, std::sqrt(2.0F * kGravity * r), 0.0F, hip_top, top.knee_offset_rad, 0.0F);
     if (!f.ok) continue;
     best = f;
     rise = r;
@@ -335,6 +388,8 @@ JumpPlan planJump(const JumpPlannerConfig& c) noexcept {
   plan.predicted_tuck_lift_m = best.tuck_lift_m;
   plan.predicted_clearance_m = best.predicted_clearance_m;
   plan.predicted_knee_travel_rad = best.knee_top_rad - best.knee_tuck_rad;
+  plan.predicted_body_turn_rad = best.tuck_turn_rad;
+  plan.curve = curve;
   return plan;
 }
 

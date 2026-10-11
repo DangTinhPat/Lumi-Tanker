@@ -57,7 +57,7 @@ void zeroReactionTuckDoesNotTurnTheBody() {
   assert(f.peak_knee_accel_rad_s2 <= c.knee_accel_rad_s2 * 1.02F);
   assert(std::abs(f.kneeAt(0.0F) - f.knee_start_rad) < 1e-4F);
   // At rest the tuck starts at once, holds, and is extended again before the touchdown.
-  assert(std::abs(f.kneeAt(f.flight_time_s) - f.knee_top_rad) < 1e-3F);
+  assert(std::abs(f.kneeAt(f.flight_time_s) - f.kneeEnd()) < 1e-3F);
   assert(f.extend_start_s + f.extend_time_s <= f.flight_time_s - c.touchdown_margin_s + 1e-4F);
   // Integrate the body rotation that the planned hip/knee motion causes (angular momentum model):
   // it must stay ~0 along the whole path, while the same knee fold with a fixed hip turns the body.
@@ -84,8 +84,41 @@ void zeroReactionTuckDoesNotTurnTheBody() {
   assert(deepest_fixed > 5.0F * std::max(worst_zr, 0.004F));
 }
 
+void hipPullUpTurnsTheBodyOnlyMidFlight() {
+  JumpPlannerConfig level, pull;
+  pull.tuck_body_turn_rad = 0.10F;
+  const auto top = LegHeight::forHeight(level.top_height_m);
+  const float hip = LegHeight::hangHipCad() + top.hip_offset_rad;
+  const FlightPlan a = planFlight(level, 1.15F, hip, top.knee_offset_rad, 0.0F);
+  const FlightPlan b = planFlight(pull, 1.15F, hip, top.knee_offset_rad, 0.0F);
+  std::printf("tuck: level body lift %.1f mm (hip dev %+.2f), body may turn 0.1 rad: lift %.1f mm (dev %+.2f, turn %+.3f), "
+              "hip peak acc %.0f -> %.0f\n", 1e3 * a.tuck_lift_m, a.hip_dev_rad, 1e3 * b.tuck_lift_m, b.hip_dev_rad,
+              b.tuck_turn_rad, a.peak_hip_accel_rad_s2, b.peak_hip_accel_rad_s2);
+  assert(a.ok && b.ok && a.hip_dev_rad == 0.0F && std::abs(a.tuck_turn_rad) < 0.005F);
+  assert(std::abs(b.tuck_turn_rad) <= 0.10F + 0.01F);
+  assert(b.tuck_lift_m >= a.tuck_lift_m - 0.002F);         // never worse (the optimum includes dev = 0)
+  assert(b.peak_hip_accel_rad_s2 <= pull.hip_accel_rad_s2 * 1.02F);
+  // Integrate the body rotation along the planned motion: it reaches the planned turn at the tuck and is
+  // back at ~0 when the legs are extended again (same path out and back).
+  float turned = 0.0F, at_tuck = 0.0F;
+  const float dt = 0.0005F;
+  for (float t = 0.0F; t < b.flight_time_s; t += dt) {
+    const float k0 = b.kneeAt(t), k1 = b.kneeAt(t + dt), h0 = b.hipAt(t), h1 = b.hipAt(t + dt);
+    turned += bodyRateFromLegMotion(h0, k0, (h1 - h0) / dt, (k1 - k0) / dt) * dt;
+    if (std::abs(k0 - b.knee_tuck_rad) < 1e-3F) at_tuck = turned;
+  }
+  std::printf("  body turn: %.3f rad at the tuck, %.4f rad at the touchdown (path %.4f)\n", at_tuck, turned, b.pathTurn(b.knee_top_rad, b.kneeEnd()));
+  assert(std::abs(at_tuck - b.tuck_turn_rad) < 0.02F);
+  assert(std::abs(turned - b.pathTurn(b.knee_top_rad, b.kneeEnd())) < 0.01F);   // net turn = the path to the end pose
+  // pathTurn matches the planned turn at the tuck and is antisymmetric.
+  assert(std::abs(b.pathTurn(b.knee_top_rad, b.knee_tuck_rad) - b.tuck_turn_rad) < 1e-4F);
+  assert(std::abs(b.pathTurn(b.knee_tuck_rad, b.knee_top_rad) + b.tuck_turn_rad) < 1e-4F);
+}
+
 void tuckStartsFromTheMeasuredKneeRate() {
   JumpPlannerConfig c;
+  c.knee_accel_rad_s2 = 700.0F;     // a tight budget: a fast-extending knee cannot be turned around in time
+  c.hip_accel_rad_s2 = 600.0F;
   const auto top = LegHeight::forHeight(c.top_height_m);
   const float hip = LegHeight::hangHipCad() + top.hip_offset_rad;
   const float knee = top.knee_offset_rad + 0.1F;       // still extending, a bit above the top pose
@@ -101,9 +134,9 @@ void tuckStartsFromTheMeasuredKneeRate() {
   assert(f.peak_knee_accel_rad_s2 <= c.knee_accel_rad_s2 * 1.02F);
   // Before the tuck starts the legs brake toward the top pose; at the end they are back at it.
   assert(std::abs(f.kneeAt(0.0F) - f.knee_top_rad) < 1e-4F);
-  assert(std::abs(f.kneeAt(f.flight_time_s) - f.knee_top_rad) < 1e-3F);
+  assert(std::abs(f.kneeAt(f.flight_time_s) - f.kneeEnd()) < 1e-3F);   // lowered extend_fraction of the way back
   // The hip offset measured at the start fades out.
-  assert(std::abs(f.hipAt(f.flight_time_s) - f.zeroReactionHip(f.knee_top_rad)) < 1e-3F);
+  assert(std::abs(f.hipAt(f.flight_time_s) - f.tuckHip(f.kneeEnd())) < 1e-3F);
   // Still extending so fast that braking alone exceeds the acceleration budget: no tuck is planned and
   // the plan reports that budget honestly instead of claiming a fold it cannot make.
   FlightPlan g;
@@ -170,6 +203,7 @@ int main() {
               1e3 * LegHeight::maxHeight());
   planJumpPicksTheSmallestFeasibleCoMFlight();
   zeroReactionTuckDoesNotTurnTheBody();
+  hipPullUpTurnsTheBodyOnlyMidFlight();
   tuckStartsFromTheMeasuredKneeRate();
   flightPlanRefusesWhatCannotFly();
   momentumModelIsConsistent();

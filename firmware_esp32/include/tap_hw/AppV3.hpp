@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -124,6 +126,7 @@ class AppV3 {
   bool disable_pending_ = false;
   bool go_pending_ = false;
   bool jump_pending_ = false;  // v3.5 jump request (SET jump 1 first)
+  float jump_forward_m_ = 0.0F;   // JUMP <m>: hop distance of the next jump (NaN = default hop)
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;

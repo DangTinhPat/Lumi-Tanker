@@ -171,6 +171,9 @@ class LqrBalancer {
   void movePositionAnchorToward(float ground_position_m, float alpha) noexcept;
   void clearForwardVelocityReference() noexcept;
   void setStationVelocityReference(float velocity_m_s) noexcept;
+  // After a reset while the robot already moves (landing from a forward jump): the velocity
+  // references start at this speed instead of ramping up from zero.
+  void seedForwardVelocity(float velocity_m_s) noexcept;
 
   [[nodiscard]] Output update(const RobotState& state,
                               const ControlCommand& command,
@@ -243,6 +246,10 @@ class LqrBalancer {
     }
   }
   [[nodiscard]] const Config& config() const noexcept { return config_; }
+  // The cap on the commanded ground speed (a hop temporarily raises it).
+  void setMaxGroundVelocity(float velocity_m_s) noexcept {
+    if (std::isfinite(velocity_m_s) && velocity_m_s > 0.0F) config_.max_ground_velocity_m_s = velocity_m_s;
+  }
 
   // Embedded gain schedule. The DARE solve runs in double precision, which an
   // ESP32-S3 (single-precision FPU only) takes ~50 ms to finish - far over the

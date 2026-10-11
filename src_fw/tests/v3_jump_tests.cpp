@@ -181,7 +181,7 @@ void flightTucksWithTheZeroReactionHipAndExtendsBeforeTheLanding() {
     assert(std::abs(out.hip_rad + LegHeight::hangHipCad() - fp.hipAt(t + kDt)) < 1e-4F);
     lowest = std::min(lowest, out.knee_rad);
     if (extended_at < 0.0F && fp.tuck_planned && t > fp.tuck_start_s + fp.tuck_time_s &&
-        out.knee_rad > fp.knee_top_rad - 0.02F) extended_at = t;
+        out.knee_rad > fp.kneeEnd() - 0.02F) extended_at = t;
     t += kDt;
     assert(t < 1.0F);
   }
@@ -260,6 +260,102 @@ void aThrustThatNeverLiftsOffEndsSoftly() {
   assert(jump.phase() == Phase::Land && out.adopt);
 }
 
+void oneMotionHopLeansAndSpeedsUpInTheDipAndBrakesAfterTheTouchdown() {
+  const JumpPlan plan = planJump({});
+  auto cfg = enabled();
+  cfg.hop_run_up = false;                 // experimental one-motion hop from standing
+  JumpSequence jump(cfg);
+  assert(jump.begin(plan, 0.08F));
+  const float v = cfg.hop_speed_scale * 0.08F / plan.flight_time_s;
+  auto out = jump.update(inputAt(kStand));
+  assert(out.phase == Phase::Dip && out.drive && std::abs(out.drive_m_s - v) < 1e-5F);
+  // The lean grows through the dip (0 -> 1, monotone) and stays at 1 until the flight is over.
+  float last_lean = out.lean;
+  while (out.phase == Phase::Dip) {
+    out = jump.update(inputAt(kStand));
+    if (out.phase != Phase::Dip) break;
+    assert(out.lean >= last_lean - 1e-6F && out.lean <= 1.0F + 1e-6F && out.drive && out.drive_m_s == v);
+    last_lean = out.lean;
+  }
+  assert(last_lean > 0.9F && out.phase == Phase::Thrust && out.lean == 1.0F);
+  // The speed command is held up to the touchdown, then zero (the controller's plan shapes the stop).
+  int impacts = 0;
+  bool landed = false;
+  for (int i = 0; i < 6000 && (jump.running() || out.drive); ++i) {
+    const float accel = jump.phase() == Phase::Land ? 30.0F : 5.0F;
+    out = jump.update(inputAt(kStand, accel));
+    if (out.phase == Phase::Thrust || out.phase == Phase::Flight) assert(out.drive_m_s == v);
+    if (out.landed) { ++impacts; landed = true; }
+    if (landed && out.drive) assert(out.drive_m_s == 0.0F);
+  }
+  assert(impacts == 1 && !out.drive && out.drive_m_s == 0.0F);
+  // After the whole motion the next jump starts clean.
+  assert(jump.begin(plan, 0.0F) && jump.update(inputAt(kStand)).drive == false);
+}
+
+void runUpHopWaitsForTheSpeedThenDipsAndBrakesAtTheTouchdown() {
+  const JumpPlan plan = planJump({});
+  auto cfg = enabled();
+  cfg.approach_timeout_s = 3.0F;
+  JumpSequence jump(cfg);
+  assert(jump.begin(plan, 0.08F));
+  const float v = cfg.hop_speed_scale * 0.08F / plan.flight_time_s;
+  auto in = inputAt(kStand);
+  auto out = jump.update(in);
+  assert(out.phase == Phase::Approach && out.drive && out.drive_m_s == 0.0F && !out.active);
+  // The ready pose (the crouch) builds first (0 -> 1), then the run-up speed is asked; the speed has to
+  // be steady before the thrust.
+  float last_ready = out.ready;
+  for (int i = 0; i < 400; ++i) {
+    out = jump.update(in);                               // ground speed 0: not there yet
+    assert(out.phase == Phase::Approach && out.ready >= last_ready - 1e-6F);
+    assert(out.ready < 1.0F ? out.drive_m_s == 0.0F : std::abs(out.drive_m_s - v) < 1e-5F);
+    last_ready = out.ready;
+  }
+  assert(last_ready >= 1.0F);
+  in.ground_speed_m_s = v;
+  float t = 0.0F;
+  while (out.phase == Phase::Approach) { out = jump.update(in); t += kDt; assert(t < 1.0F); }
+  assert(out.phase == Phase::Dip && out.drive && std::abs(t - cfg.approach_settle_s) < 3 * kDt);
+  // The speed command is held up to the touchdown, then zero (the controller's plan shapes the stop).
+  bool landed = false;
+  for (int i = 0; i < 6000 && (jump.running() || out.drive); ++i) {
+    out = jump.update(inputAt(kStand, jump.phase() == Phase::Land ? 30.0F : 5.0F));
+    if (out.phase == Phase::Thrust || out.phase == Phase::Flight) assert(out.drive_m_s == v);
+    if (out.landed) landed = true;
+    if (landed && out.drive) assert(out.drive_m_s == 0.0F);
+  }
+  assert(landed && !out.drive);
+  // Never reaching the speed refuses after the timeout.
+  jump.reset();
+  assert(jump.begin(plan, 0.08F));
+  in = inputAt(kStand);
+  out = {};
+  for (int i = 0; i < 2000 && out.refused == 0; ++i) out = jump.update(in);
+  assert(out.refused == 5 && !jump.running());
+}
+
+void hopDefaultsAndVerticalJump() {
+  const JumpPlan plan = planJump({});
+  auto cfg = enabled();
+  cfg.hop_run_up = false;
+  JumpSequence jump(cfg);
+  assert(jump.begin(plan, 0.0F));                               // JUMP 0: vertical, no drive, no lean
+  auto out = jump.update(inputAt(kStand));
+  assert(out.phase == Phase::Dip && !out.drive && out.drive_m_s == 0.0F);
+  jump.reset();
+  assert(jump.begin(plan, 5.0F));                               // a huge distance is clamped to the speed limit
+  out = jump.update(inputAt(kStand));
+  assert(std::abs(out.drive_m_s - cfg.forward_speed_max_m_s) < 1e-5F);
+  jump.reset();
+  assert(jump.begin(plan, 0.001F));                             // a tiny one is a vertical jump
+  assert(!jump.update(inputAt(kStand)).drive);
+  // The legs must stand still first, as for the vertical jump.
+  jump.reset();
+  assert(jump.begin(plan, 0.08F));
+  assert(jump.update(inputAt(kStand, 9.8F, true)).phase == Phase::Idle);
+}
+
 }  // namespace
 
 int main() {
@@ -269,6 +365,9 @@ int main() {
   thrustEndsAtTheTopAtRestAndLiftOffComesFromTheMeasuredAcceleration();
   flightTucksWithTheZeroReactionHipAndExtendsBeforeTheLanding();
   aThrustThatNeverLiftsOffEndsSoftly();
+  oneMotionHopLeansAndSpeedsUpInTheDipAndBrakesAfterTheTouchdown();
+  runUpHopWaitsForTheSpeedThenDipsAndBrakesAtTheTouchdown();
+  hopDefaultsAndVerticalJump();
   eventsFireOnce();
   impactEndsTheFlightEarlyOnlyAfterMinFlight();
   abortsSoftlyAndNeverRunsWithoutBalancing();

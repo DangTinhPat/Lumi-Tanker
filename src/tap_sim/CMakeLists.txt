@@ -89,6 +89,13 @@ if(BUILD_TESTING)
   set_target_properties(gim_model_physics_tests PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
   add_test(NAME gim_model_physics COMMAND gim_model_physics_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
+  add_executable(aac_model_physics_tests tests/aac_model_physics_tests.cpp)
+  target_compile_options(aac_model_physics_tests PRIVATE -UNDEBUG)
+  target_include_directories(aac_model_physics_tests PRIVATE "${MUJOCO_ROOT}/include")
+  target_link_libraries(aac_model_physics_tests PRIVATE tap_fw tap_control_core "${MUJOCO_LIBRARY}")
+  set_target_properties(aac_model_physics_tests PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
+  add_test(NAME aac_model_physics COMMAND aac_model_physics_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
   add_test(NAME gim_physics_lifecycle
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_physics_lifecycle_test.py
       --runner $<TARGET_FILE:tap_mujoco_gim_v3>
@@ -116,6 +123,11 @@ if(BUILD_TESTING)
       --runner $<TARGET_FILE:tap_mujoco_gim_v3>
       --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
   set_tests_properties(gim_jump PROPERTIES TIMEOUT 300)
+  add_test(NAME gim_high_speed
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_high_speed_test.py
+      --runner $<TARGET_FILE:tap_mujoco_gim_v3>
+      --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
+  set_tests_properties(gim_high_speed PROPERTIES TIMEOUT 300)
   add_executable(tap_mujoco_sim_actuator_bus_tests tests/sim_actuator_bus_tests.cpp)
   target_compile_features(tap_mujoco_sim_actuator_bus_tests PRIVATE cxx_std_17)
   target_compile_options(tap_mujoco_sim_actuator_bus_tests PRIVATE -Wall -Wextra -Wpedantic)

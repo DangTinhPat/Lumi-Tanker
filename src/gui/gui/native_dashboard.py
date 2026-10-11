@@ -62,7 +62,7 @@ class NativeDashboard:
         # Retain this dashboard's existing command envelope. Other callers,
         # including ball following, use the lower conservative API defaults.
         self.motion = MotionAPI(
-            backend, limits=MotionLimits(max_linear_m_s=0.5, max_yaw_rad_s=0.8))
+            backend, limits=MotionLimits(max_linear_m_s=4.1888, max_yaw_rad_s=1.5))
         self.vision_process = PersonVisionProcess(
             self.backend.root / "blue_object_vision")
         self.vision_behavior = None
@@ -157,7 +157,7 @@ class NativeDashboard:
         speed_row.pack(fill="x", pady=(6, 0))
         ttk.Label(speed_row, textvariable=self.speed_readout,
                   style="Card.TLabel").pack(anchor="w")
-        tk.Scale(speed_row, from_=0.05, to=0.50, resolution=0.05,
+        tk.Scale(speed_row, from_=0.05, to=4.15, resolution=0.05,
                  orient="horizontal", showvalue=False, variable=self.speed,
                  command=self._speed_preview, bg=CARD, fg=FG,
                  troughcolor="#3a4050", highlightthickness=0, bd=0,
@@ -217,7 +217,8 @@ class NativeDashboard:
         ttk.Button(skill, text="Múa ↺",
                    command=lambda: self.start_dance(-1.0), state="disabled").pack(side="left", padx=2)
         self.jump_status = tk.StringVar(value="")
-        ttk.Button(skill, text="Nhảy 12 cm", command=self.start_jump).pack(side="left", padx=2)
+        ttk.Button(skill, text="Nhảy đứng 12 cm", command=self.start_jump).pack(side="left", padx=2)
+        ttk.Button(skill, text="Nhảy tiến (kanguru)", command=lambda: self.start_jump(0.08)).pack(side="left", padx=2)
         ttk.Label(skill, textvariable=self.jump_status, style="Card.TLabel").pack(
             side="left", padx=(4, 8))
         ttk.Button(skill, text="Dừng skill",
@@ -718,16 +719,20 @@ class NativeDashboard:
             self._posture_quiet_since = None
             self.show_started_s = None
 
-    def start_jump(self):
-        """JUMP: the controller plans the dip, thrust, tuck and landing from its own FK/IK."""
+    def start_jump(self, forward_m=0.0):
+        """JUMP [m]: the controller plans the dip, thrust, tuck and landing from its own FK/IK;
+        with a distance it first runs up in the ready pose and jumps forward."""
         if not self.backend.running or not self.enabled or self.estop:
             self.jump_status.set("Cần Start SIM và ENABLE trước")
             return
         self.stop_skill()
         self.drive = (0.0, 0.0)
         self._cancel_pending_posture()
-        self.backend.command_jump()
-        self.jump_status.set("Đã gửi JUMP (tự nhún, nhảy, co/duỗi chân, tiếp đất)")
+        self.backend.command_jump(forward_m)
+        if forward_m > 0.0:
+            self.jump_status.set(f"Đã gửi JUMP {forward_m:.2f} (lấy đà, tư thế sẵn sàng, nhảy tiến, tiếp đất, dừng)")
+        else:
+            self.jump_status.set("Đã gửi JUMP (tự nhún, nhảy, co/duỗi chân, tiếp đất)")
 
     def stop_skill(self):
         if self.vision_process.running:

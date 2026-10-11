@@ -134,7 +134,7 @@
       <geom name="cad_05_0" type="mesh" mesh="cad_05_0" material="gim_hardware" pos="0.0199485627 -0.0005 0.00139371975" contype="1" conaffinity="1"/>
       <geom name="cad_23_0" type="mesh" mesh="cad_23_0" material="gim_hardware" pos="-2.71834477e-06 -0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
           <body name="left_wheel" pos="0.09816 0.0197 -0.01908">
-            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0.002"/>
+            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
       <geom name="cad_06_0" type="mesh" mesh="cad_06_0" material="gim_wheel" pos="-2.27373675e-15 7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
             <geom name="left_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
@@ -159,7 +159,7 @@
       <geom name="cad_30_0" type="mesh" mesh="cad_30_0" material="gim_hardware" pos="0.0199485627 0.0005 0.00139371975" contype="1" conaffinity="1"/>
       <geom name="cad_41_0" type="mesh" mesh="cad_41_0" material="gim_hardware" pos="-2.71834476e-06 0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
           <body name="right_wheel" pos="0.09816 -0.0197 -0.01908">
-            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0.002"/>
+            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
       <geom name="cad_25_0" type="mesh" mesh="cad_25_0" material="gim_wheel" pos="7.86712917e-14 -7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
             <geom name="right_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>

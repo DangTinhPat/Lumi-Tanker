@@ -47,7 +47,7 @@ constexpr std::uint64_t kBlePollUs = 10'000U;
 constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
 // Full stick. Forward stays 0.25 m/s under the 0.8 m/s balancer cap: catching
 // a forward lean needs the wheels to run faster than the drive speed.
-constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
+constexpr float kBleDriveSpeedMS = 4.1888F;  // full stick forward = the wheel's no-load limit (1000 rpm x 0.04 m)
 constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
 
 std::atomic<int> g_v3_ble_links{0};
@@ -392,7 +392,10 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     out_.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
                                 "max 12 rad/s, no balance loop)"
                               : "V3 START");
-  } else if (std::strcmp(line, "JUMP") == 0) {
+  } else if (std::strncmp(line, "JUMP", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
+    // "JUMP" = the default forward hop, "JUMP 0" = vertical, "JUMP <m>" = hop <m> metres.
+    jump_forward_m_ = line[4] == ' ' ? std::strtof(line + 5, nullptr) : std::numeric_limits<float>::quiet_NaN();
+    if (line[4] == ' ' && !std::isfinite(jump_forward_m_)) jump_forward_m_ = 0.0F;
     // v3.5 vertical jump. Default OFF (SET jump 1); only while balancing.
     if (!ctrl_.config().jump.enabled) {
       out_.println("V3 JUMP refused: SET jump 1 first (v3.5 jump is off by default)");
@@ -543,6 +546,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "wbkhold")) ctrl_.config().tier.knee_hold_wb = v >= 0.5F;
     else if (!std::strcmp(key, "wbenv")) ctrl_.config().tier.envelope_wb = v >= 0.5F;
     else if (!std::strcmp(key, "tenvlean")) ctrl_.config().tier.env_lean_rad = std::clamp(v, 0.0F, 0.3F);
+    else if (!std::strcmp(key, "wenv")) ctrl_.config().tier.wheel_envelope = v >= 0.5F;
+    else if (!std::strcmp(key, "wreserve")) ctrl_.config().tier.motor_reserve = std::clamp(v, 0.0F, 0.9F);
+    else if (!std::strcmp(key, "latacc")) ctrl_.config().tier.lateral_accel_max_m_s2 = std::clamp(v, 0.0F, 9.8F);
     else if (!std::strcmp(key, "amax")) ctrl_.config().pid.accel_max_m_s2 = std::clamp(v, 0.5F, 30.0F);
     else if (!std::strcmp(key, "algo")) {
       if (ctrl_.state() == V3Controller::State::Balancing ||
@@ -1127,6 +1133,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   cmd.go = go_pending_ || (tilt_test_ && ready_now);
   go_pending_ = false;
   cmd.jump = jump_pending_;
+  cmd.jump_forward_m = jump_forward_m_;
   jump_pending_ = false;
 
   V3Controller::Input in{};
@@ -1153,7 +1160,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign;
       in.hip_rate_rad_s[side] = legJointRate(hip) * legs[hip].driver_sign;
       in.knee_rate_rad_s[side] = legJointRate(knee) * legs[knee].driver_sign;
+      in.knee_current_a[side] = feedback_.legCurrentA(legs[knee].joint_index) * legs[knee].driver_sign;
     }
+    in.leg_current_valid = feedback_.legCurrentFresh(legs[1].joint_index, now_us) &&
+        feedback_.legCurrentFresh(legs[3].joint_index, now_us);
     in.legs_measured = legsFresh(now_us);
     // Noise of the hip velocity estimates (they feed theta_v_rate): rms per
     // SENS report, meaningful with the legs holding still.
@@ -1200,6 +1210,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     out_.printf("V3 JUMP refused: %s\n",
                 out.jump_refused == 1 ? "tilted or held"
                 : out.jump_refused == 3 ? "no plan (SET jump 1 while disabled)"
+                : out.jump_refused == 5 ? "run-up speed not reached"
+                : out.jump_refused == 6 ? "backward jumps are not supported yet"
                                         : "legs still moving (stand still first)");
   }
   const std::uint64_t p1 = nowUs();

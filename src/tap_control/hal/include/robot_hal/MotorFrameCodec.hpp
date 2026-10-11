@@ -327,7 +327,10 @@ constexpr std::uint8_t kDxlPresentAddr = 0x24;
 constexpr std::uint8_t kDxlPresentLen = 6;
 constexpr std::uint8_t kDxlInsWrite = 0x03;
 constexpr std::uint8_t kDxlInsRead = 0x02;
-constexpr std::int16_t kWheelRawSpeedLimit = 400;  // +/-400 raw, WHEEL §8, 400 rpm rated under load
+// raw = rpm (operator-verified). 1000 rpm = BL4820M12 no-load speed (user, 2026-10-11); 400 rpm is only the
+// rated speed at the full 0.13 N.m. WHEEL_MOTOR_PROTOCOL.md lists the register as [-400, 400]: values above
+// 400 are untested on the driver.
+constexpr std::int16_t kWheelRawSpeedLimit = 1000;
 
 // raw = RPM (WHEEL §8: coincidence of 400==400, not a verbatim spec line -
 // flagged in the doc as needing a real measurement before hardware bring-up).

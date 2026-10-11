@@ -44,6 +44,9 @@ struct Options {
   bool lqr_prediction = true;
   bool gyro_hip_lead = true;
   std::string jump_spec;  // v3.5 jump parameters: key=value,key=value
+  // Speed ceilings [m/s], 0 = the controller defaults: DRIVE clamp, planned speed cap, LQR ground speed cap.
+  double drive_max = 4.1888, plan_vmax = 0.0, ground_vmax = 0.0, track_margin = -1.0;
+  double motor_reserve = -1.0, lateral_accel = -1.0;
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
   std::vector<std::pair<double, std::string>> schedule;
@@ -79,6 +82,12 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--no-lqr-prediction") out.lqr_prediction = false;
     else if (arg == "--virtual-hip-lead") out.gyro_hip_lead = false;
     else if (arg == "--jump") out.jump_spec = next();
+    else if (arg == "--drive-max") out.drive_max = number(next(), "--drive-max");
+    else if (arg == "--plan-vmax") out.plan_vmax = number(next(), "--plan-vmax");
+    else if (arg == "--ground-vmax") out.ground_vmax = number(next(), "--ground-vmax");
+    else if (arg == "--track-margin") out.track_margin = number(next(), "--track-margin");
+    else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
+    else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
     else if (arg == "--at") {
       const std::string value = next();
       const auto colon = value.find(':');
@@ -172,6 +181,10 @@ class GimV3Runner {
       else if (key == "top_h") pl.top_height_m = v;
       else if (key == "tuck_min_knee") pl.tuck_min_knee_rad = v;
       else if (key == "hold") pl.hold_s = v;
+      else if (key == "tuck_done") pl.tuck_done_frac = v;
+      else if (key == "extend") pl.extend_fraction = v;
+      else if (key == "tuck_turn") pl.tuck_body_turn_rad = v;
+      else if (key == "hip_acc") pl.hip_accel_rad_s2 = v;
       else if (key == "td_margin") pl.touchdown_margin_s = v;
       else if (key == "derate") pl.torque_derate = v;
       else if (key == "min_dip") pl.min_dip_m = v;
@@ -206,11 +219,41 @@ class GimV3Runner {
       else if (key == "mom_wheel") jump.momentum_wheel_gain = v;
       else if (key == "mom_wheel_max") jump.momentum_wheel_max_rad_s = v;
       else if (key == "mom_dip") jump.momentum_in_dip = v > 0.5F;
-      else if (key == "td_tau") jump.td_l_tau_s = v;
-      else if (key == "td_arrive") jump.td_margin_s = v;
-      else if (key == "td_go") jump.td_go_min_s = v;
-      else if (key == "td_lean") jump.td_lean_rad = v;
-      else if (key == "align_max") jump.align_max_rad = v;
+      else if (key == "to_on") jump.takeoff.enabled = v > 0.5F;
+      else if (key == "to_hold") jump.takeoff.hold_wheels = v > 0.5F;
+      else if (key == "to_gain") jump.takeoff.gain = v;
+      else if (key == "to_rate") jump.takeoff.rate_gain = v;
+      else if (key == "to_max") jump.takeoff.lean_max_rad = v;
+      else if (key == "to_tau") jump.takeoff.lean_tau_s = v;
+      else if (key == "to_sign") jump.takeoff.sign = v;
+      else if (key == "to_wl") jump.takeoff.momentum_weight = v;
+      else if (key == "hop_lean") jump.hop_lean_rad = v;
+      else if (key == "hop_stop") jump.hop_stop_s = v;
+      else if (key == "run_up") jump.hop_run_up = v > 0.5F;
+      else if (key == "ready_lean") jump.ready_lean_rad = v;
+      else if (key == "ready_drop") jump.ready_drop_m = v;
+      else if (key == "ready_time") jump.ready_time_s = v;
+      else if (key == "hop_gimbal") jump.hop_gimbal = v;
+      else if (key == "appr_settle") jump.approach_settle_s = v;
+      else if (key == "thrust_lean") jump.hop_thrust_lean_per_m_s = v;
+      else if (key == "ready_first") jump.ready_before_drive = v >= 0.5;
+      else if (key == "appr_tol") jump.approach_tolerance_m_s = v;
+      else if (key == "hop_acc1") jump.hop_accel_per_m_s = v;
+      else if (key == "hop_scale") jump.hop_speed_scale = v;
+      else if (key == "hop_acc") jump.hop_accel_m_s2 = v;
+      else if (key == "hop_dec") jump.hop_decel_m_s2 = v;
+      else if (key == "hop_jerk") jump.hop_jerk_m_s3 = v;
+      else if (key == "hop_default") jump.hop_default_m = v;
+      else if (key == "wheel_match") jump.flight_wheel_match = v > 0.5F;
+      else if (key == "fa_wline") jump.flight.w_line = v;
+      else if (key == "fa_wbody") jump.flight.w_body = v;
+      else if (key == "fa_wshape") jump.flight.w_shape = v;
+      else if (key == "fa_tilt") jump.flight.body_tilt_max_rad = v;
+      else if (key == "fa_bias") jump.flight.line_bias_rad = v;
+      else if (key == "fa_hipmax") jump.flight.hip_change_max_rad = v;
+      else if (key == "fa_kneemax") jump.flight.knee_change_max_rad = v;
+      else if (key == "fa_rate") jump.flight.change_rate_max_rad_s = v;
+      else if (key == "fa_arrive") jump.flight.arrive_before_s = v;
       else if (key == "hip_gain") jump.thrust_hip_gain = v;
       else if (key == "dip_acc") jump.dip_accel_m_s2 = v;
       else throw std::invalid_argument("unknown --jump key: " + key);
@@ -250,6 +293,13 @@ class GimV3Runner {
     config.tier.sus_adaptive = true;
     config.trim_acc = false;
     applyJumpSpec(config.jump, options.jump_spec);
+    if (options.plan_vmax > 0.0) config.tier.plan_vmax_m_s = static_cast<float>(options.plan_vmax);
+    // motor_reserve < 0 keeps the default; 0 still caps at the no-load speed; >= 1.5 turns the envelope off.
+    if (options.motor_reserve >= 0.0) config.tier.motor_reserve = static_cast<float>(options.motor_reserve);
+    if (options.motor_reserve >= 1.5) config.tier.wheel_envelope = false;
+    if (options.lateral_accel >= 0.0) config.tier.lateral_accel_max_m_s2 = static_cast<float>(options.lateral_accel);
+    if (options.ground_vmax > 0.0) config.lqr.max_ground_velocity_m_s = static_cast<float>(options.ground_vmax);
+    if (options.track_margin >= 0.0) config.lqr.command_velocity_tracking_margin_m_s = static_cast<float>(options.track_margin);
     config.height.rate_m_s = .015F;
     config.height.accel_m_s2 = .05F;
     config.height.jerk_m_s3 = .20F;
@@ -390,7 +440,12 @@ class GimV3Runner {
     else if (op == "RESET") reset();
     else if (op == "STOP") command_.forward_m_s = command_.yaw_rad_s = 0.0F;
     else if (op == "GO") go_pending_ = true;
-    else if (op == "JUMP") jump_pending_ = true;
+    else if (op == "JUMP") {
+      float distance = 0.0F;      // "JUMP" = the default hop, "JUMP 0" = vertical, "JUMP 0.05" = hop 5 cm
+      jump_forward_m_ = (stream >> distance && std::isfinite(distance)) ? distance
+                                                                          : std::numeric_limits<float>::quiet_NaN();
+      jump_pending_ = true;
+    }
     else if (op == "PUSH") {
       float force = 0.0F, duration = 0.0F;
       if (stream >> force >> duration && std::isfinite(force) && std::isfinite(duration) &&
@@ -408,8 +463,9 @@ class GimV3Runner {
         std::cout << "DRIVE_REJECTED|reason=balance_not_ready" << std::endl;
         return;
       }
-      command_.forward_m_s = std::clamp(std::isfinite(forward) ? forward : 0.0F, -0.5F, 0.5F);
-      command_.yaw_rad_s = std::clamp(std::isfinite(yaw) ? yaw : 0.0F, -0.8F, 0.8F);
+      const float drive_max = static_cast<float>(options_.drive_max);
+      command_.forward_m_s = std::clamp(std::isfinite(forward) ? forward : 0.0F, -drive_max, drive_max);
+      command_.yaw_rad_s = std::clamp(std::isfinite(yaw) ? yaw : 0.0F, -1.5F, 1.5F);
     } else if (op == "HEIGHT") {
       float body_height = 0.0F;
       stream >> body_height;
@@ -530,7 +586,9 @@ class GimV3Runner {
       in.wheel_rad_s[side] = static_cast<float>(sensor(joints_[wheel].velocity_sensor));
       in.wheel_pos_rad[side] = static_cast<float>(sensor(joints_[wheel].position_sensor));
       in.leg_chain_rad += 0.5F * (in.hip_rad[side] + in.knee_rad[side]);
+      in.knee_current_a[side] = leg_measured_current_[2 * side + 1];
     }
+    in.leg_current_valid = true;
     for (std::size_t i = 0; i < previous_leg_target_.size(); ++i) {
       const std::size_t joint = (i / 2) * 3 + (i % 2);
       const float q = static_cast<float>(sensor(joints_[joint].position_sensor));
@@ -543,6 +601,7 @@ class GimV3Runner {
     cmd.go = go_pending_;
     go_pending_ = false;
     cmd.jump = jump_pending_ && output_.state == V3Controller::State::Balancing;
+    cmd.jump_forward_m = jump_forward_m_;
     jump_pending_ = false;
     cmd.disable = disable_request_ || estop_;
     cmd.forward_m_s = enable_request_ && !cmd.disable ? command_.forward_m_s : 0.0F;
@@ -563,7 +622,9 @@ class GimV3Runner {
     if (output_.jump_refused != 0) {
       std::cout << "JUMP_REFUSED|reason="
                 << (output_.jump_refused == 1 ? "tilted_or_held"
-                    : output_.jump_refused == 3 ? "no_plan" : "legs_still_moving") << std::endl;
+                    : output_.jump_refused == 3 ? "no_plan"
+                    : output_.jump_refused == 5 ? "run_up_speed_not_reached"
+                    : output_.jump_refused == 6 ? "backward_jump_not_supported" : "legs_still_moving") << std::endl;
     }
 
     const std::array<float, 4> commanded_target{
@@ -732,7 +793,7 @@ class GimV3Runner {
               << "|leg_iq_lh=" << leg_measured_current_[0]
               << "|leg_iq_lk=" << leg_measured_current_[1]
               << "|jump_phase=" << output_.jump_phase
-              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
+              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
               << "|cmd_hip=" << output_.leg_hip_offset_rad << "|cmd_knee=" << output_.leg_knee_offset_rad
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)
@@ -803,6 +864,7 @@ class GimV3Runner {
   std::size_t next_scheduled_ = 0;
   int last_jump_phase_ = 0;
   bool start_pending_ = false, go_pending_ = false, jump_pending_ = false, imu_seeded_ = false;
+  float jump_forward_m_ = std::numeric_limits<float>::quiet_NaN();
   bool physics_started_ = false;
   bool enable_seen_ = false;
   float push_force_n_ = 0.0F;

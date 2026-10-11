@@ -115,6 +115,10 @@ class SimBl4820Wheel {
   struct Config {
     std::uint8_t motor_id = 1;
     float max_torque_nm = 0.13F;
+    // Torque-speed envelope (user, 2026-10-11): the full max_torque_nm up to the rated speed (400 rpm), then
+    // the motoring torque falls linearly to zero at the maximum speed (1000 rpm). Braking keeps the full torque.
+    float rated_speed_rad_s = 41.887902F;    // 400 rpm
+    float max_speed_rad_s = 104.719755F;     // 1000 rpm
     // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
     // Real bandwidth is unmeasured (WHEEL §8 appendix) - this value is
     // picked stiff enough to saturate at a small velocity error (~43 mrad/s)
@@ -125,7 +129,10 @@ class SimBl4820Wheel {
     float velocity_servo_gain_nm_per_rad_s = 3.0F;
     float settle_s = 0.020F;
     float torque_lag_s = 0.001F;
-    float viscous_friction_nm_per_rad_s = 0.001F;
+    // From the datasheet: no-load current 0.15 A at 1000 rpm with Kt ~ 0.13 N.m/A (0.13 N.m at the rated 1 A)
+    // gives ~0.0195 N.m of loss at 104.7 rad/s: the Coulomb part below plus this viscous part. (Was 0.001,
+    // which with the joint damping in the MJCF ate most of the torque above ~1 m/s.)
+    float viscous_friction_nm_per_rad_s = 0.00013F;
     float coulomb_friction_nm = 0.006F;
   };
 
@@ -195,7 +202,15 @@ class SimBl4820Wheel {
         (std::abs(measured_vel_rad_s) > 0.02F
              ? std::copysign(cfg_.coulomb_friction_nm, measured_vel_rad_s)
              : std::clamp(lagged_torque_nm_, -cfg_.coulomb_friction_nm, cfg_.coulomb_friction_nm));
-    return std::clamp(lagged_torque_nm_ - friction, -cfg_.max_torque_nm, cfg_.max_torque_nm);
+    const float tau = std::clamp(lagged_torque_nm_ - friction, -cfg_.max_torque_nm, cfg_.max_torque_nm);
+    // Motoring (torque along the motion) is limited by the torque-speed line above the rated speed.
+    const float speed = std::abs(measured_vel_rad_s);
+    if (tau * measured_vel_rad_s > 0.0F && speed > cfg_.rated_speed_rad_s) {
+      const float span = std::max(cfg_.max_speed_rad_s - cfg_.rated_speed_rad_s, 1.0e-3F);
+      const float cap = cfg_.max_torque_nm * std::clamp((cfg_.max_speed_rad_s - speed) / span, 0.0F, 1.0F);
+      return std::clamp(tau, -cap, cap);
+    }
+    return tau;
   }
 
   bool torqueEnabled() const { return torque_enabled_; }

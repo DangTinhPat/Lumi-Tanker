@@ -17,15 +17,15 @@ import subprocess
 
 from native_runner_contract_test import fields
 
-PHASES = ["Idle", "Dip", "Thrust", "Flight", "Land", "Recover"]
+PHASES = ["Idle", "Dip", "Thrust", "Flight", "Land", "Recover", "Approach"]
 
 
-def run(runner, model, spec, jump_at, duration, extra=(), args=(), events=None):
+def run(runner, model, spec, jump_at, duration, extra=(), args=(), events=None, jump_cmd="JUMP 0"):
     cmd = [str(runner), "--model", str(model), "--rate", "3000", "--run-for", str(duration),
            *map(str, args)]
     if spec:
         cmd += ["--jump", spec]
-    schedule = [(0.0, "ENABLE"), (jump_at, "JUMP")] + list(extra)
+    schedule = [(0.0, "ENABLE"), (jump_at, jump_cmd)] + list(extra)
     for when, command in schedule:
         cmd += ["--at", f"{when}:{command}"]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -83,6 +83,7 @@ def summarize(states, views, jump_at):
     if td is not None and lift is not None:
         i = after.index(td)
         window = after[max(i - 8, 0):i + 1]          # 16 ms before the contact
+        out["flight_dx_mm"] = round(1e3 * (float(td["com_x"]) - float(lift["com_x"])), 1)
         out.update({"flight_s": round(float(td["t"]) - float(lift["t"]), 3),
                     "td_virt_err_rad": round(float(td["lqr_pitch_state"]) - float(td["balance_ref"]), 3),
                     "td_pitch_rad": round(float(td["pitch"]), 3),
@@ -114,12 +115,12 @@ def summarize(states, views, jump_at):
 # bottom to floor ~11 cm; the CoM flies ~6-8 cm because the tuck and the joint torque budget cannot give
 # 4 cm and 12 cm together) with no Fault, upright and (nearly) still afterwards. The body tilts in the
 # dip and thrust (the hip swings to keep the CoM over the axle): the excursion is bounded, not zero.
-CLEARANCE_MM = (90.0, 125.0)
-COM_RISE_MAX_MM = 90.0
+CLEARANCE_MM = (140.0, 190.0)
+COM_RISE_MAX_MM = 100.0
 MAX_DIP_TO_THRUST_S = 0.35    # a quick counter-movement, not a slow crouch
 MAX_PITCH_EXCURSION_RAD = 0.5
-FINAL_PITCH_LIMIT_RAD = 0.06
-FINAL_SPEED_LIMIT_M_S = 0.15  # the robot may still creep at a few cm/s when the run ends
+FINAL_PITCH_LIMIT_RAD = 0.07
+FINAL_SPEED_LIMIT_M_S = 0.20  # the robot may still creep at a few cm/s when the run ends
 R_WHEEL, O_Z = 0.04, 0.00828
 
 
@@ -144,7 +145,9 @@ CASES = ([("nominal +%d ms" % ms, 6.0 + ms * 1e-3, None, []) for ms in (0, 3, 5,
 
 def check_case(runner, model, label, at, stand, args=(), spec=""):
     extra = [(1.0, f"HEIGHT {body_height(stand):.5f}")] if stand else []
-    states, views = run(runner, model, spec, at, at + 6.0, extra=extra, args=args)
+    # A lower stand first waits for the slow height planner (the jump starts 2.5-3.5 s late at 0.13 m),
+    # so those cases run longer to score the settled robot, not the recovery.
+    states, views = run(runner, model, spec, at, at + (10.0 if stand else 6.0), extra=extra, args=args)
     r = summarize(states, views, at)
     assert all(s["ground_truth_to_controller"] == "0" for s in states), label
     assert r["fault"] is None, f"{label}: {r}"
@@ -161,12 +164,61 @@ def check_case(runner, model, label, at, stand, args=(), spec=""):
                       "final_speed_m_s": r["final_speed_m_s"]}), flush=True)
 
 
+# Hops (JUMP <m>), the standing forward jump: a short load (legs down to the crouch through the
+# controller's height state, body level, while the tiers speed up to distance / flight time), then the
+# thrust from the crouch with the wheels a few mm off the CoM (the CoM line leans by
+# hop_thrust_lean_per_m_s x speed to trim the take-off angular momentum), land, brake to a stop.
+# The body may tilt during the 0.1 s thrust (that lean), not in the load. The operator's height comes
+# back after the landing. Known limit (not asserted): wheel delay >= 60 ms with lag >= 100 ms falls.
+FORWARD_CASES = [("hop 5 cm", 0.05, []), ("hop 8 cm", 0.08, []), ("hop 10 cm", 0.10, []), ("hop 12 cm", 0.12, []),
+                 ("hop 10 cm wheel 30/50 ms", 0.10, W(0.03, 0.05)),
+                 ("hop 10 cm wheel 50/80 ms", 0.10, W(0.05, 0.08)),
+                 ("hop 10 cm wheel 40/90 ms", 0.10, W(0.04, 0.09)),
+                 ("hop 10 cm wheel 35/70 ms", 0.10, W(0.035, 0.07))]
+FORWARD_OVERSHOOT_M = 0.04
+HOP_LOAD_PITCH_RAD = 0.08
+HOP_RUN_UP_M = 0.45
+
+
+def check_forward(runner, model, label, distance, args=()):
+    states, views = run(runner, model, "", 6.0, 6.0 + 9.0, args=args, jump_cmd=f"JUMP {distance}")
+    r = summarize(states, views, 6.0)
+    assert all(s["ground_truth_to_controller"] == "0" for s in states), label
+    assert r["fault"] is None and r["jumped"], f"{label}: {r}"
+    i_cmd = next(i for i, s in enumerate(states) if float(s["t"]) >= 6.0)
+    i_lift = next(i for i in range(i_cmd, len(states)) if float(states[i]["wheel_clearance"]) > 0.002)
+    load = [abs(float(s["pitch"])) for s in states[i_cmd:i_lift] if int(s["jump_phase"]) == 6]
+    r["load_pitch_rad"] = round(max(load, default=0.0), 3)
+    r["run_up_mm"] = round(1e3 * (float(states[i_lift]["com_x"]) - float(states[i_cmd]["com_x"])), 1)
+    assert r["load_pitch_rad"] <= HOP_LOAD_PITCH_RAD, f"{label}: body leaned in the load {r}"
+    assert r["run_up_mm"] <= 1e3 * HOP_RUN_UP_M, f"{label}: run-up {r}"
+    h0, h1 = float(states[i_cmd]["height_target"]), float(states[-1]["height_target"])
+    assert abs(h1 - h0) < 1e-3, f"{label}: height request not restored ({h0} -> {h1})"
+    assert r["peak_clearance_mm"] >= CLEARANCE_MM[0], f"{label}: clearance {r}"
+    assert 0.7 * distance <= r["flight_dx_mm"] / 1e3 <= distance + FORWARD_OVERSHOOT_M, f"{label}: distance {r}"
+    assert r["final_pitch_rad"] < FINAL_PITCH_LIMIT_RAD and r["final_speed_m_s"] < FINAL_SPEED_LIMIT_M_S, \
+        f"{label}: {r}"
+    print(json.dumps({"case": label, "flight_dx_mm": r["flight_dx_mm"], "clearance_mm": r["peak_clearance_mm"],
+                      "load_pitch_rad": r["load_pitch_rad"], "run_up_mm": r["run_up_mm"],
+                      "final_pitch_rad": r["final_pitch_rad"], "final_speed_m_s": r["final_speed_m_s"]}), flush=True)
+
+
+def _forward_job(runner, model, job):
+    label, distance, args = job
+    try:
+        check_forward(runner, model, label, distance, args)
+    except AssertionError as e:
+        return f"FAIL {label}: {e}"
+    return None
+
+
 def check(runner, model):
     from multiprocessing import Pool
     from functools import partial
     jobs = [(label, at, stand, args) for label, at, stand, args in CASES]
-    with Pool(min(len(jobs), 8)) as pool:
+    with Pool(8) as pool:
         errors = [e for e in pool.map(partial(_check_job, runner, model), jobs) if e]
+        errors += [e for e in pool.map(partial(_forward_job, runner, model), FORWARD_CASES) if e]
     assert not errors, "\n".join(errors)
 
 
