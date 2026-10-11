@@ -217,6 +217,7 @@ class NativeDashboard:
         ttk.Button(skill, text="Múa ↺",
                    command=lambda: self.start_dance(-1.0), state="disabled").pack(side="left", padx=2)
         self.jump_status = tk.StringVar(value="")
+        ttk.Button(skill, text="Đứng dậy (từ nằm)", command=self.start_standup).pack(side="left", padx=2)
         ttk.Button(skill, text="Nhảy đứng 12 cm", command=self.start_jump).pack(side="left", padx=2)
         ttk.Button(skill, text="Nhảy tiến (kanguru)", command=lambda: self.start_jump(0.08)).pack(side="left", padx=2)
         ttk.Label(skill, textvariable=self.jump_status, style="Card.TLabel").pack(
@@ -367,6 +368,11 @@ class NativeDashboard:
         self._show_waiting = False
 
     def enable(self):
+        if self.backend.starts_lying:
+            # The robot lies on its belly and stays limp until "Đứng dậy": ENABLE would lock its legs to the
+            # extended pose instead.
+            self.jump_status.set("Robot đang nằm: bấm 'Đứng dậy (từ nằm)' để kích hoạt")
+            return
         if self.backend.running and not self.estop:
             self.backend.send("ENABLE")
             self.enabled = True
@@ -399,7 +405,7 @@ class NativeDashboard:
         self._posture_last_sent_height = None
         self.posture_var.set(0.0)
         self._posture_preview(0.0)
-        if was_enabled:
+        if was_enabled and not self.backend.starts_lying:
             self.backend.send("ENABLE")
             self.enabled = True
 
@@ -719,6 +725,19 @@ class NativeDashboard:
             self._posture_quiet_since = None
             self.show_started_s = None
 
+    def start_standup(self):
+        """STANDUP: from the lying pose (sim started with TAP_SIM_START=home) the legs fold and extend, the wheels
+        roll free, the CoM comes over the axle and the V3 balancer takes over, then the body rises to full height."""
+        if not self.backend.running or self.estop:
+            self.jump_status.set("Cần Start SIM (mở bằng TAP_SIM_START=home) trước")
+            return
+        self.stop_skill()
+        self.drive = (0.0, 0.0)
+        self._cancel_pending_posture()
+        self.backend.command_standup()
+        self.enabled = True
+        self.jump_status.set("Đã gửi STANDUP (gập hông, bánh lăn tự do, bàn giao cân bằng, duỗi chân)")
+
     def start_jump(self, forward_m=0.0):
         """JUMP [m]: the controller plans the dip, thrust, tuck and landing from its own FK/IK;
         with a distance it first runs up in the ready pose and jumps forward."""
@@ -787,8 +806,8 @@ class NativeDashboard:
         self.sim_button.configure(text="Stop SIM" if self.backend.running else "Start SIM")
         self.enable_button.configure(
             text="DISABLE" if self.enabled and not self.estop else "ENABLE",
-            state=("normal" if self.backend.running and not self.estop
-                   else "disabled"))
+            state=("normal" if self.backend.running and not self.estop and
+                   (self.enabled or not self.backend.starts_lying) else "disabled"))
         self.vision_button.configure(text="Camera ngoài contract", state="disabled")
         self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Balancing", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop", "Fault") else WARN)
         self.viewer_status.set(

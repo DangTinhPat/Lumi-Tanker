@@ -8,6 +8,7 @@
 #include "robot_control/LqrBalancer.hpp"
 #include "robot_control/LqrActuationPredictor.hpp"
 #include "tap_fw/v3/JumpSequence.hpp"
+#include "tap_fw/v3/StandUp.hpp"
 #include "tap_fw/v3/aac/FlightAttitude.hpp"
 #include "tap_fw/v3/aac/TakeoffMomentum.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
@@ -27,7 +28,8 @@ namespace tap_fw::v3 {
 // (ARMED) -> it engages after Engage::armed_go_s or at the first tip (or on GO).
 class V3Controller {
  public:
-  enum class State { Idle, Locking, Ready, Balancing, Fault };
+  // StandUp: the rocking stand-up from the lying pose (Command::standup, StandUp.hpp); it hands over to Balancing.
+  enum class State { Idle, Locking, Ready, Balancing, Fault, StandUp };
 
   // Lqr (SET algo 0) with the tiers is the shipped balancer. Pid (SET algo 1) is the
   // classic two-loop fallback. WholeBody (SET algo 2) is an opt-in single LQR for
@@ -515,6 +517,7 @@ class V3Controller {
     Roll roll;
     // v3.5 vertical jump (JumpSequence.hpp). Off by default.
     JumpSequence::Config jump;
+    StandUp::Config standup;
     WheelPredict wheel_pred;
     Height height{};
     Engage engage{};
@@ -679,6 +682,7 @@ class V3Controller {
     bool go = false;          // edge: engage balancing now (from Ready)
     bool disable = false;     // level: stop everything
     bool jump = false;        // edge: start the v3.5 jump (Config::jump.enabled)
+    bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
     float jump_forward_m = 0.0F;  // with jump: horizontal distance of the hop (NaN = the default hop, 0 = vertical, < 0 refused)
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
@@ -800,6 +804,8 @@ class V3Controller {
   [[nodiscard]] float jumpTouchdownOffset() const noexcept { return jump_align_; }
   [[nodiscard]] float jumpDriveSpeed() const noexcept { return jump_drive_ ? jump_drive_m_s_ : 0.0F; }
   [[nodiscard]] float planSpeed() const noexcept { return plan_v_; }
+  [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
+  [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
   [[nodiscard]] const robot_control::LqrBalancer::DebugState& lqrDebug() const noexcept { return lqr_.debugState(); }
   [[nodiscard]] float lqrSpeedSeen() const noexcept { return pid_v_filt_; }
   [[nodiscard]] float jumpTouchdownTarget() const noexcept { return jump_td_target_; }
@@ -949,6 +955,10 @@ class V3Controller {
   float height_accel_m_s2_ = 0.0F; // signed acceleration of the height profile
   LegPose pose_{};
   JumpSequence jump_{};
+  StandUp standup_{};
+  std::uint64_t standup_grace_until_us_ = 0U;   // wider fall limits until then (after a stand-up hand-over)
+  StandUp::Output standup_state_{};
+  float standup_lean_ = 0.0F;
   AirborneEstimator aac_est_{};
   FlightAttitude flight_att_{};
   std::array<float, 2> jump_wheel_hold_{};

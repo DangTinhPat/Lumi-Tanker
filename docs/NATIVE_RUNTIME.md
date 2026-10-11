@@ -136,9 +136,11 @@ robot of `gim_dynamic.xml` on a height field) and `gim_rough_terrain.bin`. Both 
 changing `gim_dynamic.xml`; the `.bin` (1.4 MB) is not meant to be edited. Open it with
 `TAP_SIM_MODEL=src/tap_sim/model/gim_rough.xml python3 tools/tap_native_gui.py`, or pass it to `--model`.
 
-- 12 x 3 m at 1 cm: a flat start pad (x < 0.7 m, the robot spawns at the origin), smooth 2-D waves (wavelengths 0.4-2.6 m in
-  different directions, so the two wheels see different heights) plus a little 12 cm roughness, a flat run-out.
-  Driving forward (+x) from the pad crosses it in about 8 m. Beyond the field edge there is a safety floor 8 cm below
+- A flat start pad (a plain box, x from -2.2 to 0.6 m: the robot spawns at the origin on it) followed by a 9.5 x 3 m height field at
+  1 cm (x from 0.5 m): smooth 2-D waves (wavelengths 0.4-2.6 m in different directions, so the two wheels see different heights)
+  plus a little 12 cm roughness, then a flat run-out. The pad is a box on purpose: a robot lying on its belly shell on hundreds
+  of height-field cells jittered and its wheels crept (passive, before any command); on a box it is dead still.
+  Driving forward (+x) from the pad crosses the rough part in about 8 m. Beyond the edges there is a safety floor 8 cm below
   the lowest valley, so do not drive off the field.
 - The one knob is the steepest slope; the heights follow from it (default 17.7 deg, which is 1.5 x the heights of the first
   12 deg version: -41..+39 mm, median slope 4.8 deg, 99% 12.6 deg, a left/right height difference across the track of up

@@ -86,6 +86,10 @@ class NativeBackend:
                 command += ["--jump", os.environ["TAP_JUMP_SPEC"]]
             # Roll balance is on in the dashboard sim (TAP_SIM_ROLL=0 turns it off); the headless tests keep it off.
             command += ["--roll", "0" if os.environ.get("TAP_SIM_ROLL") == "0" else "1"]
+            # TAP_SIM_START=<keyframe>: start in another MJCF keyframe, e.g. "home" (the lying pose, shown frozen:
+            # the V3 start-up sequence only knows the extended spawn pose)
+            if os.environ.get("TAP_SIM_START"):
+                command += ["--start-key", os.environ["TAP_SIM_START"]]
             self.process = subprocess.Popen(
                 command,
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -255,6 +259,15 @@ class NativeBackend:
         """Request a symmetric FK height target; C++ owns the inverse FK."""
         if math.isfinite(body_height_m):
             self.send(f"HEIGHT {body_height_m:.7g}")
+
+    @property
+    def starts_lying(self) -> bool:
+        """The sim starts in another keyframe (TAP_SIM_START, e.g. "home"): ENABLE is not the way to start it."""
+        return bool(os.environ.get("TAP_SIM_START"))
+
+    def command_standup(self) -> None:
+        """Rocking stand-up from the lying pose (start the sim with TAP_SIM_START=home)."""
+        self.send("STANDUP")
 
     def command_jump(self, forward_m: float = 0.0) -> None:
         """v3.5 jump: vertical, or forward over forward_m metres (run-up, jump, land, stop)."""

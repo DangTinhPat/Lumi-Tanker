@@ -174,6 +174,30 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   switch (state_) {
     case State::Idle:
     case State::Fault:
+      if (cmd.standup && config_.standup.enabled) {
+        // Rocking stand-up from the lying pose: the legs lock where they are (the encoders count from the
+        // power-up pose), the knees stay at their homing stop (0) and the hips fold; StandUp hands over to
+        // the balancer when the CoM is over the axle.
+        if (!in.sensors_ok || !legs_measured_) return fault("sensors not ready", out);
+        state_ = State::StandUp;
+        state_since_us_ = in.now_us;
+        runaway_since_us_ = 0U;
+        out.engage_legs = !legs_held_;
+        legs_held_ = true;
+        out.legs_locked = true;
+        knee_target_rad_ = knee_cmd_rad_ = LegHeight::kKneeMinRad;
+        pose_ = LegHeight::forKnee(knee_cmd_rad_);
+        height_target_m_ = pose_.axle_below_hip_m;
+        height_speed_m_s_ = height_accel_m_s2_ = 0.0F;
+        height_startup_ = false;
+        dhip_ = dknee_ = axle_hip_correction_ = 0.0F;
+        standup_.config() = config_.standup;
+        standup_.begin(0.5F * (raw.hip_rad[0] + raw.hip_rad[1]), pose_.knee_offset_rad);
+        out.leg_hip_offset_rad = 0.5F * (raw.hip_rad[0] + raw.hip_rad[1]);
+        out.leg_knee_offset_rad = pose_.knee_offset_rad;
+        out.state = state_;
+        return out;
+      }
       if (cmd.start) {
         if (!in.sensors_ok) return fault("sensors not ready", out);
         state_ = State::Locking;
@@ -263,6 +287,51 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
       }
       break;
     }
+    case State::StandUp: {
+      out.legs_locked = true;
+      out.wheels_enabled = true;
+      if (!in.sensors_ok) return fault("sensor feedback lost during the stand-up", out);
+      const ComLine c = comLine(hip_meas_, knee_meas_);
+      standup_lean_ = raw.pitch_rad + c.angle;
+      StandUp::Input si{};
+      si.dt_s = in.dt_s;
+      si.lean_rad = standup_lean_;
+      si.lean_rate_rad_s = raw.pitch_rate_rad_s + c.d_hip * hip_rate_meas_ + c.d_knee * knee_rate_meas_;
+      // The hip that puts the CoM line vertical (lean 0) at this knee with the body pitched as it is now
+      // (bisection on the leg model); the hang pose's hip is ~0.2 rad short of the level one, the tiers add that.
+      {
+        float lo = -1.5F, hi = 2.0F;
+        for (int i = 0; i < 20; ++i) {
+          const float mid = 0.5F * (lo + hi);
+          (raw.pitch_rad + comLine(mid, standup_state_.knee_target_rad).angle > 0.0F ? hi : lo) = mid;
+        }
+        si.hip_goal_rad = 0.5F * (lo + hi) + config_.standup.hip_goal_offset_rad;
+      }
+      si.wheel_rate_rad_s = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
+      si.sensors_ok = true;
+      standup_state_ = standup_.update(si);
+      if (standup_state_.phase == StandUp::Phase::Failed) return fault("stand-up failed", out);
+      out.leg_hip_offset_rad = standup_state_.hip_target_rad;
+      out.leg_knee_offset_rad = standup_state_.knee_target_rad;
+      out.legs_moving = true;
+      if (standup_state_.phase == StandUp::Phase::Caught) {
+        // The balancer takes the legs where they are: the height state follows the knee, the hip offset from the
+        // height pose carries the rest.
+        knee_target_rad_ = knee_cmd_rad_ = standup_state_.knee_target_rad;
+        pose_ = LegHeight::forKnee(knee_cmd_rad_);
+        height_target_m_ = pose_.axle_below_hip_m;
+        dhip_ = standup_state_.hip_target_rad - pose_.hip_offset_rad;
+        engageBalance(in, balance_set_ ? balance_rad_ : learned_trim_valid_ ? learned_trim_rad_ : in.pitch_rad);
+        height_startup_ = false;                 // the stand-up is the slow start already
+        standup_grace_until_us_ = in.now_us + static_cast<std::uint64_t>(config_.standup.grace_s * 1.0e6F);
+        out.leg_hip_offset_rad = hipCommand();
+        out.leg_knee_offset_rad = kneeCommand();
+      } else {
+        out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
+      }
+      out.state = state_;
+      return out;
+    }
     case State::Balancing:
       break;
   }
@@ -271,10 +340,14 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     out.legs_locked = true;
     out.wheels_enabled = true;
     if (!in.sensors_ok) return fault("sensor feedback lost while balancing", out);
-    if (std::abs(in.pitch_rad) > config_.fall_pitch_rad) return fault("fallen (pitch limit)", out);
+    // Right after a stand-up hand-over the body is still pitched (the belly front rests on the floor) while the
+    // tiers level it: the fall limits are wider for a few seconds.
+    const float fall_limit = in.now_us < standup_grace_until_us_
+        ? std::max(config_.fall_pitch_rad, config_.standup.grace_fall_pitch_rad) : config_.fall_pitch_rad;
+    if (std::abs(in.pitch_rad) > fall_limit) return fault("fallen (pitch limit)", out);
     // Tier 2 can keep the body level while the whole robot falls (caught
     // above by theta_v); a body far off means the hips lost it.
-    if (std::abs(raw.pitch_rad) > config_.fall_pitch_rad) {
+    if (std::abs(raw.pitch_rad) > fall_limit) {
       return fault("fallen (body pitch limit)", out);
     }
     // The jump replaces the leg command on purpose, so the pose-vs-measurement
@@ -2673,6 +2746,7 @@ const char* toString(V3Controller::State state) noexcept {
     case V3Controller::State::Ready: return "Ready";
     case V3Controller::State::Balancing: return "Balancing";
     case V3Controller::State::Fault: return "Fault";
+    case V3Controller::State::StandUp: return "StandUp";
   }
   return "?";
 }

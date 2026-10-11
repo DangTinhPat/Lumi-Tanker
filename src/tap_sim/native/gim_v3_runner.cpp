@@ -44,9 +44,12 @@ struct Options {
   bool lqr_prediction = true;
   bool gyro_hip_lead = true;
   std::string jump_spec;  // v3.5 jump parameters: key=value,key=value
+  std::string standup_spec;  // stand-up parameters: key=value,key=value (--standup)
   // Speed ceilings [m/s], 0 = the controller defaults: DRIVE clamp, planned speed cap, LQR ground speed cap.
   double drive_max = 4.1888, plan_vmax = 0.0, ground_vmax = 0.0, track_margin = -1.0;
   double motor_reserve = -1.0, lateral_accel = -1.0;
+  std::string start_key = "spawn_extended";   // --start-key NAME: the MJCF keyframe the robot starts in ("home" = the lying pose)
+  double wheel_torque = 0.13;   // --wheel-torque: the wheel driver's torque ceiling [N.m] (to find how little a maneuver needs)
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -83,10 +86,13 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--no-lqr-prediction") out.lqr_prediction = false;
     else if (arg == "--virtual-hip-lead") out.gyro_hip_lead = false;
     else if (arg == "--jump") out.jump_spec = next();
+    else if (arg == "--standup") out.standup_spec = next();
     else if (arg == "--drive-max") out.drive_max = number(next(), "--drive-max");
     else if (arg == "--plan-vmax") out.plan_vmax = number(next(), "--plan-vmax");
     else if (arg == "--ground-vmax") out.ground_vmax = number(next(), "--ground-vmax");
     else if (arg == "--track-margin") out.track_margin = number(next(), "--track-margin");
+    else if (arg == "--start-key") out.start_key = next();
+    else if (arg == "--wheel-torque") out.wheel_torque = number(next(), "--wheel-torque");
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
     else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
@@ -123,6 +129,10 @@ class GimV3Runner {
     model_->opt.timestep = 1.0 / options_.physics_hz;
     data_ = mj_makeData(model_);
     if (!data_) throw std::runtime_error("MuJoCo data allocation failed");
+    // (the MJCF actuator range, 0.13 N.m, still caps it from above)
+    for (std::size_t side = 0; side < wheels_.size(); ++side) {
+      wheels_[side] = robot_control::SimBl4820Wheel({static_cast<std::uint8_t>(side + 1), static_cast<float>(options_.wheel_torque)});
+    }
     bindModel();
     wheel_delay_ticks_ = static_cast<std::size_t>(std::lround(options_.wheel_delay_s * options_.sensor_hz));
     configureImu();
@@ -164,6 +174,41 @@ class GimV3Runner {
   };
 
   // Simulation-only: the v3.5 jump is always enabled here; --jump overrides.
+  static void applyStandUpSpec(tap_fw::v3::StandUp::Config& su, const std::string& spec) {
+    su.enabled = true;
+    std::stringstream list(spec);
+    std::string item;
+    while (std::getline(list, item, ',')) {
+      const auto eq = item.find('=');
+      if (eq == std::string::npos) continue;
+      const std::string key = item.substr(0, eq);
+      const float v = std::stof(item.substr(eq + 1));
+      if (key == "hold") su.hold_s = v;
+      else if (key == "goal") su.hip_goal_offset_rad = v;
+      else if (key == "knee") su.knee_end_rad = v;
+      else if (key == "krate") su.knee_rate_rad_s = v;
+      else if (key == "kdelay") su.knee_delay_s = v;
+      else if (key == "rate1") su.hip_rate1_rad_s = v;
+      else if (key == "mid") su.hip_mid_rad = v;
+      else if (key == "rate2") su.hip_rate2_rad_s = v;
+      else if (key == "wfree") su.wheel_free = v > 0.5F;
+      else if (key == "push") su.wheel_push_rad_s = v;
+      else if (key == "wdelay") su.wheel_delay_s = v;
+      else if (key == "wramp") su.wheel_ramp_s = v;
+      else if (key == "wgain") su.wheel_lean_gain = v;
+      else if (key == "wmax") su.wheel_max_rad_s = v;
+      else if (key == "catch_lean") su.catch_lean_rad = v;
+      else if (key == "catch_rate") su.catch_rate_rad_s = v;
+      else if (key == "catch_hip") su.catch_hip_tol_rad = v;
+      else if (key == "catch_hold") su.catch_hold_s = v;
+      else if (key == "fall") su.fall_lean_rad = v;
+      else if (key == "timeout") su.timeout_s = v;
+      else if (key == "grace") su.grace_s = v;
+      else if (key == "grace_fall") su.grace_fall_pitch_rad = v;
+      else throw std::invalid_argument("unknown --standup key: " + key);
+    }
+  }
+
   static void applyJumpSpec(tap_fw::v3::JumpSequence::Config& jump, const std::string& spec) {
     jump.enabled = true;
     auto& pl = jump.planner;
@@ -303,6 +348,7 @@ class GimV3Runner {
     config.tier.sus_adaptive = true;
     config.trim_acc = false;
     applyJumpSpec(config.jump, options.jump_spec);
+    applyStandUpSpec(config.standup, options.standup_spec);
     if (options.plan_vmax > 0.0) config.tier.plan_vmax_m_s = static_cast<float>(options.plan_vmax);
     // motor_reserve < 0 keeps the default; 0 still caps at the no-load speed; >= 1.5 turns the envelope off.
     if (options.motor_reserve >= 0.0) config.tier.motor_reserve = static_cast<float>(options.motor_reserve);
@@ -435,21 +481,34 @@ class GimV3Runner {
     std::string op;
     stream >> op;
     if (op == "ENABLE") {
+      // A robot that starts lying (--start-key other than spawn_extended) only becomes active through STANDUP:
+      // the normal start-up would lock the legs to the extended pose and drag the lying robot there.
+      if (options_.start_key != "spawn_extended" && !stood_up_) {
+        std::cout << "ENABLE_REJECTED|reason=robot_starts_lying_use_STANDUP" << std::endl;
+        return;
+      }
       if (!estop_ && !enable_request_) start_pending_ = true;
       enable_request_ = true;
       disable_request_ = false;
     } else if (op == "DISABLE") {
       enable_request_ = false;
       disable_request_ = true;
+      stood_up_ = false;                 // limp again: a lying start needs STANDUP once more
       command_.forward_m_s = command_.yaw_rad_s = 0.0F;
     } else if (op == "ESTOP") {
       estop_ = true;
+      stood_up_ = false;
       enable_request_ = false;
       command_.forward_m_s = command_.yaw_rad_s = 0.0F;
     } else if (op == "CLEAR_ESTOP") estop_ = false;
     else if (op == "RESET") reset();
     else if (op == "STOP") command_.forward_m_s = command_.yaw_rad_s = 0.0F;
     else if (op == "GO") go_pending_ = true;
+    else if (op == "STANDUP") {          // the rocking stand-up from the lying pose (start with --start-key home)
+      if (!estop_ && !enable_request_) standup_pending_ = true;
+      stood_up_ = !estop_;
+      enable_request_ = true;
+    }
     else if (op == "JUMP") {
       float distance = 0.0F;      // "JUMP" = the default hop, "JUMP 0" = vertical, "JUMP 0.05" = hop 5 cm
       jump_forward_m_ = (stream >> distance && std::isfinite(distance)) ? distance
@@ -513,7 +572,7 @@ class GimV3Runner {
     controller_ = V3Controller(simulationControllerConfig(options_));
     announcePlan(controller_.prepareJump());
     estimator_.reset();
-    mj_resetDataKeyframe(model_, data_, id(model_, mjOBJ_KEY, "spawn_extended"));
+    mj_resetDataKeyframe(model_, data_, id(model_, mjOBJ_KEY, options_.start_key.c_str()));
     mj_forward(model_, data_);
     const float knee = controller_.config().initial_knee_rad;
     const auto spawn_pose = tap_fw::v3::LegHeight::forKnee(knee);
@@ -527,7 +586,9 @@ class GimV3Runner {
     controller_.setBalanceAngle(true,
         robot_control::WholeBodyModel::equilibriumPitch(spawn_com) + virtual_offset);
     enable_request_ = disable_request_ = estop_ = false;
-    physics_started_ = false;
+    // The extended spawn is held by the start-up fixture (physics frozen) until the controller is ready; a robot
+    // that starts in another keyframe (the lying pose) is on the floor under gravity from the first tick.
+    physics_started_ = options_.start_key != "spawn_extended";
     enable_seen_ = false;
     push_force_n_ = 0;
     push_until_s_ = 0;
@@ -536,7 +597,7 @@ class GimV3Runner {
     wheel_enable_elapsed_s_ = 0;
     wheel_target_rad_s_.fill(0);
     wheel_speed_reference_rad_s_.fill(0);
-    start_pending_ = go_pending_ = jump_pending_ = false;
+    start_pending_ = go_pending_ = jump_pending_ = standup_pending_ = stood_up_ = false;
     command_ = {};
     command_.height_m = spawn_pose.axle_below_hip_m;
     output_ = {};
@@ -608,6 +669,8 @@ class GimV3Runner {
     V3Controller::Command cmd{};
     cmd.start = start_pending_ && in.sensors_ok;
     if (cmd.start) start_pending_ = false;
+    cmd.standup = standup_pending_ && in.sensors_ok;
+    if (cmd.standup) standup_pending_ = false;
     cmd.go = go_pending_;
     go_pending_ = false;
     cmd.jump = jump_pending_ && output_.state == V3Controller::State::Balancing;
@@ -803,7 +866,7 @@ class GimV3Runner {
               << "|leg_iq_lh=" << leg_measured_current_[0]
               << "|leg_iq_lk=" << leg_measured_current_[1]
               << "|jump_phase=" << output_.jump_phase
-              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|sus_dz=" << controller_.suspensionOffset() << "|sus_db=" << controller_.suspensionDeadband() << "|roll_est=" << controller_.rollEstimate() << "|roll_ref=" << controller_.rollReference() << "|roll_dh=" << controller_.rollSideHeight() << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
+              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|wheel_tq_l=" << data_->ctrl[joints_[2].actuator] << "|wheel_tq_r=" << data_->ctrl[joints_[5].actuator] << "|su_phase=" << static_cast<int>(controller_.standupState().phase) << "|su_lean=" << controller_.standupLean() << "|su_hip=" << controller_.standupState().hip_target_rad << "|su_wheel=" << controller_.standupState().wheel_rad_s << "|sus_dz=" << controller_.suspensionOffset() << "|sus_db=" << controller_.suspensionDeadband() << "|roll_est=" << controller_.rollEstimate() << "|roll_ref=" << controller_.rollReference() << "|roll_dh=" << controller_.rollSideHeight() << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
               << "|cmd_hip=" << output_.leg_hip_offset_rad << "|cmd_knee=" << output_.leg_knee_offset_rad
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)
@@ -873,7 +936,8 @@ class GimV3Runner {
   bool enable_request_ = false, disable_request_ = false, estop_ = false;
   std::size_t next_scheduled_ = 0;
   int last_jump_phase_ = 0;
-  bool start_pending_ = false, go_pending_ = false, jump_pending_ = false, imu_seeded_ = false;
+  bool start_pending_ = false, go_pending_ = false, jump_pending_ = false, standup_pending_ = false, imu_seeded_ = false;
+  bool stood_up_ = false;   // a lying start: STANDUP was given (ENABLE is refused until then)
   float jump_forward_m_ = std::numeric_limits<float>::quiet_NaN();
   bool physics_started_ = false;
   bool enable_seen_ = false;

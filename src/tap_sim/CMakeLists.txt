@@ -128,6 +128,11 @@ if(BUILD_TESTING)
       --runner $<TARGET_FILE:tap_mujoco_gim_v3>
       --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
   set_tests_properties(gim_high_speed PROPERTIES TIMEOUT 300)
+  add_test(NAME gim_standup
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_standup_test.py
+      --runner $<TARGET_FILE:tap_mujoco_gim_v3>
+      --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
+  set_tests_properties(gim_standup PROPERTIES TIMEOUT 300)
   add_executable(tap_mujoco_sim_actuator_bus_tests tests/sim_actuator_bus_tests.cpp)
   target_compile_features(tap_mujoco_sim_actuator_bus_tests PRIVATE cxx_std_17)
   target_compile_options(tap_mujoco_sim_actuator_bus_tests PRIVATE -Wall -Wextra -Wpedantic)
