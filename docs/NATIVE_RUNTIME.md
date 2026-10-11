@@ -129,6 +129,37 @@ For native simulation diagnostics only, `PUSH force_N duration_s` applies a
 bounded world-X force at the body COM. Fault, Disable and Estop tests still
 integrate gravity/contact dynamics after stopping the controller.
 
+## Rough terrain (simulation only)
+
+`python3 tools/build_rough_terrain.py [--max-slope-deg 17.7] [--seed 1]` writes `src/tap_sim/model/gim_rough.xml` (the
+robot of `gim_dynamic.xml` on a height field) and `gim_rough_terrain.bin`. Both are generated: rerun the script after
+changing `gim_dynamic.xml`; the `.bin` (1.4 MB) is not meant to be edited. Open it with
+`TAP_SIM_MODEL=src/tap_sim/model/gim_rough.xml python3 tools/tap_native_gui.py`, or pass it to `--model`.
+
+- 12 x 3 m at 1 cm: a flat start pad (x < 0.7 m, the robot spawns at the origin), smooth 2-D waves (wavelengths 0.4-2.6 m in
+  different directions, so the two wheels see different heights) plus a little 12 cm roughness, a flat run-out.
+  Driving forward (+x) from the pad crosses it in about 8 m. Beyond the field edge there is a safety floor 8 cm below
+  the lowest valley, so do not drive off the field.
+- The one knob is the steepest slope; the heights follow from it (default 17.7 deg, which is 1.5 x the heights of the first
+  12 deg version: -41..+39 mm, median slope 4.8 deg, 99% 12.6 deg, a left/right height difference across the track of up
+  to 38 mm). The script measures the slope on the grid triangles and again by casting
+  rays into the compiled MuJoCo model, and refuses more than 45 deg. No steps by construction (sums of sinusoids and
+  filtered noise).
+- The wheels give at most 2 x 0.13 N.m / 0.04 m = 6.5 N of ground force, so the robot cannot hold itself on more than
+  ~12 deg. Steeper versions (`--max-slope-deg 25`) are for jumps, hops and falls, not for driving.
+- Roll balance in the sim: the runner option `--roll 1` turns it on with the layered response the firmware boots with
+  (level reference learned in place, turn lean-in, latch, loop tied to the pitch gimbal). The dashboard passes it by
+  default (`TAP_SIM_ROLL=0` turns it off); the headless tests and `tap_mujoco_gim_v3` alone keep it off. Telemetry:
+  `roll_est`, `roll_ref`, `roll_dh` (side height offset). On the 17.7 deg terrain it cuts the peak body roll from
+  0.116 / 0.117 / 0.134 rad to 0.067 / 0.086 / 0.094 rad at 0.3 / 0.6 / 1.0 m/s (30-42 %); the jump on flat ground
+  is unchanged (14 of 15 cases standing, same as off). The firmware still boots with roll off (robot-unverified).
+- Known limit: the `wheel_clearance` telemetry is the wheel height above z = 0, not above the terrain (the jump test's
+  clearance scoring is for the flat model). The controller never sees the terrain (`ground_truth_to_controller=0`).
+- Reference run (roll balance off, as in the runner): the robot stands on the pad and drives over it at 0.3, 0.6 and
+  1.0 m/s without falling; body roll up to 0.13 rad (7.7 deg), pitch up to 0.04 rad. On the steepest spots (above the
+  ~12 deg the wheels can hold) it slows down: 4.7 m instead of 5.4 m after 18 s at 0.3 m/s, 7.5 m instead of 8.1 m
+  after 8 s at 1.0 m/s. The first version (12 deg) reached roll 0.08 rad.
+
 ## Sensor boundary
 
 Balance feedback uses simulated MPU6500 accelerometer/gyro and the six motor

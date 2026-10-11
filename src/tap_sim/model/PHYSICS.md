@@ -40,6 +40,11 @@ estimates below, recorded in `gim_mass_properties.yaml`.
   body origin 0.21649 m above ground, body upright and both wheels on the floor.
   `cad_neutral` remains a separate assembly-reference keyframe, not the spawn.
   The V3 runner's initial lock target matches this extended pose.
+- `home` is the lying pose (copied unchanged from branch `lab`, commit 7cfb005, used there by the recovery
+  training): hips +74.8 deg, knees at CAD zero, body origin 0.04172 m above ground, upright. Only the wheels
+  touch the floor at the start. The CAD convex hulls of the body and each shin overlap by 2.3 mm in this pose, so
+  `<exclude>` removes that body-shin collision pair (it gave an artificial launch impulse). Nothing in the runner
+  or the dashboard starts from `home`; the runner and the viewer use `spawn_extended`.
 
 ## Mass and inertia
 

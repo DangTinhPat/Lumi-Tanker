@@ -70,7 +70,10 @@ class NativeBackend:
             if self.running:
                 return
             runner = self.runner_path()
-            model = self.root / "src/tap_sim/model/gim_dynamic.xml"
+            # TAP_SIM_MODEL=<xml>: another model (e.g. the rough terrain, tools/build_rough_terrain.py)
+            model = Path(os.environ.get("TAP_SIM_MODEL") or self.root / "src/tap_sim/model/gim_dynamic.xml")
+            if not model.is_absolute():
+                model = self.root / model
             if not model.is_file():
                 raise RuntimeError(f"GIM dynamic model is missing: {model}")
             self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -81,6 +84,8 @@ class NativeBackend:
             # (keys: applyJumpSpec in gim_v3_runner.cpp).
             if os.environ.get("TAP_JUMP_SPEC"):
                 command += ["--jump", os.environ["TAP_JUMP_SPEC"]]
+            # Roll balance is on in the dashboard sim (TAP_SIM_ROLL=0 turns it off); the headless tests keep it off.
+            command += ["--roll", "0" if os.environ.get("TAP_SIM_ROLL") == "0" else "1"]
             self.process = subprocess.Popen(
                 command,
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

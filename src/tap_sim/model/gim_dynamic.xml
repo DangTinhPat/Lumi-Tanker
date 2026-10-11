@@ -169,6 +169,8 @@
     </body>
   </worldbody>
   <contact>
+    <exclude body1="gim_body" body2="left_shin"/>
+    <exclude body1="gim_body" body2="right_shin"/>
     <pair geom1="ground" geom2="left_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
     <pair geom1="ground" geom2="right_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
   </contact>
@@ -193,5 +195,6 @@
   <keyframe>
     <key name="spawn_extended" qpos="0 0 0.216490386 1 0 0 0 -0.986111111 1.97222222 0 -0.986111111 1.97222222 0"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
+    <key name="home" qpos="0 0 0.04172 1 0 0 0 1.30550628 0 0 1.30550628 0 0"/>
   </keyframe>
 </mujoco>

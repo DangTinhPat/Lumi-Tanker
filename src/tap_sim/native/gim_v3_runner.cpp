@@ -47,6 +47,7 @@ struct Options {
   // Speed ceilings [m/s], 0 = the controller defaults: DRIVE clamp, planned speed cap, LQR ground speed cap.
   double drive_max = 4.1888, plan_vmax = 0.0, ground_vmax = 0.0, track_margin = -1.0;
   double motor_reserve = -1.0, lateral_accel = -1.0;
+  bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
   std::vector<std::pair<double, std::string>> schedule;
@@ -86,6 +87,7 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--plan-vmax") out.plan_vmax = number(next(), "--plan-vmax");
     else if (arg == "--ground-vmax") out.ground_vmax = number(next(), "--ground-vmax");
     else if (arg == "--track-margin") out.track_margin = number(next(), "--track-margin");
+    else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
     else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
     else if (arg == "--at") {
@@ -269,7 +271,13 @@ class GimV3Runner {
     config.engage.immediate = true;
     config.engage.automatic = true;
     config.engage.wb_armed_only = false;
-    config.roll.enabled = false;
+    // Roll balance (SET roll 1 on the robot) with the layered response the firmware boots with
+    // (AppV3.cpp): level reference learned in place, turn lean-in, latch, loop tied to the pitch gimbal.
+    config.roll.enabled = options.roll;
+    config.roll.learn_ref = true;
+    config.roll.cmd_preview = true;
+    config.roll.latch = true;
+    config.roll.gimbal_link = true;
     config.initial_knee_rad = tap_fw::v3::LegHeight::kKneeMaxRad;
     config.com_height_m = tap_fw::v3::LegHeight::forKnee(config.initial_knee_rad).com_above_axle_m;
     config.lqr_inertia_length = true;
@@ -795,7 +803,7 @@ class GimV3Runner {
               << "|leg_iq_lh=" << leg_measured_current_[0]
               << "|leg_iq_lk=" << leg_measured_current_[1]
               << "|jump_phase=" << output_.jump_phase
-              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
+              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|sus_dz=" << controller_.suspensionOffset() << "|sus_db=" << controller_.suspensionDeadband() << "|roll_est=" << controller_.rollEstimate() << "|roll_ref=" << controller_.rollReference() << "|roll_dh=" << controller_.rollSideHeight() << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
               << "|cmd_hip=" << output_.leg_hip_offset_rad << "|cmd_knee=" << output_.leg_knee_offset_rad
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)

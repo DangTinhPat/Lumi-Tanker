@@ -107,6 +107,12 @@ def main():
               - math.sin(hip + knee) * 0.09816 + math.cos(hip + knee) * -0.01908)
     spawn_qpos = vec((0, 0, 0.040 - axle_z, 1, 0, 0, 0,
                       hip, knee, 0, hip, knee, 0))
+    # "home": the lying pose (body 41.7 mm above the floor, hips folded 74.8 deg, knees at their CAD zero); the
+    # body and the shin convex hulls overlap by 2.3 mm there, so that pair is excluded from collision below.
+    hip_home = math.radians(74.8)
+    knee_home = 0.0
+    home_qpos = vec((0, 0, 0.04172, 1, 0, 0, 0, hip_home, knee_home, 0,
+                     hip_home, knee_home, 0))
     xml = f'''<mujoco model="gim6010_v3_dynamic">
   <compiler angle="radian" autolimits="true"/>
   <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
@@ -162,6 +168,8 @@ def main():
     </body>
   </worldbody>
   <contact>
+    <exclude body1="gim_body" body2="left_shin"/>
+    <exclude body1="gim_body" body2="right_shin"/>
     <pair geom1="ground" geom2="left_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
     <pair geom1="ground" geom2="right_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
   </contact>
@@ -186,6 +194,7 @@ def main():
   <keyframe>
     <key name="spawn_extended" qpos="{spawn_qpos}"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
+    <key name="home" qpos="{home_qpos}"/>
   </keyframe>
 </mujoco>
 '''
