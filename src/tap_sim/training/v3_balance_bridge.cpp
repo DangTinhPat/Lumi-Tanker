@@ -28,6 +28,7 @@ struct Bridge {
   V3Controller controller;
   V3Controller::Output output{};
   std::array<float, 4> previous_target{};
+  float pitch_rad = 0.0F;
   bool imu_seeded = false;
   bool start_sent = false;
 };
@@ -36,11 +37,12 @@ void configureBalance(Bridge& bridge, const float* q) {
   namespace geometry = robot_control::geometry;
   auto config = tap_fw::v3::defaultV3Config();
   config.lqr.sampling_period_s = bridge.dt_s;
+  config.lock_settle_us = 100'000U;
   config.engage.immediate = true;
   config.engage.automatic = true;
   config.engage.wb_armed_only = false;
   config.roll.enabled = false;
-  config.initial_knee_rad = std::clamp(0.5F * (q[1] + q[4]),
+  config.initial_knee_rad = std::clamp(std::max(0.8F, 0.5F * (q[1] + q[4])),
       tap_fw::v3::LegHeight::kKneeMinRad, tap_fw::v3::LegHeight::kKneeMaxRad);
   config.com_height_m = tap_fw::v3::LegHeight::forKnee(
       config.initial_knee_rad).com_above_axle_m;
@@ -97,20 +99,48 @@ int tap_v3_balance_step(void* handle, const float* accel, const float* gyro,
                        const float* q, const float* qd, const float* measured_current,
                        double now_s, int request_balance, float* target_current,
                        float* wheel_speed, int* state, int* wheels_enabled,
-                       int* legs_locked, int* imu_valid) {
+                       int* legs_locked, int* imu_valid, float* estimated_pitch) {
   if (!handle || !accel || !gyro || !q || !qd || !measured_current ||
       !target_current || !wheel_speed || !state || !wheels_enabled ||
-      !legs_locked || !imu_valid || !std::isfinite(now_s)) return -1;
+      !legs_locked || !imu_valid || !estimated_pitch || !std::isfinite(now_s)) return -1;
   try {
     auto& bridge = *static_cast<Bridge*>(handle);
     const std::array<float, 3> a{accel[0], accel[1], accel[2]};
     const std::array<float, 3> g{gyro[0], gyro[1], gyro[2]};
     robot_control::ImuStateEstimator::Output estimate{};
-    if (request_balance) {
+    if (!bridge.imu_seeded) {
+      bool encoder_stance = true;
+      bool encoders_quiet = true;
+      for (int side = 0; side < 2; ++side) {
+        const int joint = 3 * side;
+        encoder_stance = encoder_stance && q[joint] < -0.30F && q[joint + 1] > 0.15F;
+        encoders_quiet = encoders_quiet && std::abs(qd[joint]) < 0.5F &&
+            std::abs(qd[joint + 1]) < 0.5F && std::abs(qd[joint + 2]) < 2.0F;
+      }
+      const bool upright_gravity = a[2] > 0.8F * 9.81F &&
+          std::abs(a[0]) < 0.6F * 9.81F && encoder_stance && encoders_quiet;
+      if (upright_gravity) {
+        estimate = bridge.estimator.update(a, g, bridge.dt_s,
+            static_cast<float>(now_s), 0.0F, bridge.output.legs_moving, false);
+      } else {
+        bridge.estimator.reset();
+      }
+    } else {
+      robot_control::WholeBodyModel::PlanarVelocity velocity{};
+      for (int side = 0; side < 2; ++side) {
+        const int joint = 3 * side;
+        const auto leg = robot_control::WholeBodyModel::imuVelocityThroughLeg(
+            bridge.pitch_rad, g[1], q[joint], q[joint + 1], qd[joint],
+            qd[joint + 1], qd[joint + 2]);
+        velocity.horizontal_m_s += 0.5F * leg.horizontal_m_s;
+        velocity.vertical_m_s += 0.5F * leg.vertical_m_s;
+      }
       estimate = bridge.estimator.update(a, g, bridge.dt_s,
-          static_cast<float>(now_s), 0.0F, bridge.output.legs_moving, false);
-      bridge.imu_seeded = bridge.imu_seeded || estimate.seeded;
+          static_cast<float>(now_s), 0.0F, bridge.output.legs_moving, false,
+          {velocity.horizontal_m_s, velocity.vertical_m_s, true});
     }
+    bridge.imu_seeded = bridge.imu_seeded || estimate.seeded;
+    bridge.pitch_rad = estimate.pitch_rad;
 
     if (request_balance && !bridge.start_sent && bridge.imu_seeded && estimate.valid) {
       configureBalance(bridge, q);
@@ -140,8 +170,8 @@ int tap_v3_balance_step(void* handle, const float* accel, const float* gyro,
       in.wheel_pos_rad[side] = q[joint + 2];
       in.leg_chain_rad += 0.5F * (q[joint] + q[joint + 1]);
       in.legs_ready = in.legs_ready &&
-          std::abs(bridge.previous_target[2 * side] - q[joint]) < 0.08F &&
-          std::abs(bridge.previous_target[2 * side + 1] - q[joint + 1]) < 0.08F;
+          std::abs(bridge.previous_target[2 * side] - q[joint]) < 0.15F &&
+          std::abs(bridge.previous_target[2 * side + 1] - q[joint + 1]) < 0.15F;
     }
 
     V3Controller::Command command{};
@@ -150,11 +180,16 @@ int tap_v3_balance_step(void* handle, const float* accel, const float* gyro,
         bridge.controller.config().initial_knee_rad).axle_below_hip_m;
     bridge.output = bridge.controller.update(in, command);
 
-    const std::array<float, 4> target{
+    std::array<float, 4> target{
         bridge.output.leg_hip_offset_rad + bridge.output.leg_roll_hip_rad[0],
         bridge.output.leg_knee_offset_rad + bridge.output.leg_roll_knee_rad[0],
         bridge.output.leg_hip_offset_rad + bridge.output.leg_roll_hip_rad[1],
         bridge.output.leg_knee_offset_rad + bridge.output.leg_roll_knee_rad[1]};
+    if (bridge.output.state == V3Controller::State::Locking ||
+        bridge.output.state == V3Controller::State::Ready ||
+        bridge.output.state == V3Controller::State::Fault) {
+      target = bridge.previous_target;
+    }
     for (int i = 0; i < 4; ++i) {
       const float rate = (target[i] - bridge.previous_target[i]) / bridge.dt_s;
       bridge.previous_target[i] = target[i];
@@ -177,6 +212,7 @@ int tap_v3_balance_step(void* handle, const float* accel, const float* gyro,
     *wheels_enabled = bridge.output.wheels_enabled;
     *legs_locked = bridge.output.legs_locked;
     *imu_valid = in.sensors_ok;
+    *estimated_pitch = estimate.pitch_rad;
     return 0;
   } catch (...) {
     return -2;

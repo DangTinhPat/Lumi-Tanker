@@ -30,7 +30,7 @@ class V3BalanceBridge:
         self.lib.tap_v3_balance_step.argtypes = [
             ctypes.c_void_p, float_ptr, float_ptr, float_ptr, float_ptr,
             float_ptr, ctypes.c_double, ctypes.c_int, float_ptr, float_ptr,
-            int_ptr, int_ptr, int_ptr, int_ptr,
+            int_ptr, int_ptr, int_ptr, int_ptr, float_ptr,
         ]
         self.lib.tap_v3_balance_step.restype = ctypes.c_int
         self.lib.tap_v3_leg_gravity.argtypes = [float_ptr, float_ptr]
@@ -53,16 +53,18 @@ class V3BalanceBridge:
         target_current = (ctypes.c_float * 4)()
         wheel_speed = (ctypes.c_float * 2)()
         state, wheels_enabled, legs_locked, imu_valid = (ctypes.c_int() for _ in range(4))
+        estimated_pitch = ctypes.c_float()
         result = self.lib.tap_v3_balance_step(
             self.handle, *arrays, now_s, int(request_balance), target_current,
             wheel_speed, ctypes.byref(state), ctypes.byref(wheels_enabled),
-            ctypes.byref(legs_locked), ctypes.byref(imu_valid),
+            ctypes.byref(legs_locked), ctypes.byref(imu_valid), ctypes.byref(estimated_pitch),
         )
         if result != 0:
             raise RuntimeError(f"V3 balance bridge failed ({result})")
         return (
             tuple(target_current), tuple(wheel_speed), state.value,
             bool(wheels_enabled.value), bool(legs_locked.value), bool(imu_valid.value),
+            estimated_pitch.value,
         )
 
     def gravity_torque(self, q):
