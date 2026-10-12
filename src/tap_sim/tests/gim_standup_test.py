@@ -27,14 +27,15 @@ def W(delay, lag):
 
 
 # (label, STANDUP time s, runner args, drive afterwards). The wheels carry no torque while rocking (wheels_off); after the
-# hand-over the stand-up and the 0.3 m/s drive both hold down to 0.065 N.m (they fall at 0.05 N.m).
+# hand-over the stand-up and the 0.3 m/s drive are checked down to 0.11 N.m (the operator's accepted floor; the motor
+# peak is 0.13 N.m). With the module-decomposed body (Iyy 0.0043) 0.11 N.m no longer carries the hand-over.
 CASES = [("nominal", 0.2, [], True), ("late command", 0.7, [], True), ("command off the control tick", 0.23, [], True),
          ("wheel 30/50 ms", 0.2, W(0.03, 0.05), True), ("wheel 35/70 ms", 0.2, W(0.035, 0.07), True),
          ("wheel 70/110 ms", 0.2, W(0.07, 0.11), True), ("wheel 20/30 ms", 0.2, W(0.02, 0.03), True),
          ("roll balance on", 0.2, ["--roll", "1"], True),
-         ("wheel torque 0.065 N.m", 0.2, ["--wheel-torque", "0.065"], True),
-         ("wheel torque 0.065 N.m, wheel 70/110 ms, stand only", 0.2, ["--wheel-torque", "0.065", *W(0.07, 0.11)], False),
-         ("wheel torque 0.065 N.m, roll on, stand only", 0.2, ["--wheel-torque", "0.065", "--roll", "1"], False)]
+         ("wheel torque 0.11 N.m", 0.2, ["--wheel-torque", "0.11"], True),
+         ("wheel torque 0.11 N.m, wheel 70/110 ms, stand only", 0.2, ["--wheel-torque", "0.11", *W(0.07, 0.11)], False),
+         ("wheel torque 0.11 N.m, roll on, stand only", 0.2, ["--wheel-torque", "0.11", "--roll", "1"], False)]
 
 
 def run(job):

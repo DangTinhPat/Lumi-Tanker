@@ -68,6 +68,8 @@ thẳng ổn định, gối > 1,55 rad, |pitch| < 0,05 rad ở 19 s, trước kh
 | 0,05 N·m | không đứng | 11/11 | 0/11 |
 | 0,04 N·m | không đứng | 10/11 | 0/11 |
 
+**Cập nhật 2026-10-12 (thân mô hình theo module, Iyy 0,0043):** bảng trên đo với thân cũ. Với thân mới, đứng dậy rồi lái đạt ở 0,13 và 0,11 N·m (ca mô phỏng trong `gim_standup`); 0,065 N·m không còn qua bàn giao. Sàn kiểm tra là 0,11 N·m, mức người vận hành chấp nhận, vì đỉnh động cơ là 0,13 N·m.
+
 Tắt mô-men bánh trong pha rocking làm ngưỡng của phần sau bàn giao tăng từ 0,05 lên 0,065 N·m (trạng thái bàn giao hơi khác khi
 bánh được thả). Vì **lái 0,3 m/s vốn cần ≥ 0,065 N·m** (ở 0,05 robot đứng dậy xong nhưng ngã khi nhận lệnh lái), giới hạn dưới
 của cả quy trình đứng dậy rồi lái là 0,065 N·m trong cả hai cách; dự trữ so với đỉnh 0,13 N·m là 2 lần. Chọn tắt mô-men vì pha rocking
