@@ -326,6 +326,10 @@ inline MitFeedback unpackMitFeedback(const MitBytes& b) {
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kDxlTorqueEnableAddr = 0x18;
+constexpr std::uint8_t kDxlVelocityModeAddr = 0x11;  // 1=Speed/Wheel mode, 2=Position mode.
+constexpr std::uint8_t kDxlGoalPositionAddr = 0x1E;  // u16 LE, 0..1023/rev (10-bit, same frame as Present Position).
+constexpr std::uint8_t kDxlVelModeSpeed = 1;
+constexpr std::uint8_t kDxlVelModePosition = 2;
 constexpr std::uint8_t kDxlMovingSpeedAddr = 0x20;
 constexpr std::uint8_t kDxlPresentAddr = 0x24;
 constexpr std::uint8_t kDxlPresentLen = 6;
@@ -412,6 +416,21 @@ inline DxlFrame buildMovingSpeed(std::uint8_t id, float rad_s) {
 inline DxlFrame buildReadPresent(std::uint8_t id) {
   const std::uint8_t params[2] = {kDxlPresentAddr, kDxlPresentLen};
   return detail::buildFrame(id, kDxlInsRead, params, 2);
+}
+// TEST1/ec4012_uart_gui.py §Velocity Mode: this write PERSISTS TO FLASH on
+// this motor, unlike Torque Enable/Moving Speed/Goal Position - callers must
+// not spam it (switch once per hold/release edge, not every tick).
+inline DxlFrame buildVelocityMode(std::uint8_t id, std::uint8_t mode) {
+  const std::uint8_t params[2] = {kDxlVelocityModeAddr, mode};
+  return detail::buildFrame(id, kDxlInsWrite, params, 2);
+}
+// Position mode only (kDxlVelModePosition); position_raw is the same 10-bit
+// single-turn frame as Present Position (0..1023/rev).
+inline DxlFrame buildGoalPosition(std::uint8_t id, std::uint16_t position_raw) {
+  const auto p = static_cast<std::uint16_t>(position_raw & 0x03FFU);
+  const std::uint8_t params[3] = {kDxlGoalPositionAddr, static_cast<std::uint8_t>(p & 0xFFU),
+                                   static_cast<std::uint8_t>(p >> 8)};
+  return detail::buildFrame(id, kDxlInsWrite, params, 3);
 }
 
 struct DxlParsed {

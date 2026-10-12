@@ -4,7 +4,7 @@
 Nạp firmware tools/leg_jog_fw vào ESP32, rồi chạy GUI này. GUI nói chuyện với
 ESP32 qua cổng CP2102 (115200 baud); ESP32 thay USB-CAN-A của
 TEST1/gds68_controller.py, tự giữ vòng MIT 100 Hz cho cả 4 khớp và lái 2 bánh
-qua UART1/UART2.
+qua 1 bus UART chung (GPIO17), phân biệt bằng motor id.
 
     pio run -d tools/leg_jog_fw -t upload --upload-port /dev/ttyUSB1
     python3 tools/leg_jog_gui.py
@@ -57,11 +57,14 @@ JOINT_TEXT = {
 HIP_HINT = ("− hạ", "+ nâng")
 KNEE_HINT = ("− gập", "+ duỗi")
 FIELDS_PER_JOINT = 8
-WHEELS = ("LW", "RW")  # Firmware order: UART1, UART2.
-WHEEL_TEXT = {"LW": "Trái (UART1)", "RW": "Phải (UART2)"}
+WHEELS = ("LW", "RW")  # Firmware order; both now share one bus (motor id 2/1).
+WHEEL_TEXT = {"LW": "Trái (id=2)", "RW": "Phải (id=1)"}
 WHEEL_STATE_TEXT = {0: "thả lỏng", 1: "đang chạy", 2: "LỖI · nhả nút", 3: "GIỮ CỨNG (MAX)"}
 FIELDS_PER_WHEEL = 6
-WHEEL_RAW_MAX = 400
+# Kpower BL4012 no-load speed (2026-10-12, user request). 400 (rated speed)
+# is the continuous-duty-safe ceiling; above that under load risks
+# overheating/overcurrent - raising this is an operator tradeoff.
+WHEEL_RAW_MAX = 950
 WHEEL_BTN_BG = "#3a2a10"
 WHEEL_COUNTS = 1024      # Present Position counts per revolution.
 RPM_WINDOW_S = 1.0       # Sliding window for the position-derived RPM.
@@ -782,12 +785,18 @@ class LegJogApp:
             c["err"].config(text=f"0x{w['err']:02X}", fg=RED if w["err"] else CYAN)
         # The firmware drops the hold on its own (fault/DISABLE/ESTOP/nonzero
         # WHEEL); mirror that in the button so it never lies about the state.
-        if self.wheel_hold_var.get() != any_holding:
-            self.wheel_hold_var.set(any_holding)
-            self._set_wheel_hold_look(any_holding)
-            if w["state"] == 2 and self.wheel_latch_button is not None:
-                self._stop_wheel_latch()
-                self._log("err", f"{name} mất feedback: đã dừng quay liên tục.")
+        # One-directional on purpose (True -> False only): hold only ever
+        # turns ON via an explicit WHOLD 1 from _toggle_wheel_hold, never on
+        # its own, so syncing False -> True here as well would re-show "on"
+        # from a status line queued just before a WHOLD 0 click took effect
+        # on the firmware - fighting the user's own click with a stale read,
+        # not an actual stuck hold (2026-10-12 user report).
+        if not any_holding and self.wheel_hold_var.get():
+            self.wheel_hold_var.set(False)
+            self._set_wheel_hold_look(False)
+        if w["state"] == 2 and self.wheel_latch_button is not None:
+            self._stop_wheel_latch()
+            self._log("err", f"{name} mất feedback: đã dừng quay liên tục.")
 
     def _measured_rpm(self, name, pos_raw):
         """RPM from Present Position deltas over RPM_WINDOW_S, independent of

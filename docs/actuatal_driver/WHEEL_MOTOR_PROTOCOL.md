@@ -115,14 +115,19 @@ Quy trình bật động cơ đầy đủ, có độ trễ:
 
 Dải raw speed của protocol (`±400`) trùng đúng số với tốc độ danh định
 động cơ (400 RPM, xác nhận lại đúng với datasheet Kpower BL4012 mục 1).
-Kết luận: **raw = RPM**, giới hạn ở tốc độ danh định (an toàn khi chạy
-liên tục), dù motor vật lý có thể lên tới 950 RPM không tải (@12V). Không
-có hộp số → RPM trục bánh xe trực tiếp, khớp với Present Position cũng là
-1 vòng quay motor không qua giảm tốc.
+Kết luận: **raw = RPM**.
+
+2026-10-12 (theo yêu cầu người dùng): `tools/leg_jog_fw` (`Config::wheel_raw_max`)
+và `tools/leg_jog_gui.py` (`WHEEL_RAW_MAX`) nâng trần lệnh lên **950** (tốc độ
+không tải @12V) thay vì giữ ở 400 (tốc độ danh định). Đây là đánh đổi của
+người vận hành, không phải sửa giới hạn phần cứng: trên 400, chạy liên tục
+**có tải** có nguy cơ quá nhiệt/quá dòng vì ngoài vùng hoạt động liên tục của
+motor. Không có hộp số → RPM trục bánh xe trực tiếp, khớp với Present
+Position cũng là 1 vòng quay motor không qua giảm tốc.
 
 ```
 rad/s = RPM × 2π / 60     (≈ RPM × 0.10472)
-RPM   = rad/s × 60 / 2π   (≈ rad/s × 9.5493), clamp vào [-400, 400]
+RPM   = rad/s × 60 / 2π   (≈ rad/s × 9.5493), clamp vào [-950, 950] (operator ceiling, xem trên)
 ```
 
 Đây là suy luận từ trùng khớp số liệu datasheet (400=400), không phải câu
