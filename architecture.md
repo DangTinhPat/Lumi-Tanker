@@ -43,7 +43,7 @@ src_fw/
 src/tap_control/
   core/                portable C++17: WholeBodyModel, ImuStateEstimator, LqrBalancer,
                        TunedConfig, EmbeddedController and its native-only pieces
-  hal/                 MotorFrameCodec, MotorMapping, MotorTransport (GDS68 CAN, BL4820 UART)
+  hal/                 MotorFrameCodec, MotorMapping, MotorTransport (GDS68 CAN, BL4012 UART)
   apps/, tests/        demos and core tests
 src/tap_sim/           MuJoCo runner (native/), MJCF + CAD manifest + PHYSICS.md (model/),
                        sensor/actuator drivers, model validation scripts
@@ -71,7 +71,7 @@ problems; this document does not duplicate it.
   500 kbit/s, node IDs and signs in `docs/actuatal_driver/GDS68_MOTOR_MAPPING.md`
   and `MotorMapping.hpp`. The firmware runs all four in the driver's position
   mode; legs lock at the pose they had at power-up (that pose is joint zero).
-- Wheels: two CJC BL4820M12 motors on UART at 1 Mbaud, speed command and
+- Wheels: two CJC BL4012 motors on UART at 1 Mbaud, speed command and
   encoder feedback.
 - Deployable sensor inventory: one MPU6500 and six motor encoders. The leg
   drivers' Iq-based torque estimate is allowed only under the conditions of

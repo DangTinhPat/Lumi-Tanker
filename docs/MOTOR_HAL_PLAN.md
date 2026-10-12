@@ -34,10 +34,10 @@ ngày 2026-09-25; source code chính thức là `robot_hal/MotorMapping.hpp`:
 |---|---|---|---|---:|---|---|
 | 0 | LeftHip | CAN | node_id 3 | +1 | GDS68 | MIT (0x008) |
 | 1 | LeftKnee | CAN | node_id 4 | -1 | GDS68 | MIT (0x008) |
-| 2 | LeftWheel | UART1 | motor id 0x01 | TBD | BL4820M12 | Moving Speed (0x20) |
+| 2 | LeftWheel | UART1 | motor id 0x01 | TBD | BL4012 | Moving Speed (0x20) |
 | 3 | RightHip | CAN | node_id 1 | -1 | GDS68 | MIT (0x008) |
 | 4 | RightKnee | CAN | node_id 2 | +1 | GDS68 | MIT (0x008) |
-| 5 | RightWheel | UART2 | motor id 0x01 | TBD | BL4820M12 | Moving Speed (0x20) |
+| 5 | RightWheel | UART2 | motor id 0x01 | TBD | BL4012 | Moving Speed (0x20) |
 
 Khớp đúng ngân sách peripheral ESP32-S3: đúng 1 controller TWAI, và UART1/
 UART2 (UART0 để lại cho console). Không còn dự phòng — không tách CAN thành
@@ -151,7 +151,7 @@ giá trị bất biến giữa các tick.
 
 Biên không nằm ở struct `MotorCommand`, mà nằm ở byte đi trên dây. Controller
 luôn đóng gói khung CAN MIT thật và khung UART thật. Phía sim có driver giả
-parse đúng những byte đó, mô phỏng hành vi GDS68/BL4820M12, trả lại khung
+parse đúng những byte đó, mô phỏng hành vi GDS68/BL4012, trả lại khung
 feedback thật. Sim và phần cứng dùng chung một codec; chỉ đường truyền khác.
 
 ```
@@ -271,7 +271,7 @@ hoá này vào sim để biết nó có làm hỏng landing không.
 ### 5.4 Trần vật lý
 
 Chân: GDS68 danh định 5 N·m, stall 11 N·m; sim dùng 3.0 N·m (`:588`), còn
-biên. Bánh: BL4820M12 130 mN·m, không hộp số; sim dùng đúng 0.13 N·m
+biên. Bánh: BL4012 130 mN·m, không hộp số; sim dùng đúng 0.13 N·m
 (`:473`, `:1039`), trung thực. Đây là con số khắc nghiệt: 0.13/0.04 = 3.25 N
 lực kéo mỗi bánh, 6.5 N tổng lực kéo — authority bắt thăng bằng thấp.
 

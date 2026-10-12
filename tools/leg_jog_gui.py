@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Leg-jog GUI (DRAFT): điều khiển 4 khớp chân GDS68 và 2 bánh BL4820 từ máy tính.
+"""Leg-jog GUI (DRAFT): điều khiển 4 khớp chân GDS68 và 2 bánh BL4012 từ máy tính.
 
 Nạp firmware tools/leg_jog_fw vào ESP32, rồi chạy GUI này. GUI nói chuyện với
 ESP32 qua cổng CP2102 (115200 baud); ESP32 thay USB-CAN-A của
@@ -429,7 +429,7 @@ class LegJogApp:
         return card
 
     def _build_wheels(self, parent):
-        card = self._card(parent, "2 bánh xe BL4820 (UART) · + = robot tiến · raw ≈ RPM, chưa đo")
+        card = self._card(parent, "2 bánh xe BL4012 (UART) · + = robot tiến · raw ≈ RPM, chưa đo")
         table = tk.Frame(card, bg=CARD)
         table.pack(fill="x", padx=14, pady=(0, 6))
         headers = ("Bánh", "Trạng thái", "Lệnh raw", "Đo raw", "RPM đo",

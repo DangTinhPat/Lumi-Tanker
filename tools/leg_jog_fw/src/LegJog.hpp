@@ -1,7 +1,7 @@
 #pragma once
 
 // Bench jog logic (DRAFT). Drives the four GDS68 leg joints together with
-// low-gain MIT position hold/jog, and the two BL4820 wheels with hold-to-run
+// low-gain MIT position hold/jog, and the two BL4012 wheels with hold-to-run
 // Moving Speed, for operator bring-up on a stand. It is a separate bench tool,
 // not the balance controller: no IMU, no controller core. Pure C++ so it can
 // be host-tested; main.cpp owns the I/O.
@@ -113,6 +113,19 @@ struct Joint {
 
 inline constexpr std::size_t kWheelCount = 2U;
 
+// Bench-rig-only wiring: both wheels (Kpower BL4012, same Dynamixel-like
+// protocol) share one half-duplex UART bus (GPIO17, main.cpp), told apart
+// by motor id, set via Type-C config tool: right=1, left=2. This is NOT
+// how MotorMapping.hpp's kWheelUartBindings is defined - that file still
+// assumes the production src_fw wiring (2 separate full-duplex buses, each
+// with its own motor at id=1) and must stay that way for that code.
+// Index order matches Wheel::name below: [0]=LW, [1]=RW.
+inline constexpr std::array<std::uint8_t, kWheelCount> kBenchWheelId{{2U, 1U}};
+// Confirmed on the assembled robot 2026-10-12: a "drive forward" command
+// spun the right wheel (id=1) correctly but the left wheel (id=2)
+// backward.
+inline constexpr std::array<float, kWheelCount> kBenchWheelSign{{1.0F, -1.0F}};
+
 struct Wheel {
   const char* name = "";
   std::uint8_t bus = 0U;
@@ -213,10 +226,14 @@ class LegJog {
       joints_[i].name = jointName(binding.joint_index);
     }
     for (std::size_t i = 0U; i < kWheelCount; ++i) {
-      const auto& binding = mapping::kWheelUartBindings[i];
-      wheels_[i].bus = 0U;  // shared half-duplex bus; told apart by motor id.
-      wheels_[i].id = binding.motor_id;
-      wheels_[i].sign = binding.driver_sign;
+      // MotorMapping.hpp's motor_id/driver_sign assume the production
+      // 2-separate-buses wiring (src_fw) and must stay that way for that
+      // code. This bench rig instead has both wheels in parallel on one
+      // half-duplex bus (GPIO17), told apart by motor id, which needs a
+      // DIFFERENT id/sign pair - see kBenchWheelId/kBenchWheelSign below.
+      wheels_[i].bus = 0U;  // shared half-duplex bus.
+      wheels_[i].id = kBenchWheelId[i];
+      wheels_[i].sign = kBenchWheelSign[i];
       wheels_[i].name = i == 0U ? "LW" : "RW";
     }
   }

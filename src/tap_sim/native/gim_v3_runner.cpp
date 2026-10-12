@@ -642,8 +642,8 @@ class GimV3Runner {
   V3Controller::Command command_{};
   V3Controller::Output output_{};
   robot_control::ImuStateEstimator estimator_;
-  std::array<robot_control::SimBl4820Wheel, 2> wheels_{{
-      robot_control::SimBl4820Wheel({1}), robot_control::SimBl4820Wheel({2})}};
+  std::array<robot_control::SimBl4012Wheel, 2> wheels_{{
+      robot_control::SimBl4012Wheel({1}), robot_control::SimBl4012Wheel({2})}};
   std::array<std::array<float, 2>, 400> wheel_command_history_{};
   std::size_t wheel_history_index_ = 0, wheel_delay_ticks_ = 0;
   double wheel_enable_elapsed_s_ = 0;

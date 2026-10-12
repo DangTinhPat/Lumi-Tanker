@@ -87,7 +87,7 @@ class ActuatorConfig:
     leg_time_constant_s: float = 0.003
     wheel_time_constant_s: float = 0.005
     wheel_velocity_kp: float = 2.0
-    # CJC BL4820M12 rated speed: 400 rpm, direct drive.
+    # CJC BL4012 rated speed: 400 rpm, direct drive.
     wheel_velocity_limit_rad_s: float = 41.88790204786391
     wheel_coulomb_friction_nm: float = 0.006
     wheel_viscous_friction_nm_s_rad: float = 0.001

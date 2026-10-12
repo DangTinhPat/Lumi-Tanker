@@ -208,7 +208,9 @@ Profile GIM đã thay giới hạn LQR 8 m/s² kế thừa bằng **2,0833 m/s²
 lấy min giữa lực bám và torque cap trên. Motor bánh là giới hạn chính trong
 ước tính này. LQR dùng chiều dài hiệu dụng `I_axle/(m × COM_distance)`;
 khoảng bảng gain là 0,035–0,240 m, không clamp tư thế duỗi ở 0,200 m nữa.
-Torque cap bánh vẫn là giả định; chưa được xác nhận từ thông số BL4820 mới.
+Torque cap bánh (0,13 N·m) nay đã khớp với thông số rated torque trong
+datasheet chính hãng Kpower BL4012 (động cơ bánh hiện tại, thay cho CJC
+BL4820M12, 2026-10-12) — xem docs/MOTOR_SELECTION.md.
 
 ## 6. Tích phân, cảm biến và vòng đời
 
