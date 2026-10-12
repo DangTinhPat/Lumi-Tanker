@@ -184,7 +184,7 @@ Chưa có R/L winding, back-EMF, sụt áp pin, nhiệt, torque-speed envelope,
 nhiễu Iq hoặc trễ CAN trong runner này. `SimGds68Joint` MIT cũ không phải đường
 actuator chân của GIM V3 runner.
 
-**Hai bánh:** V3 đưa lệnh tốc độ cho `SimBl4820Wheel`; chưa có bù ΔI cho bánh.
+**Hai bánh:** V3 đưa lệnh tốc độ cho `SimBl4012Wheel`; chưa có bù ΔI cho bánh.
 Thông số hiện hành: torque cap=0,13 N·m; speed-servo gain=3 N·m/(rad/s);
 torque lag nội bộ=1 ms; torque-enable settle=20 ms; ma sát viscous nội bộ=0,001
 N·m·s/rad; Coulomb nội bộ=0,006 N·m. Tham số đáp ứng/ma sát này còn ước lượng.

@@ -1,24 +1,38 @@
-# Protocol UART động cơ bánh xe — CJC BL4820M12
+# Protocol UART động cơ bánh xe — Kpower BL4012 (EC4012 / R1-POC)
 
-Dùng cho 2 động cơ bánh xe 12V, mỗi động cơ trên 1 bus UART riêng (UART1 =
-LeftWheel, UART2 = RightWheel — full-duplex, TX/RX riêng, không phải bus
-chia sẻ). Nguồn: `Motor_Communication_Guide.html` + `motor_controller.html`
-(reverse-engineer từ log thật, đã verify chạy được trên phần cứng thật),
-đối chiếu với datasheet động cơ tại cjcmotor.com/motor/bl4820m12.
+2026-10-12: thay thế hoàn toàn 2 động cơ bánh xe CJC BL4820M12 trước đây
+bằng 2 động cơ Kpower BL4012 (gọi tắt "EC4012"/"R1-POC" trong các công cụ
+bench ở `TEST1/`). Cùng kiểu khung gói giống Dynamixel v1.0 và CÙNG bảng
+thanh ghi (0x18/0x20/0x24) nên toàn bộ mục 3–5 dưới đây không đổi — đã test
+lại thực tế trên 2 động cơ mới và vẫn đúng. Thứ thay đổi là: tên/datasheet
+động cơ (mục 1), và **topology bus** (mục 2): 2 động cơ giờ đấu SONG SONG
+trên CHUNG một bus UART bán song công (half-duplex), phân biệt bằng motor
+id, thay vì mỗi động cơ một bus UART song công riêng như trước.
+
+Nguồn số liệu mục 1: datasheet chính hãng `Kpower-4012-outer rotror
+brushless.pdf` (Kpower Technology, sales@kpower.com) — 性能参数/Performance
+Specification. Mục 3–5 vẫn từ nguồn cũ (`Motor_Communication_Guide.html` +
+`motor_controller.html`, reverse-engineer từ log thật) vì đã verify lại
+khớp với động cơ mới.
 
 **Đây không phải protocol chuẩn Dynamixel gốc** — chỉ có khung gói giống
 Dynamixel v1.0. Cách encode tốc độ (signed, không phải magnitude+bit
 hướng) và quirk echo 3 byte trong response là tùy biến riêng của firmware
 này.
 
-## 1. Thông số động cơ (BL4820M12)
+## 1. Thông số động cơ (Kpower BL4012)
 
 | | |
 |---|---|
-| Điện áp danh định | 12V |
+| Điện áp danh định / dải điện áp | 12V / 9–16V |
 | Tốc độ danh định | 400 RPM |
-| Tốc độ không tải | 1000 RPM |
-| Mô-men | 130 mN·m |
+| Tốc độ không tải (@12V) | 950 RPM |
+| Mô-men danh định | 0.13 N·m |
+| Mô-men khởi động (stall) | 0.2 N·m |
+| Dòng danh định / khởi động | 0.95 A / 2 A |
+| Encoder | Từ tính (magnetic), 14 bit — độ phân giải vật lý; **thanh ghi
+Present Position vẫn 0~1023/360° (mục 4), không đổi theo bit encoder vật lý** |
+| Đầu nối | SH1.0, 3 hoặc 4 chân |
 | Hộp số | Không có (truyền động trực tiếp) |
 
 ## 2. Thông số bus
@@ -26,7 +40,8 @@ này.
 | | |
 |---|---|
 | Baud | 1,000,000 bps, 8N1, không parity |
-| Motor ID | `0x01` (mặc định — không cần đổi, mỗi bus chỉ có 1 motor) |
+| Topology | **Chung 1 bus half-duplex** (ESP32 GPIO17 trên `leg_jog_fw`), 2 động cơ đấu song song, TX/RX chung 1 dây — không còn 1 bus/1 động cơ như bản BL4820M12 cũ |
+| Motor ID | Đã set qua Type-C: bánh phải = `0x01`, bánh trái = `0x02` (bắt buộc khác ID vì chung bus, không còn mặc định `0x01` cho cả hai) |
 | Mode | Wheel Mode (CW Limit = CCW Limit = 0), đã set sẵn trong EEPROM |
 
 ## 3. Khung gói
@@ -99,10 +114,11 @@ Quy trình bật động cơ đầy đủ, có độ trễ:
 ## 8. Hệ số quy đổi RPM ↔ raw speed
 
 Dải raw speed của protocol (`±400`) trùng đúng số với tốc độ danh định
-động cơ BL4820M12 (400 RPM). Kết luận: **raw = RPM**, giới hạn ở tốc độ
-danh định (an toàn khi chạy liên tục), dù motor vật lý có thể lên tới
-1000 RPM không tải. Không có hộp số → RPM trục bánh xe trực tiếp, khớp với
-Present Position cũng là 1 vòng quay motor không qua giảm tốc.
+động cơ (400 RPM, xác nhận lại đúng với datasheet Kpower BL4012 mục 1).
+Kết luận: **raw = RPM**, giới hạn ở tốc độ danh định (an toàn khi chạy
+liên tục), dù motor vật lý có thể lên tới 950 RPM không tải (@12V). Không
+có hộp số → RPM trục bánh xe trực tiếp, khớp với Present Position cũng là
+1 vòng quay motor không qua giảm tốc.
 
 ```
 rad/s = RPM × 2π / 60     (≈ RPM × 0.10472)
@@ -140,7 +156,11 @@ triển khai protocol từ đầu.
 
 ### Chiều quay đã kiểm tra trên robot
 
-Người dùng xác nhận ngày 2026-09-25 rằng với cả hai bánh, Moving Speed dương
-làm robot tiến và giá trị âm làm robot lùi. Firmware dùng `driver_sign=+1`
-cho UART1 bánh trái và UART2 bánh phải trong `MotorMapping.hpp`. Phép kiểm tra
-này xác nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.
+**Bản ghi cũ (BL4820M12, 2026-09-25, không còn đúng):** cả hai bánh dùng
+`driver_sign=+1`, mỗi bánh một bus UART riêng.
+
+**Bản ghi mới (Kpower BL4012, 2026-10-12):** sau khi đổi sang bus chung +
+motor id, lệnh "tiến" ban đầu làm bánh phải (id=1) quay đúng nhưng bánh
+trái (id=2) quay ngược. `MotorMapping.hpp` hiện tại: bánh trái (id=2)
+`driver_sign=+1`, bánh phải (id=1) `driver_sign=-1`. Phép kiểm tra này xác
+nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.

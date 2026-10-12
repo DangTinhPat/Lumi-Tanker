@@ -320,12 +320,12 @@ round-to-nearest (`12.5*65535/25=32767.5` → doc lấy `32767`) - code khớp
 mô nhỏ hơn dự kiến (đủ đơn giản để triển khai và nối luôn trong một lượt).
 `src/tap_sim/drivers/SimActuatorBus.hpp`: `SimGds68Joint` (máy trạng thái
 IDLE/CLOSED_LOOP, PD nội bộ đúng công thức GDS68 §4, từ chối MIT trước
-CLOSED_LOOP) và `SimBl4820Wheel` (Torque Enable/Disable, cửa sổ settle
+CLOSED_LOOP) và `SimBl4012Wheel` (Torque Enable/Disable, cửa sổ settle
 20 ms có DROP thật, servo vận tốc nội bộ dạng bậc 1).
 
 **Phase 3 — nối vào runner. XONG, có một phát hiện lớn.**
 `native_runner.cpp` giờ đóng khung MIT/Dynamixel thật, đưa qua
-`SimGds68Joint`/`SimBl4820Wheel`, không còn đường nào đọc `mpcDebugState()`
+`SimGds68Joint`/`SimBl4012Wheel`, không còn đường nào đọc `mpcDebugState()`
 hay tính PD chân ở host bằng `state_.joints` (encoder trễ). Cả 3 rò rỉ ở §3
 đã đóng, xác nhận bằng đọc lại code (không còn `last_mpc_accel_`,
 `wheel_command_`, `wheel_state_`). **Nhưng khi nối `MotorCommand.velocity_rad_s`
