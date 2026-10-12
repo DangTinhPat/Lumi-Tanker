@@ -191,6 +191,7 @@ class GimV3Runner {
       else if (key == "rate1") su.hip_rate1_rad_s = v;
       else if (key == "mid") su.hip_mid_rad = v;
       else if (key == "rate2") su.hip_rate2_rad_s = v;
+      else if (key == "woff") su.wheels_off = v > 0.5F;
       else if (key == "wfree") su.wheel_free = v > 0.5F;
       else if (key == "push") su.wheel_push_rad_s = v;
       else if (key == "wdelay") su.wheel_delay_s = v;
@@ -201,6 +202,11 @@ class GimV3Runner {
       else if (key == "catch_rate") su.catch_rate_rad_s = v;
       else if (key == "catch_hip") su.catch_hip_tol_rad = v;
       else if (key == "catch_hold") su.catch_hold_s = v;
+      else if (key == "lvl_kp") su.level_kp = v;
+      else if (key == "lvl_kd") su.level_kd = v;
+      else if (key == "lvl_max") su.level_lean_max_rad = v;
+      else if (key == "lvl_rate") su.level_rate_rad_s = v;
+      else if (key == "lvl_pitch") su.level_done_pitch_rad = v;
       else if (key == "fall") su.fall_lean_rad = v;
       else if (key == "timeout") su.timeout_s = v;
       else if (key == "grace") su.grace_s = v;
@@ -413,7 +419,7 @@ class GimV3Runner {
         throw std::runtime_error("GIM IMU must measure acceleration/gyro at its site");
     }
     if (model_->nq != 13 || model_->nv != 12 || model_->nu != 6 ||
-        model_->nbody != 8 || std::abs(mj_getTotalmass(model_) - 3.12) > 1.0e-5)
+        model_->nbody != 8 || std::abs(mj_getTotalmass(model_) - 3.02) > 1.0e-5)
       throw std::runtime_error("GIM MJCF joint or mass contract mismatch");
   }
 

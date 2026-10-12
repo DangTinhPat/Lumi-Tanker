@@ -52,7 +52,9 @@ Wheel-ground sliding friction is user-specified `mu = 0.8`, applied directly
 to both explicit contact pairs (both tangential directions). Each hip/knee
 has user-specified Coulomb friction torque `0.1 N m` (`frictionloss`). Their
 additional viscous damping is zero; the previous `0.08 N m s/rad` guess is
-removed. Wheel-bearing damping and contact softness remain estimates.
+removed. Wheel hinges use user-specified Coulomb friction torque `0.01 N m`
+(`frictionloss`) plus estimated viscous damping `0.002 N m s/rad`. Contact
+softness remains an estimate.
 
 Body-ground collision uses the convex hulls of the actual CAD shell parts
 50/55 and exposed hip mounts 7/8/31/32, sharing their visual meshes and frames.
@@ -62,20 +64,31 @@ Both thighs, knee shells, shins and wheel-motor housings now use the convex
 hulls of all their CAD components in the same frames as the visuals. The removed
 10 mm-radius leg capsules let the knee shell penetrate the floor by 5.6 mm.
 Wheels retain cylinders with the specified radius. Hulls fill component cavities;
-contact softness still allows brief penetration during impacts.
+contact softness still allows brief penetration during impacts. Self-contact
+between the body and each shin is excluded because their CAD convex hulls
+overlap by 2.3 mm at the home pose; this removes an artificial launch impulse
+without changing wheel-ground contact.
 
-Adopted mass total is 3.12 kg: body 2.50 kg, each thigh 0.05 kg, each shin tube
-0.04 kg, each wheel motor 0.20 kg, and each wheel 0.02 kg. The 0.02 kg wheel
-mass is inferred from the previously accepted 0.22 kg wheel-plus-motor total.
-The motor stator is grouped with the shin; the wheel alone rotates.
+Adopted mass total is 3.02 kg: body 2.40 kg, comprising 0.278 kg body,
+0.210 kg battery, 1.600 kg four GIM motors, and about 0.312 kg PCB/screws/wiring
+residual. Each thigh is 0.05 kg, each shin tube 0.04 kg, each wheel motor
+0.20 kg, and each wheel 0.02 kg. The wheel mass is inferred from the previously
+accepted 0.22 kg wheel-plus-motor total. The motor stator is grouped with the
+shin; the wheel alone rotates.
 
-COM and pitch inertia estimates use simple rigid-group approximations recorded
-in `gim_mass_properties.yaml` and `GeneratedGeometry.hpp`. The body COM combines
-the specified aggregate split with CAD component locations. Thigh, shin, motor,
-and wheel inertias use slender-link/cylinder/disc approximations. These are
-provisional controller/simulation parameters: no CAD-to-mass solid integration
-or physical identification has validated them. No force, current, contact, or
-pose telemetry from MuJoCo is a controller sensor.
+The body inertial combines module masses at their CAD locations: 0.400 kg per
+GIM motor, 0.210 kg battery, 0.278 kg frame/fixed mounts, and a 0.312 kg
+PCB/fastener/wiring residual. CAD BREP volume properties provide component
+centres and unit-density tensors; masses within the frame and residual groups
+are distributed proportional to CAD volume. Wiring has no mesh and is included
+in the residual distribution proxy. The assigned modules sum to the 2.40 kg body
+estimate with no rounding mass at the aggregate COM. Since these modules are
+rigidly fixed, their mass properties are
+combined into one body inertial, which is dynamically equivalent to separate
+welded modules. The group density assumptions remain provisional;
+the thigh, shin and wheel inertias are still geometric approximations. No
+physical identification has validated these values. No force, current, contact,
+or pose telemetry from MuJoCo is a controller sensor.
 
 ## Forward and inverse kinematics
 

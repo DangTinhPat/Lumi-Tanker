@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
     return value;
   };
   auto near = [](double a, double b) { return std::abs(a - b) < 2e-6; };
-  assert(near(mj_getTotalmass(model), 3.12));
+  assert(near(mj_getTotalmass(model), 3.02));
   for (int body = 1; body < model->nbody; ++body) {
     const auto* inertia = model->body_inertia + 3 * body;
     assert(model->body_mass[body] > 0);
@@ -127,7 +127,14 @@ int main(int argc, char** argv) {
       const double x = data->xipos[3 * body] - ax, z = data->xipos[3 * body + 2] - az;
       mx += model->body_mass[body] * x;
       mz += model->body_mass[body] * z;
-      iyy += model->body_inertia[3 * body + 1] + model->body_mass[body] * (x*x + z*z);
+      // The principal inertia is expressed in the body_iquat frame (fullinertia rotates it): take its pitch (y) axis.
+      const auto* principal = model->body_inertia + 3 * body;
+      mjtNum inertial_rotation[9];
+      mju_quat2Mat(inertial_rotation, model->body_iquat + 4 * body);
+      double pitch_inertia = 0;
+      for (int axis = 0; axis < 3; ++axis)
+        pitch_inertia += inertial_rotation[3 + axis] * inertial_rotation[3 + axis] * principal[axis];
+      iyy += pitch_inertia + model->body_mass[body] * (x*x + z*z);
     }
     const auto com = robot_control::WholeBodyModel{}.compute(q[0], q[1], q[2], q[3]);
     assert(near(com.com_offset_x_m, mx / mj_getTotalmass(model)));

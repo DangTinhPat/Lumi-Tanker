@@ -42,15 +42,15 @@ class JumpSequence {
     FlightAttitude::Config flight;        // touchdown attitude in the air (AAC)
     TakeoffMomentum::Config takeoff{false};  // momentum at the lift-off (AAC); off until validated
     // Knobs on top of the plan (tuned in the headless sim, docs/V3.5_JUMP.md).
-    float lift_speed_factor = 0.9058F;   // the thrust ends when the measured CoM speed reaches plan speed x this
-    float tuck_start_rate_rad_s = 8.0109F;   // the tuck starts once the knee is slower than this (default: at the lift-off)
+    float lift_speed_factor = 0.88896F;   // the thrust ends when the measured CoM speed reaches plan speed x this
+    float tuck_start_rate_rad_s = 7.29914F;   // the tuck starts once the knee is slower than this (default: at the lift-off)
     float tuck_start_max_s = 0.08F;      // ... or after this long in the air
-    float flight_kp_scale = 0.4461F;     // leg impedance in the air: soft/damped legs ring less after the lift-off
-    float flight_kd_scale = 0.8165F;
-    float lift_off_accel_ratio = 0.6382F; // lift-off = the measured CoM acceleration reaches -this x g
+    float flight_kp_scale = 0.46270F;     // leg impedance in the air: soft/damped legs ring less after the lift-off
+    float flight_kd_scale = 0.96686F;
+    float lift_off_accel_ratio = 0.59799F; // lift-off = the measured CoM acceleration reaches -this x g
     float thrust_extra_s = 0.06F;     // the thrust may overrun its path by this before it gives up
-    float dip_extra_m = 0.0081F;         // extra dip below the planned crouch
-    float flight_delay_s = -0.0114F;      // touchdown comes this much later than the ballistic estimate
+    float dip_extra_m = 0.01119F;         // extra dip below the planned crouch
+    float flight_delay_s = -0.01049F;      // touchdown comes this much later than the ballistic estimate
     float start_wait_s = 8.0F;        // wait this long for the legs to stop before refusing
     // Forward hop (like a kangaroo): one motion from standing. The dip leans the body toward the hop
     // (hop_lean_rad, the CoM line kept so the robot stays balanced) while the forward speed builds to
@@ -98,19 +98,19 @@ class JumpSequence {
     float dip_accel_m_s2 = 10.0000F;
     float dip_time_min_s = 0.15F;
     float dip_time_max_s = 0.40F;
-    float thrust_kp_scale = 1.2379F;
-    float thrust_kd_scale = 0.8358F;
+    float thrust_kp_scale = 1.07648F;
+    float thrust_kd_scale = 0.84782F;
     float thrust_max_s = 0.40F;       // abort softly beyond this
     float touchdown_accel_m_s2 = 14.0F;  // impact spike ends the flight early
-    float flight_fb_delay_s = 0.0489F;  // wheels are off the ground this long after the thrust path ends
+    float flight_fb_delay_s = 0.04335F;  // wheels are off the ground this long after the thrust path ends
     float min_flight_s = 0.15F;       // impact spikes earlier than this are leg motion
     float touchdown_window_s = 0.05F; // ... and earlier than this before the predicted touchdown
-    float land_lead_s = 0.0164F;      // compliance starts this much before the plan's touchdown
-    float land_kp_scale = 0.3362F;    // soft knees: the landing is a damped spring
-    float land_kd_scale = 1.8836F;
-    float land_hip_kp_scale = 0.5876F;
-    float land_hip_kd_scale = 1.6584F;
-    float land_follow = 0.8415F;      // 0..1: hip follows the folding knee to hold the CoM over the axle
+    float land_lead_s = 0.00954F;      // compliance starts this much before the plan's touchdown
+    float land_kp_scale = 0.30757F;    // soft knees: the landing is a damped spring
+    float land_kd_scale = 1.54441F;
+    float land_hip_kp_scale = 0.55766F;
+    float land_hip_kd_scale = 1.97347F;
+    float land_follow = 0.84790F;      // 0..1: hip follows the folding knee to hold the CoM over the axle
     float land_wait_s = 0.0689F;      // legs compliant, wheels free: wait this long for the impact
     float land_s = 0.3801F;           // total compliant time before the impedance recovers
     float recover_s = 0.35F;          // impedance back to nominal
@@ -124,17 +124,17 @@ class JumpSequence {
     float max_pitch_rad = 0.12F;      // refuse to start beyond this (error from the balance angle)
     float abort_pitch_rad = 1.0F;     // abort the thrust softly beyond this
     // Hip feedback on the body pitch (rad of hip per rad / per rad/s) while the wheels push (dip, thrust).
-    float thrust_pitch_kp = 0.6926F;
-    float thrust_pitch_kd = 0.0137F;
+    float thrust_pitch_kp = 0.93614F;
+    float thrust_pitch_kd = 0.01144F;
     // Angular-momentum regulation through the wheels: while the wheels push, a wheel speed offset
     // k * L (rad/s per N.m.s) changes the horizontal ground force and so dL/dt. Measured: about
     // -0.00085 N.m.s of L per rad/s of offset during the thrust.
-    float momentum_wheel_gain = 1471.82F;
+    float momentum_wheel_gain = 1715.26210F;
     float momentum_wheel_max_rad_s = 40.0F;
     bool momentum_in_dip = false;
     float wheel_kick_rad_s = 0.0F;    // diagnostic: wheel speed command added during the thrust
     float pitch_fb_max_rad = 0.6F;
-    float thrust_hip_gain = 1.4951F;     // scales the CoM-preserving hip change during the thrust
+    float thrust_hip_gain = 1.94159F;     // scales the CoM-preserving hip change during the thrust
     bool com_track = true;            // hip solved so the CoM stays over the axle along the path
   };
 

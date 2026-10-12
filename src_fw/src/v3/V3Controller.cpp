@@ -289,7 +289,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     }
     case State::StandUp: {
       out.legs_locked = true;
-      out.wheels_enabled = true;
+      out.wheels_enabled = false;     // set from the sequence below
       if (!in.sensors_ok) return fault("sensor feedback lost during the stand-up", out);
       const ComLine c = comLine(hip_meas_, knee_meas_);
       standup_lean_ = raw.pitch_rad + c.angle;
@@ -303,14 +303,17 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         float lo = -1.5F, hi = 2.0F;
         for (int i = 0; i < 20; ++i) {
           const float mid = 0.5F * (lo + hi);
-          (raw.pitch_rad + comLine(mid, standup_state_.knee_target_rad).angle > 0.0F ? hi : lo) = mid;
+          (raw.pitch_rad + comLine(mid, standup_state_.knee_target_rad).angle > standup_.leanTarget() ? hi : lo) = mid;
         }
         si.hip_goal_rad = 0.5F * (lo + hi) + config_.standup.hip_goal_offset_rad;
       }
+      si.pitch_rad = raw.pitch_rad;
+      si.pitch_rate_rad_s = raw.pitch_rate_rad_s;
       si.wheel_rate_rad_s = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
       si.sensors_ok = true;
       standup_state_ = standup_.update(si);
       if (standup_state_.phase == StandUp::Phase::Failed) return fault("stand-up failed", out);
+      out.wheels_enabled = standup_state_.wheels_on;
       out.leg_hip_offset_rad = standup_state_.hip_target_rad;
       out.leg_knee_offset_rad = standup_state_.knee_target_rad;
       out.legs_moving = true;
@@ -327,7 +330,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         out.leg_hip_offset_rad = hipCommand();
         out.leg_knee_offset_rad = kneeCommand();
       } else {
-        out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
+        if (standup_state_.wheels_on) out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
       }
       out.state = state_;
       return out;

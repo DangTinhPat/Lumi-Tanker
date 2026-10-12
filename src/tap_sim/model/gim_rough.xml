@@ -86,7 +86,7 @@
     <geom name="terrain" type="hfield" hfield="rough_terrain" pos="5.2500 0 -0.038691" material="terrain_mat" contype="1" conaffinity="1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <inertial pos="-0.00509108 0.00012802 0.01378601" mass="2.4" fullinertia="0.00850153 0.00430976 0.00930032 -0.0000167390 -0.000150363 0.0000044670"/>
       <geom name="cad_07_0" type="mesh" mesh="cad_07_0" material="gim_structure" pos="2.64662958e-13 0.10245 0.00827948982" contype="1" conaffinity="1"/>
       <geom name="cad_08_0" type="mesh" mesh="cad_08_0" material="gim_structure" pos="-0.00723794046 0.1122 0.0109132013" contype="1" conaffinity="1"/>
       <geom name="cad_13_0" type="mesh" mesh="cad_13_0" material="gim_structure" pos="-5.45696821e-15 0.0237 0.00827948981" contype="0" conaffinity="0"/>

@@ -11,9 +11,20 @@ namespace {
 
 constexpr float kDt = 0.002F;
 
+// The assertions below are about the mechanics, not the tuned defaults: pin what they rely on.
 StandUp::Config config() {
   StandUp::Config c;
   c.enabled = true;
+  c.hip_rate1_rad_s = 0.8F;
+  c.hip_mid_rad = 0.6F;
+  c.hip_rate2_rad_s = 0.5F;
+  c.hip_goal_offset_rad = 0.0F;
+  c.wheel_push_rad_s = 0.0F;
+  c.wheel_lean_gain = 0.0F;
+  c.knee_end_rad = 0.0F;
+  c.catch_lean_rad = 0.12F;
+  c.catch_rate_rad_s = 1.5F;
+  c.catch_hip_tol_rad = 0.15F;
   return c;
 }
 
@@ -61,6 +72,23 @@ void theWheelsRollFreelyOrPushOnRequest() {
   pushed.begin(1.3F, 0.0F);
   for (int i = 0; i < 400; ++i) out = pushed.update(input(1.0F));
   assert(std::abs(out.wheel_rad_s - 13.0F) < 1e-3F);               // measured + push
+}
+
+void theWheelTorqueIsOffWhileRockingAndOnAtTheHandOver() {
+  StandUp su(config());
+  su.begin(0.3F, 0.0F);
+  auto out = su.update(input(0.5F));
+  assert(out.phase == StandUp::Phase::Hold && !out.wheels_on);
+  for (int i = 0; i < 300; ++i) out = su.update(input(0.5F));
+  assert(out.phase == StandUp::Phase::Rise && !out.wheels_on);
+  for (int i = 0; i < 30 && out.phase == StandUp::Phase::Rise; ++i) out = su.update(input(0.05F));
+  assert(out.phase == StandUp::Phase::Caught && out.wheels_on);   // the balancer takes the wheels
+  auto cfg = config();
+  cfg.wheels_off = false;
+  StandUp on(cfg);
+  on.begin(1.3F, 0.0F);
+  for (int i = 0; i < 400; ++i) out = on.update(input(1.0F));
+  assert(out.wheels_on);
 }
 
 void theKneeExtendsOnlyWhenAsked() {
@@ -126,6 +154,7 @@ void failsWhenItFallsBackOrTimesOut() {
 int main() {
   holdsThenFoldsTheHipsFastThenSlowlyNeverBelowTheGoal();
   theWheelsRollFreelyOrPushOnRequest();
+  theWheelTorqueIsOffWhileRockingAndOnAtTheHandOver();
   theKneeExtendsOnlyWhenAsked();
   handsOverWhenTheCoMIsOverTheAxleAtTheGoal();
   aFastLeanRateIsNotACatch();

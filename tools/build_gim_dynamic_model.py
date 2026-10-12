@@ -130,7 +130,7 @@ def main():
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <inertial pos="-0.00509108 0.00012802 0.01378601" mass="2.4" fullinertia="0.00850153 0.00430976 0.00930032 -0.0000167390 -0.000150363 0.0000044670"/>
 {body_geom}
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">

@@ -44,7 +44,7 @@ OUT_BIN = MODEL_DIR / "gim_rough_terrain.bin"
 
 TRACK_M = 0.2654          # wheel-centre spacing (V3Controller::Roll::track_m)
 HARD_LIMIT_DEG = 45.0     # never produce a steeper surface
-CLIMB_LIMIT_DEG = math.degrees(math.asin(2 * 0.13 / 0.04 / (3.12 * 9.81)))   # ~12.3 deg: the wheels cannot hold more
+CLIMB_LIMIT_DEG = math.degrees(math.asin(2 * 0.13 / 0.04 / (3.02 * 9.81)))   # ~12.3 deg: the wheels cannot hold more
 
 # Waves before the slope scaling: (wavelength m, amplitude m). The long swell makes the highs and lows, the
 # mid waves tilt the body side to side (wavelength about 1.5 to 3 times the track), the roughness is texture.

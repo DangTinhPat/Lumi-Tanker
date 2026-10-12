@@ -11,9 +11,9 @@ lệnh `STANDUP` đưa robot đến trạng thái cân bằng ở độ cao đ�
 | Mốc | Thời điểm (từ lệnh) | Trạng thái |
 | --- | --- | --- |
 | Giữ | 0 – 0,3 s | chân và bánh đứng yên, IMU và encoder ổn định |
-| Gập hông | 0,3 – 3,3 s | hông gập 0,8 rad/s tới 0,6 rad rồi 0,5 rad/s; bánh lăn tự do |
-| Bàn giao | ~3,3 s | trọng tâm gần trục (|lean| < 0,12, tốc độ lean < 1,5 rad/s): V3 vào `Balancing` |
-| Cân thân | 3,3 – 6 s | các tầng của V3 đưa thân từ chúi 0,6 rad về ngang |
+| Gập hông | 0,3 – 2,7 s | hông gập 0,88 rad/s tới 0,67 rad rồi 0,71 rad/s; bánh theo tốc độ đo (+ chút đẩy theo lean) |
+| Bàn giao | ~2,7 s | trọng tâm gần trục (|lean| < 0,12, tốc độ lean < 1,5 rad/s): V3 vào `Balancing` |
+| Cân thân | 2,7 – 6 s | các tầng của V3 đưa thân từ chúi 0,6 rad về ngang |
 | Đứng lên | 6 – 14 s | bộ chiều cao của V3 duỗi gối 0 → 1,69 rad (thân cao 0,204 m) |
 
 ## 2. So với quỹ đạo `RockerLower` của nhánh `tpa`
@@ -48,21 +48,35 @@ lệnh `STANDUP` đưa robot đến trạng thái cân bằng ở độ cao đ�
 **Khớp chân** (giới hạn 3,76 N·m = 8 A × 0,47): hông đỉnh 0,62 N·m, gối đỉnh 1,32 N·m (2,8 A) lúc bắt đầu duỗi gối sau bàn giao; trong
 pha đứng dậy gối đỉnh 0,93 và hông 0,62 N·m, nghĩa là chân còn dư rất nhiều.
 
-**Bánh** (giới hạn 0,13 N·m mỗi bánh): trong pha gập hông bánh gần như đứng yên (tốc độ đỉnh 0,06 rad/s); servo tốc độ của bánh
-giữ nó theo tốc độ đo (trễ), nên mô-men không bằng 0: trung bình 0,078 N·m, chạm trần 0,13 N·m trong 25% thời gian. Sau bàn giao
-V3 dùng đỉnh 0,13 N·m ngay lúc bắt (3,5 s) rồi trung bình 0,06 N·m khi đưa thân về ngang và 0,05 N·m khi duỗi gối.
+**Bánh** (đỉnh cố định của phần cứng: 0,13 N·m mỗi bánh, không có thanh ghi giới hạn thấp hơn):
 
-**Bánh cần tối thiểu bao nhiêu** (hạ trần mô-men bánh bằng `--wheel-torque`, đứng dậy rồi lái 0,3 m/s):
+- **Pha rocking (gập hông, 0,3 – 2,9 s): bánh tắt mô-men, dùng đúng 0 N·m** (`StandUp::Config::wheels_off`, mặc định). Đo: robot
+  tới điểm bàn giao cả khi trần mô-men bánh bằng 0, ở mọi kịch bản; việc gập hông do hông và gối làm. Khi bánh còn bật mô-men
+  (bám tốc độ đo + chút đẩy) thì servo của bánh dùng trung bình 0,097 N·m và đỉnh 0,126 N·m, tức gần hết đỉnh 0,13 mà không cần.
+- **Sau bàn giao** (V3 đưa thân từ chúi 0,6 rad về ngang rồi duỗi gối): mô-men bánh trung bình 0,054 N·m; đỉnh 0,13 N·m chỉ vài
+  chục ms ngay lúc V3 bắt (khoảng 1% thời gian).
 
-| Trần mô-men bánh | Bánh danh định (50/75 ms) | Bánh chậm 70/110 ms |
-| --- | --- | --- |
-| 0,13 N·m (thật) | đứng được | đứng được |
-| 0,10 N·m | đứng được | đứng được |
-| 0,08 N·m | đứng được | **ngã** |
-| 0,075 N·m trở xuống | **không đứng** (ngã hoặc kẹt) | không đứng |
+**Bánh cần tối thiểu bao nhiêu** (hạ trần mô-men bánh bằng `--wheel-torque` chỉ để đo dự trữ; 11 kịch bản: lệnh lệch
+0,2/0,23/0,4 s, bánh 20/30, 30/50, 35/70, 50/80, 70/110 ms, bật roll, địa hình gồ ghề có và không có roll; thành công = đứng
+thẳng ổn định, gối > 1,55 rad, |pitch| < 0,05 rad ở 19 s, trước khi lái):
 
-Dự trữ so với 0,13 N·m chỉ khoảng 1,3 lần với bánh chậm và 1,6 lần với bánh danh định. Cơ chế hỏng ở mô-men thấp: sau bàn giao
-V3 không giữ nổi con lắc đảo thân chúi 0,6 rad để đưa về ngang.
+| Trần mô-men bánh | tham số tay chỉnh ban đầu | tối ưu (CEM), bánh bật trong pha rocking | tối ưu, bánh **tắt** trong pha rocking (mặc định) |
+| --- | --- | --- | --- |
+| 0,13 N·m (đỉnh thật) | 11/11 | 11/11 | 11/11 |
+| 0,08 N·m | 10/11 | 11/11 | 11/11 |
+| 0,065 N·m | không | 11/11 | 11/11 |
+| 0,05 N·m | không đứng | 11/11 | 0/11 |
+| 0,04 N·m | không đứng | 10/11 | 0/11 |
+
+Tắt mô-men bánh trong pha rocking làm ngưỡng của phần sau bàn giao tăng từ 0,05 lên 0,065 N·m (trạng thái bàn giao hơi khác khi
+bánh được thả). Vì **lái 0,3 m/s vốn cần ≥ 0,065 N·m** (ở 0,05 robot đứng dậy xong nhưng ngã khi nhận lệnh lái), giới hạn dưới
+của cả quy trình đứng dậy rồi lái là 0,065 N·m trong cả hai cách; dự trữ so với đỉnh 0,13 N·m là 2 lần. Chọn tắt mô-men vì pha rocking
+không còn phụ thuộc vào bánh và bánh không phải gồng ở gần đỉnh trong 2,5 s đó.
+
+Tối ưu bằng CEM trên 17 tham số (tốc độ gập hông, mốc chuyển, đích hông, điều kiện bàn giao, đẩy bánh, gối): bàn giao *muộn
+hơn* và chặt hơn (|lean| < 0,065 rad thay vì 0,12; hông đích gập thêm 0,04 rad). Lần chạy đầu chỉ có 5 kịch bản huấn luyện và
+**quá khớp** (bộ tốt nhất đạt 5/5 ở huấn luyện nhưng chỉ 3/11 ở 0,05 và 5/11 ở 0,13 N·m trên lưới rộng); bộ tham số cuối lấy
+từ trung bình quần thể trên 8 kịch bản và kiểm trên 11 kịch bản không dùng để huấn luyện.
 
 ## 5. Kết quả mô phỏng (bánh 0,13 N·m)
 

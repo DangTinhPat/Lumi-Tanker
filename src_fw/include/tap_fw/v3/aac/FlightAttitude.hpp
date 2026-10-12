@@ -21,13 +21,13 @@ class FlightAttitude {
   struct Config {
     float w_line = 1.0F;              // 1/rad^2: virtual pitch at the touchdown (CoM over the axle)
     float w_body = 0.0F;              // 1/rad^2: body pitch at the touchdown (as when standing); >0 trades CoM placement for a level body
-    float w_shape = 0.002F;           // 1/rad^2: touchdown pose change (small: the legs are the only actuator)
+    float w_shape = 0.00264F;           // 1/rad^2: touchdown pose change (small: the legs are the only actuator)
     float body_tilt_max_rad = 0.35F;  // with w_body > 0: body error at the touchdown kept below this if possible
-    float line_bias_rad = -0.0796F;   // theta_v aimed at = balance angle + this (impact dynamics)
+    float line_bias_rad = -0.07307F;   // theta_v aimed at = balance angle + this (impact dynamics)
     float hip_change_max_rad = 0.6F;
     float knee_change_max_rad = 0.35F;
-    float change_rate_max_rad_s = 6.0F;  // the commanded pose change moves at most this fast
-    float arrive_before_s = 0.0299F;    // the pose change is complete this long before the touchdown
+    float change_rate_max_rad_s = 7.11867F;  // the commanded pose change moves at most this fast
+    float arrive_before_s = 0.03570F;    // the pose change is complete this long before the touchdown
     float arrive_min_s = 0.02F;
   };
   struct Input {
