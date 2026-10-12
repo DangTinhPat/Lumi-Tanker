@@ -70,8 +70,12 @@ struct Config {
   float travel_max_rad = 3.0F;
   float driver_pos_limit_rad = 12.3F;          // Inside the +/-12.5 MIT range.
   // Wheels (WHEEL_MOTOR_PROTOCOL.md). Speeds are protocol raw units; the
-  // raw <-> RPM scale is still unverified.
-  std::int16_t wheel_raw_max = 400;
+  // raw <-> RPM scale is still unverified. Raised to the Kpower BL4012's
+  // no-load speed (2026-10-12, user request) - above 400 (rated speed) the
+  // motor is no longer in its continuous-duty envelope, so sustained high
+  // speed under load risks overheating/overcurrent; this is an operator
+  // tradeoff, not a hardware limit fix.
+  std::int16_t wheel_raw_max = 950;
   std::uint64_t wheel_lease_us = 300'000U;     // WHEEL must be repeated.
   std::uint64_t wheel_settle_us = 20'000U;     // Torque Enable -> Moving Speed.
   std::uint64_t wheel_brake_us = 300'000U;     // Speed 0 before coasting.
@@ -140,11 +144,22 @@ struct Wheel {
   bool disable_sent = false;
   // Latched after lost feedback; re-armed by releasing (WHEEL 0) or CLEAR.
   bool fault = false;
-  // WHOLD 1: torque stays on and Moving Speed stays commanded at 0
-  // indefinitely (active braking, no coast-after-brake timeout) - the
-  // strongest hold this protocol offers (there is no torque-limit
-  // register). A nonzero WHEEL command, DISABLE, ESTOP or CLEAR releases it.
+  // WHOLD 1: switches the driver to Position mode (reg 0x11=2) and locks
+  // Goal Position at wherever the wheel was when the hold engaged -
+  // 2026-10-12, user report: Speed=0 "active brake" (the previous
+  // implementation) gave almost no resistance to hand-turning, because it
+  // only engages the driver's velocity loop, which is soft at zero; the
+  // position loop is much stiffer. A nonzero WHEEL command, DISABLE, ESTOP
+  // or CLEAR releases it and switches back to Speed mode (reg 0x11=1) -
+  // required before normal Moving Speed driving works again.
   bool hold = false;
+  // Position-mode hold sub-state (see tickWheels). position_mode mirrors
+  // what we last told the driver reg 0x11 is; mode_switch_us times out the
+  // settle after that write before torque/goal commands go out, since it's
+  // a flash write.
+  bool position_mode = false;
+  std::uint64_t mode_switch_us = 0U;
+  std::uint16_t hold_goal_raw = 0U;
   // Latest Present Data, core frame (speed) / raw single-turn position.
   std::uint16_t pos_raw = 0U;
   std::int16_t speed_raw = 0;
@@ -811,16 +826,50 @@ class LegJog {
                       wheel.name);
         pushEvent(text);
       }
+      // A mode switch (reg 0x11, see below) may be a flash write on this
+      // driver - let it settle before sending anything else, in either
+      // direction, before checking what else this wheel needs this tick.
+      if (wheel.mode_switch_us != 0U &&
+          now_us - wheel.mode_switch_us < config_.wheel_settle_us) {
+        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        continue;
+      }
       const bool holding = allowed && !wheel.fault && wheel.hold;
+      if (!holding && wheel.position_mode) {
+        // Leaving hold (or it was never released cleanly, e.g. after a
+        // fault): switch back to Speed mode first - required before normal
+        // Moving Speed driving commands take effect - before anything else
+        // runs for this wheel this tick.
+        (void)tx_.sendUart(wheel.bus,
+            frame::buildVelocityMode(wheel.id, frame::kDxlVelModeSpeed));
+        wheel.position_mode = false;
+        wheel.mode_switch_us = now_us;
+        wheel.torque_on = false;  // force a clean re-enable in the new mode.
+        wheel.disable_sent = false;
+        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        continue;
+      }
       if (holding) {
-        // Active brake, indefinitely: torque stays on, speed stays at 0.
-        // Never falls through to the brake-timeout/coast path below.
-        if (!wheel.torque_on) {
-          (void)tx_.sendUart(wheel.bus, frame::buildTorqueEnable(wheel.id, true));
-          wheel.torque_on = true;
-          wheel.torque_on_us = now_us;
-        } else if (now_us - wheel.torque_on_us >= config_.wheel_settle_us) {
-          sendWheelSpeed(wheel, 0);
+        // Position-mode hold, indefinitely: much stiffer against an
+        // external push than the old Speed=0 "active brake" (velocity loop
+        // is soft at zero on this driver). Never falls through to the
+        // brake-timeout/coast path below.
+        if (!wheel.position_mode) {
+          (void)tx_.sendUart(wheel.bus,
+              frame::buildVelocityMode(wheel.id, frame::kDxlVelModePosition));
+          wheel.position_mode = true;
+          wheel.mode_switch_us = now_us;
+          wheel.hold_goal_raw = wheel.pos_raw;  // lock wherever it is now.
+          wheel.torque_on = false;  // force a clean re-enable in the new mode.
+        } else {
+          if (!wheel.torque_on) {
+            (void)tx_.sendUart(wheel.bus, frame::buildTorqueEnable(wheel.id, true));
+            wheel.torque_on = true;
+            wheel.torque_on_us = now_us;
+          } else {
+            (void)tx_.sendUart(wheel.bus,
+                frame::buildGoalPosition(wheel.id, wheel.hold_goal_raw));
+          }
         }
         wheel.last_nonzero_us = now_us;  // keeps the (unused) brake window fresh
         (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));

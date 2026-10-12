@@ -318,18 +318,29 @@ inline MitFeedback unpackMitFeedback(const MitBytes& b) {
 }
 
 // ---------------------------------------------------------------------------
-// BL4012 (UART, Dynamixel-like packet) - 2 wheel joints
+// BL4012 (UART, Dynamixel-like packet) - 2 wheel joints. Replaced the CJC
+// BL4820M12 these constants were originally fitted to (2026-10-12); the
+// Kpower BL4012 datasheet confirms the same register map and the same rated
+// torque/speed (0.13 N.m, 400 rpm) this file already used, so the values
+// below still hold - see docs/MOTOR_SELECTION.md.
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kDxlTorqueEnableAddr = 0x18;
+constexpr std::uint8_t kDxlVelocityModeAddr = 0x11;  // 1=Speed/Wheel mode, 2=Position mode.
+constexpr std::uint8_t kDxlGoalPositionAddr = 0x1E;  // u16 LE, 0..1023/rev (10-bit, same frame as Present Position).
+constexpr std::uint8_t kDxlVelModeSpeed = 1;
+constexpr std::uint8_t kDxlVelModePosition = 2;
 constexpr std::uint8_t kDxlMovingSpeedAddr = 0x20;
 constexpr std::uint8_t kDxlPresentAddr = 0x24;
 constexpr std::uint8_t kDxlPresentLen = 6;
 constexpr std::uint8_t kDxlInsWrite = 0x03;
 constexpr std::uint8_t kDxlInsRead = 0x02;
-// raw = rpm (operator-verified). 1000 rpm = BL4012 no-load speed (user, 2026-10-11); 400 rpm is only the
-// rated speed at the full 0.13 N.m. WHEEL_MOTOR_PROTOCOL.md lists the register as [-400, 400]: values above
-// 400 are untested on the driver.
+// raw = rpm (operator-verified). 1000 rpm was assumed ~= BL4820M12 no-load
+// speed (user, 2026-10-11); the Kpower BL4012 datasheet (2026-10-12) gives
+// an actual no-load speed of 950 rpm @ 12V, still comfortably under this
+// clamp, so the clamp itself is left at 1000. 400 rpm is only the rated
+// speed at the full 0.13 N.m. WHEEL_MOTOR_PROTOCOL.md lists the register as
+// [-400, 400]: values above 400 are untested on the driver.
 constexpr std::int16_t kWheelRawSpeedLimit = 1000;
 
 // raw = RPM (WHEEL §8: coincidence of 400==400, not a verbatim spec line -
@@ -405,6 +416,21 @@ inline DxlFrame buildMovingSpeed(std::uint8_t id, float rad_s) {
 inline DxlFrame buildReadPresent(std::uint8_t id) {
   const std::uint8_t params[2] = {kDxlPresentAddr, kDxlPresentLen};
   return detail::buildFrame(id, kDxlInsRead, params, 2);
+}
+// TEST1/ec4012_uart_gui.py §Velocity Mode: this write PERSISTS TO FLASH on
+// this motor, unlike Torque Enable/Moving Speed/Goal Position - callers must
+// not spam it (switch once per hold/release edge, not every tick).
+inline DxlFrame buildVelocityMode(std::uint8_t id, std::uint8_t mode) {
+  const std::uint8_t params[2] = {kDxlVelocityModeAddr, mode};
+  return detail::buildFrame(id, kDxlInsWrite, params, 2);
+}
+// Position mode only (kDxlVelModePosition); position_raw is the same 10-bit
+// single-turn frame as Present Position (0..1023/rev).
+inline DxlFrame buildGoalPosition(std::uint8_t id, std::uint16_t position_raw) {
+  const auto p = static_cast<std::uint16_t>(position_raw & 0x03FFU);
+  const std::uint8_t params[3] = {kDxlGoalPositionAddr, static_cast<std::uint8_t>(p & 0xFFU),
+                                   static_cast<std::uint8_t>(p >> 8)};
+  return detail::buildFrame(id, kDxlInsWrite, params, 3);
 }
 
 struct DxlParsed {
