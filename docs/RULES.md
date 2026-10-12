@@ -60,7 +60,7 @@ implementation runs in simulation:
 - IMU: accelerometer (3-axis specific force) and gyro (3-axis angular
   velocity) — one MPU6500.
 - Joint encoders: position and velocity per joint — four leg joints (GDS68
-  drivers over CAN) and two wheel joints (BL4820 drivers over UART).
+  drivers over CAN) and two wheel joints (BL4012 drivers over UART).
 - **Leg motor Iq-based torque estimate, leg CAN driver only** (2026-09-18
   exception — see "Leg motor current-based torque exception" below). Allowed
   **only** as a secondary, corroborating signal in a support/contact estimator
@@ -116,7 +116,7 @@ Verified against the driver protocol documents in `docs/actuatal_driver/`
   control — not an added sensor — and reports `torque ≈ Iq × Kt` in the MIT
   feedback frame, at the same rate as position/velocity. This is real driver
   behaviour, not a simulator shortcut.
-- The two wheel joints use a different driver (UART, CJC BL4820M12) whose
+- The two wheel joints use a different driver (UART, Kpower BL4012) whose
   `Load` register is not usable. The wheel is also where ground reaction first
   acts, so this exception does **not** give a direct read of ground contact
   force; it gives an indirect, Jacobian-mediated view from the hip/knee side.

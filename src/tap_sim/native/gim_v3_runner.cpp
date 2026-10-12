@@ -131,7 +131,7 @@ class GimV3Runner {
     if (!data_) throw std::runtime_error("MuJoCo data allocation failed");
     // (the MJCF actuator range, 0.13 N.m, still caps it from above)
     for (std::size_t side = 0; side < wheels_.size(); ++side) {
-      wheels_[side] = robot_control::SimBl4820Wheel({static_cast<std::uint8_t>(side + 1), static_cast<float>(options_.wheel_torque)});
+      wheels_[side] = robot_control::SimBl4012Wheel({static_cast<std::uint8_t>(side + 1), static_cast<float>(options_.wheel_torque)});
     }
     bindModel();
     wheel_delay_ticks_ = static_cast<std::size_t>(std::lround(options_.wheel_delay_s * options_.sensor_hz));
@@ -921,8 +921,8 @@ class GimV3Runner {
   V3Controller::Command command_{};
   V3Controller::Output output_{};
   robot_control::ImuStateEstimator estimator_;
-  std::array<robot_control::SimBl4820Wheel, 2> wheels_{{
-      robot_control::SimBl4820Wheel({1}), robot_control::SimBl4820Wheel({2})}};
+  std::array<robot_control::SimBl4012Wheel, 2> wheels_{{
+      robot_control::SimBl4012Wheel({1}), robot_control::SimBl4012Wheel({2})}};
   std::array<std::array<float, 2>, 400> wheel_command_history_{};
   std::size_t wheel_history_index_ = 0, wheel_delay_ticks_ = 0;
   double wheel_enable_elapsed_s_ = 0;

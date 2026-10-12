@@ -1,7 +1,7 @@
 #pragma once
 
 // Bench jog logic (DRAFT). Drives the four GDS68 leg joints together with
-// low-gain MIT position hold/jog, and the two BL4820 wheels with hold-to-run
+// low-gain MIT position hold/jog, and the two BL4012 wheels with hold-to-run
 // Moving Speed, for operator bring-up on a stand. It is a separate bench tool,
 // not the balance controller: no IMU, no controller core. Pure C++ so it can
 // be host-tested; main.cpp owns the I/O.
@@ -48,7 +48,9 @@ class TxSink {
  public:
   virtual ~TxSink() = default;
   virtual bool send(std::uint16_t id, const frame::MitBytes& data) = 0;
-  // bus 0 = UART1 (left wheel), bus 1 = UART2 (right wheel).
+  // Both wheels share one half-duplex UART bus (motor id picks the wheel,
+  // per MotorFrameCodec's Dynamixel-like framing); `bus` is unused but kept
+  // so a future multi-bus layout doesn't need to touch this interface.
   virtual bool sendUart(std::uint8_t bus, const frame::DxlFrame& frame) = 0;
 };
 
@@ -111,6 +113,19 @@ struct Joint {
 
 inline constexpr std::size_t kWheelCount = 2U;
 
+// Bench-rig-only wiring: both wheels (Kpower BL4012, same Dynamixel-like
+// protocol) share one half-duplex UART bus (GPIO17, main.cpp), told apart
+// by motor id, set via Type-C config tool: right=1, left=2. This is NOT
+// how MotorMapping.hpp's kWheelUartBindings is defined - that file still
+// assumes the production src_fw wiring (2 separate full-duplex buses, each
+// with its own motor at id=1) and must stay that way for that code.
+// Index order matches Wheel::name below: [0]=LW, [1]=RW.
+inline constexpr std::array<std::uint8_t, kWheelCount> kBenchWheelId{{2U, 1U}};
+// Confirmed on the assembled robot 2026-10-12: a "drive forward" command
+// spun the right wheel (id=1) correctly but the left wheel (id=2)
+// backward.
+inline constexpr std::array<float, kWheelCount> kBenchWheelSign{{1.0F, -1.0F}};
+
 struct Wheel {
   const char* name = "";
   std::uint8_t bus = 0U;
@@ -143,6 +158,15 @@ struct Wheel {
 // Esp32UartPort::readFrame. Only checksum-valid responses come out.
 class DxlStreamParser {
  public:
+  // Drops any partially-collected frame. Call before each new command on a
+  // shared bus: a byte left over from a reply that arrived too late to be
+  // matched to its own command would otherwise shift-corrupt the NEXT
+  // command's response (seen as a silent, 100%-reproducible checksum fail).
+  void reset() noexcept {
+    size_ = 0U;
+    expected_ = 0U;
+  }
+
   bool push(std::uint8_t byte, frame::DxlFrame& out) noexcept {
     if (size_ == 0U) {
       if (byte == 0xFFU) buffer_[size_++] = byte;
@@ -202,29 +226,36 @@ class LegJog {
       joints_[i].name = jointName(binding.joint_index);
     }
     for (std::size_t i = 0U; i < kWheelCount; ++i) {
-      const auto& binding = mapping::kWheelUartBindings[i];
-      wheels_[i].bus = static_cast<std::uint8_t>(i);
-      wheels_[i].id = binding.motor_id;
-      wheels_[i].sign = binding.driver_sign;
+      // MotorMapping.hpp's motor_id/driver_sign assume the production
+      // 2-separate-buses wiring (src_fw) and must stay that way for that
+      // code. This bench rig instead has both wheels in parallel on one
+      // half-duplex bus (GPIO17), told apart by motor id, which needs a
+      // DIFFERENT id/sign pair - see kBenchWheelId/kBenchWheelSign below.
+      wheels_[i].bus = 0U;  // shared half-duplex bus.
+      wheels_[i].id = kBenchWheelId[i];
+      wheels_[i].sign = kBenchWheelSign[i];
       wheels_[i].name = i == 0U ? "LW" : "RW";
     }
   }
 
-  // One checksum-valid wheel response (DxlStreamParser output).
+  // One checksum-valid wheel response (DxlStreamParser output). `bus` is
+  // unused: both wheels share one physical bus, so the response is matched
+  // to a wheel by its motor id instead.
   void onUart(std::uint8_t bus, const frame::DxlFrame& input,
               std::uint64_t now_us) noexcept {
-    if (bus >= kWheelCount) return;
-    Wheel& wheel = wheels_[bus];
+    (void)bus;
     const auto parsed = frame::parseDxlResponse(input.bytes.data(), input.len);
-    if (!parsed.ok || parsed.id != wheel.id) return;
-    wheel.err = parsed.err;
+    if (!parsed.ok) return;
+    Wheel* const wheel = findWheelById(parsed.id);
+    if (wheel == nullptr) return;
+    wheel->err = parsed.err;
     const auto present = frame::parsePresentPayload(parsed);
     if (!present.valid) return;  // Write ack.
-    wheel.pos_raw = static_cast<std::uint16_t>(present.position_raw & 0x03FFU);
-    wheel.speed_raw = static_cast<std::int16_t>(wheel.sign * present.speed_raw);
-    wheel.load_raw = present.load_raw;
-    wheel.fb_us = now_us;
-    wheel.fb_valid = true;
+    wheel->pos_raw = static_cast<std::uint16_t>(present.position_raw & 0x03FFU);
+    wheel->speed_raw = static_cast<std::int16_t>(wheel->sign * present.speed_raw);
+    wheel->load_raw = present.load_raw;
+    wheel->fb_us = now_us;
+    wheel->fb_valid = true;
   }
 
   // ---- inputs -------------------------------------------------------------
@@ -671,6 +702,13 @@ class LegJog {
   Joint* findNode(std::uint8_t node) noexcept {
     for (auto& joint : joints_) {
       if (joint.node == node) return &joint;
+    }
+    return nullptr;
+  }
+
+  Wheel* findWheelById(std::uint8_t id) noexcept {
+    for (auto& wheel : wheels_) {
+      if (wheel.id == id) return &wheel;
     }
     return nullptr;
   }

@@ -154,7 +154,8 @@ class EmbeddedController {
     // rejected and retried from the current safe actuator target after the
     // station loop has recovered.
     float height_capture_abort_s = 0.75F;
-    // Wheel values follow the published CJC BL4820M12 operating envelope.
+    // Wheel values follow the published Kpower BL4012 operating envelope
+    // (same rated torque as the CJC BL4820M12 it replaced, 2026-10-12).
     // Leg values remain provisional because their motor rating is unresolved.
     float leg_max_torque_nm = 1.0F;
     float wheel_max_torque_nm = 0.13F;

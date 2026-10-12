@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """High-speed driving on the GIM model: full stick, release, reverse, turns and slalom at speed.
 
-The BL4820M12 wheel model (SimBl4820Wheel) keeps 0.13 N.m to 400 rpm and its motoring torque falls to 0 at
+The BL4012 wheel model (SimBl4012Wheel) keeps 0.13 N.m to 400 rpm and its motoring torque falls to 0 at
 1000 rpm. Without the wheel envelope (Tier::wheel_envelope) a full-stick run reaches ~4 m/s and falls; with
 it the plan stops near 3.06 m/s (motor_reserve 0.45). The long plan stop (0.3 m/s^2) must not trip the
 runaway guard (it re-zeroed the wheels mid-stop at 0.8 m/s before the guard also watched the plan).

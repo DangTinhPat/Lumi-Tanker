@@ -3,19 +3,74 @@
 ## Confirmed Decision
 
 On 2026-09-12 the user initially selected Steadywin GIM6010-8 for six joints,
-then superseded the TWO wheel motors with **CJC BL4820M12**. The current
-selection is four GIM6010-8 leg motors and two BL4820M12 wheel motors:
+then superseded the TWO wheel motors with **CJC BL4820M12**. On 2026-10-12
+the wheel motors were superseded again, with **Kpower BL4012** (see "Wheel
+Motor (current): Kpower BL4012" below) — the CJC BL4820M12 section further
+down is kept as the historical record of that earlier decision, not current.
+The current selection is four GIM6010-8 leg motors and two BL4012 wheel
+motors:
 
 | Joint | Function | Motor |
 | --- | --- | --- |
 | `cad_left_hip` | Left hip | GIM6010-8 |
 | `cad_left_knee` | Left knee | GIM6010-8 |
-| `cad_left_wheel` | Left wheel | BL4820M12 |
+| `cad_left_wheel` | Left wheel | BL4012 |
 | `cad_right_hip` | Right hip | GIM6010-8 |
 | `cad_right_knee` | Right knee | GIM6010-8 |
-| `cad_right_wheel` | Right wheel | BL4820M12 |
+| `cad_right_wheel` | Right wheel | BL4012 |
 
-## Wheel Motor: CJC BL4820M12
+## Wheel Motor (current): Kpower BL4012
+
+User-supplied manufacturer datasheet (PDF), retrieved 2026-10-12:
+`source_assets/datasheets/kpower_bl4012_20261012.pdf`.
+SHA256: `164a4c0d6b67c1eb6e6022351575e7c66ddfdfe680c0f951022d383b2e43633a`.
+
+| Published property | Value |
+| --- | --- |
+| Operating voltage range | 9–16 V |
+| Rated voltage | 12 V |
+| No-load speed | 950 rpm |
+| No-load current | 115 mA |
+| Rated speed | 400 rpm |
+| Rated torque | 0.13 N·m |
+| Rated current | 0.95 A |
+| Rated power | 11 W |
+| Stall torque | 0.2 N·m |
+| Stall current | 2 A |
+| Max efficiency | 65% |
+| Control method | FOC |
+| Protocol | UART TTL |
+| Encoder | Magnetic, 14-bit — physical sensor resolution; confirmed in
+  `docs/actuatal_driver/WHEEL_MOTOR_PROTOCOL.md` that the WIRE register still
+  reports Present Position as 0–1023/360° (10-bit), not the raw sensor bits |
+| Connector | SH1.0, 3 or 4 pin |
+| Electronic protection | Over-load, over-heat |
+| Feedback | Position, speed, current, fault info |
+| KV | 75 |
+| Terminal resistance | 4 Ω |
+| Phases / pole pairs / slots | 3 / 10 / 24 |
+| Weight | 132 g |
+| Lifespan | 2000 hr |
+| Noise | ≤40 dB at 50 cm |
+| Operating / storage temp | -10 to 55 °C / -20 to 80 °C |
+| IP rating | IP4X |
+
+Rated torque (0.13 N·m) and rated speed (400 rpm) match the figures already
+used for the BL4820M12 it replaced (same values, `docs/actuatal_driver/
+WHEEL_MOTOR_PROTOCOL.md`, `MotorFrameCodec.hpp`), so no simulator/controller
+tuning constants needed to change for this swap — only naming. No-load speed
+is 950 rpm here (was assumed ~1000 rpm for the BL4820M12), still comfortably
+above the 400 rpm clamp used everywhere raw speed is limited.
+
+Wiring also changed with this swap: the two motors now share one half-duplex
+UART bus (told apart by motor id) instead of one dedicated full-duplex bus
+each — see `docs/actuatal_driver/WHEEL_MOTOR_PROTOCOL.md` §2. This has been
+updated in the bench bring-up firmware (`tools/leg_jog_fw`) only; `src_fw`
+(the real balance controller) still assumes the old 2-separate-buses wiring
+and has NOT been updated for this (2026-10-12 decision, pending a dedicated
+pass before this motor can be driven from the real controller).
+
+## Wheel Motor (superseded 2026-10-12): CJC BL4820M12
 
 User-supplied manufacturer source: https://www.cjcmotor.com/motor/bl4820m12
 

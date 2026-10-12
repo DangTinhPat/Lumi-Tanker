@@ -11,7 +11,7 @@
 #include "robot_hal/MotorMapping.hpp"
 #include "robot_hal/MotorTransport.hpp"
 
-// Fake drivers standing in for the real GDS68 (leg) and BL4820M12 (wheel)
+// Fake drivers standing in for the real GDS68 (leg) and BL4012 (wheel)
 // hardware in the native sim. Native runner code must talk to these the same
 // way it will eventually talk to the real bus: pack a MotorFrameCodec frame,
 // hand it the raw bytes, ask for the resulting torque. No shortcut path may
@@ -99,7 +99,7 @@ class SimGds68Joint {
   motor_frame::MitCommand command_{};
 };
 
-// Fake BL4820M12: models Torque Enable / Moving Speed / Present Data over
+// Fake BL4012: models Torque Enable / Moving Speed / Present Data over
 // the Dynamixel-like packet, including the two behaviors WHEEL_MOTOR_PROTOCOL.md
 // explicitly calls out as verified-on-real-hardware quirks:
 //  - a Moving Speed frame arriving inside the >=20ms settle window after a
@@ -110,7 +110,7 @@ class SimGds68Joint {
 // (WHEEL §8 appendix); this is a placeholder bounded first-order model,
 // flagged pending a real bench measurement - see docs/MOTOR_HAL_PLAN.md
 // Phase 6.
-class SimBl4820Wheel {
+class SimBl4012Wheel {
  public:
   struct Config {
     std::uint8_t motor_id = 1;
@@ -136,7 +136,7 @@ class SimBl4820Wheel {
     float coulomb_friction_nm = 0.006F;
   };
 
-  explicit SimBl4820Wheel(Config cfg) : cfg_(cfg) {}
+  explicit SimBl4012Wheel(Config cfg) : cfg_(cfg) {}
 
   void onTorqueEnable(bool enable) {
     if (enable && !torque_enabled_) settle_remaining_s_ = cfg_.settle_s;
@@ -246,7 +246,7 @@ class SimMotorTransport final : public motor_transport::Transport {
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[1].node_id, 3.0F}),
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[2].node_id, 3.0F}),
                SimGds68Joint({motor_mapping::kVerifiedLegCanBindings[3].node_id, 3.0F})}},
-        wheels_{{SimBl4820Wheel({1, 0.13F}), SimBl4820Wheel({1, 0.13F})}} {}
+        wheels_{{SimBl4012Wheel({1, 0.13F}), SimBl4012Wheel({1, 0.13F})}} {}
 
   bool sendCan(std::uint16_t id,
                const motor_frame::MitBytes& data) noexcept override {
@@ -298,7 +298,7 @@ class SimMotorTransport final : public motor_transport::Transport {
       legs_[i] = SimGds68Joint(
           {motor_mapping::kVerifiedLegCanBindings[i].node_id, 3.0F});
     }
-    for (auto& wheel : wheels_) wheel = SimBl4820Wheel({1, 0.13F});
+    for (auto& wheel : wheels_) wheel = SimBl4012Wheel({1, 0.13F});
     can_rx_head_ = 0;
     can_rx_count_ = 0;
     uart_rx_head_.fill(0);
@@ -327,8 +327,8 @@ class SimMotorTransport final : public motor_transport::Transport {
   }
 
   SimGds68Joint& leg(std::size_t index) { return legs_.at(index); }
-  SimBl4820Wheel& wheel(std::size_t index) { return wheels_.at(index); }
-  const SimBl4820Wheel& wheel(std::size_t index) const { return wheels_.at(index); }
+  SimBl4012Wheel& wheel(std::size_t index) { return wheels_.at(index); }
+  const SimBl4012Wheel& wheel(std::size_t index) const { return wheels_.at(index); }
 
  private:
   bool pushCan(const motor_transport::CanFrame& frame) noexcept {
@@ -349,7 +349,7 @@ class SimMotorTransport final : public motor_transport::Transport {
   }
 
   std::array<SimGds68Joint, 4> legs_;
-  std::array<SimBl4820Wheel, 2> wheels_;
+  std::array<SimBl4012Wheel, 2> wheels_;
   std::array<motor_transport::CanFrame, kCanRxCapacity> can_rx_{};
   std::size_t can_rx_head_ = 0;
   std::size_t can_rx_count_ = 0;

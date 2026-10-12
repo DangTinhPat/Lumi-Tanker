@@ -53,7 +53,7 @@ struct Bench {
   bool echo_ok = true;
   float torque = 0.0F;
   std::uint8_t mit_dlc = 6U;  // GDS68 MIT feedback uses bytes 0-5 only.
-  // Two fake BL4820 wheels.
+  // Two fake BL4012 wheels.
   bool wheel_torque[2]{false, false};
   std::int16_t wheel_speed[2]{0, 0};
   std::uint16_t wheel_pos[2]{100U, 900U};
