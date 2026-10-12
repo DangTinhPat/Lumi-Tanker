@@ -47,7 +47,7 @@ constexpr std::uint64_t kBlePollUs = 10'000U;
 constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
 // Full stick. Forward stays 0.25 m/s under the 0.8 m/s balancer cap: catching
 // a forward lean needs the wheels to run faster than the drive speed.
-constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
+constexpr float kBleDriveSpeedMS = 4.1888F;  // full stick forward = the wheel's no-load limit (1000 rpm x 0.04 m)
 constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
 
 std::atomic<int> g_v3_ble_links{0};
@@ -133,7 +133,9 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
 
 AppV3::AppV3() noexcept
     : transport_(can_.port(), uart1_.port(), uart2_.port()),
-      ctrl_(tap_fw::v3::defaultV3Config()) {}
+      ctrl_(tap_fw::v3::defaultV3Config()) {
+  (void)legs_.setMode(tap_fw::v3::LegLock::Mode::Position);   // legs: driver position loop (SET legmode 1 = Iq torque)
+}
 
 bool AppV3::begin() noexcept {
   Serial.setTxBufferSize(4096U);
@@ -392,6 +394,36 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     out_.println(tilt_test_ ? "V3 START (TILTTEST: wheel = k*(pitch - pitch at release), "
                                 "max 12 rad/s, no balance loop)"
                               : "V3 START");
+  } else if (std::strncmp(line, "JUMP", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
+    // "JUMP" = the default forward hop, "JUMP 0" = vertical, "JUMP <m>" = hop <m> metres.
+    jump_forward_m_ = line[4] == ' ' ? std::strtof(line + 5, nullptr) : std::numeric_limits<float>::quiet_NaN();
+    if (line[4] == ' ' && !std::isfinite(jump_forward_m_)) jump_forward_m_ = 0.0F;
+    // v3.5 vertical jump. Default OFF (SET jump 1); only while balancing.
+    if (!ctrl_.config().jump.enabled) {
+      out_.println("V3 JUMP refused: SET jump 1 first (v3.5 jump is off by default)");
+    } else if (ctrl_.state() != V3Controller::State::Balancing) {
+      out_.println("V3 JUMP refused: not balancing");
+    } else {
+      jump_pending_ = true;
+      out_.println("V3 JUMP");
+    }
+  } else if (std::strcmp(line, "STANDUP") == 0) {
+    // Rocking stand-up from the lying pose (Idle only): legs lock where they are, the hips fold, the
+    // controller hands over to the balancer when the CoM is over the axle.
+    if (estop_) {
+      out_.println("V3 STANDUP refused: E-STOP latched (CLEAR_ESTOP)");
+    } else if (!ctrl_.config().standup.enabled) {
+      out_.println("V3 STANDUP refused: SET standup 1 first");
+    } else if (!lying_start_) {
+      out_.println("V3 STANDUP refused: SET lying 1 first (the supply must have been switched on in the home pose)");
+    } else if (!legs_.positionMode()) {
+      out_.println("V3 STANDUP refused: legs must be in position mode (SET legmode 0)");
+    } else if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+      out_.println("V3 STANDUP refused: not idle (DISABLE first)");
+    } else {
+      standup_pending_ = true;
+      out_.println("V3 STANDUP");
+    }
   } else if (std::strcmp(line, "GO") == 0) {
     // Operator flow: GO is pressed with the robot on the stand. It only arms:
     // legs lock, wheels hold, and the balance loop engages by itself once the
@@ -533,6 +565,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "wbkhold")) ctrl_.config().tier.knee_hold_wb = v >= 0.5F;
     else if (!std::strcmp(key, "wbenv")) ctrl_.config().tier.envelope_wb = v >= 0.5F;
     else if (!std::strcmp(key, "tenvlean")) ctrl_.config().tier.env_lean_rad = std::clamp(v, 0.0F, 0.3F);
+    else if (!std::strcmp(key, "wenv")) ctrl_.config().tier.wheel_envelope = v >= 0.5F;
+    else if (!std::strcmp(key, "wreserve")) ctrl_.config().tier.motor_reserve = std::clamp(v, 0.0F, 0.9F);
+    else if (!std::strcmp(key, "latacc")) ctrl_.config().tier.lateral_accel_max_m_s2 = std::clamp(v, 0.0F, 9.8F);
     else if (!std::strcmp(key, "amax")) ctrl_.config().pid.accel_max_m_s2 = std::clamp(v, 0.5F, 30.0F);
     else if (!std::strcmp(key, "algo")) {
       if (ctrl_.state() == V3Controller::State::Balancing ||
@@ -624,6 +659,62 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "leg_kp")) legs_.setJointGains(std::clamp(v, 0.0F, tap_fw::board::kLegMaxKpNmPerRad), legs_.config().joint_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setJointGains(legs_.config().joint_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else if (!std::strcmp(key, "iqcomp")) legs_.setCurrentCompGain(v);
+    else if (!std::strcmp(key, "legmode")) {
+      // 0 = driver position loop (default), 1 = direct torque with Iq compensation.
+      if (!legs_.setMode(v >= 0.5F ? tap_fw::v3::LegLock::Mode::Torque : tap_fw::v3::LegLock::Mode::Position)) {
+        out_.println("V3 SET legmode refused: DISABLE first (the driver mode is chosen when the legs lock)");
+        return;
+      }
+      if (v >= 0.5F) { lying_start_ = false; ctrl_.config().standup.enabled = false; }
+      out_.printf("V3 legmode=%s\n", legs_.positionMode() ? "POSITION" : "CURRENT_TORQUE");
+    }
+    else if (!std::strcmp(key, "lying")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET lying refused: DISABLE first");
+        return;
+      }
+      if (v >= 0.5F && !legs_.positionMode()) {
+        out_.println("V3 SET lying refused: needs legmode 0 (position)");
+        return;
+      }
+      lying_start_ = v >= 0.5F;
+      out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n", lying_start_ ? "ON" : "off",
+                  homeHip(), homeKnee());
+    }
+    else if (!std::strcmp(key, "standup")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standup refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.enabled = v >= 0.5F;
+      out_.printf("V3 standup %s\n", ctrl_.config().standup.enabled ? "ENABLED" : "off");
+    }
+    else if (!std::strcmp(key, "jump")) {
+      // The planner takes tens of ms (FK/IK scans): only while the balance loop is off.
+      if (v >= 0.5F && ctrl_.state() != V3Controller::State::Idle &&
+          ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET jump refused: DISABLE first (the jump planner must not run inside the balance loop)");
+        return;
+      }
+      ctrl_.config().jump.enabled = v >= 0.5F;
+      if (ctrl_.config().jump.enabled) {
+        const auto& plan = ctrl_.prepareJump();
+        out_.printf("V3 JUMP plan: %s | dip to %.1f mm, lift-off %.2f m/s, CoM rise %.0f mm, tuck lift %.1f mm, "
+                    "flight %.0f ms, predicted wheel clearance %.1f mm\n",
+                    plan.reason, 1000.0F * plan.crouch_height_m, plan.takeoff_speed_m_s,
+                    1000.0F * plan.com_rise_m, 1000.0F * plan.predicted_tuck_lift_m,
+                    1000.0F * plan.flight_time_s,
+                    1000.0F * plan.predicted_clearance_m);
+      }
+    }
+    else if (!std::strcmp(key, "jumptarget")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET jumptarget refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().jump.planner.target_clearance_m = std::clamp(v, 0.02F, 0.15F);
+      if (ctrl_.config().jump.enabled) (void)ctrl_.prepareJump();
+    }
     else {
       out_.printf("V3 SET unknown key '%s'\n", key);
       return;
@@ -803,8 +894,10 @@ void AppV3::printTunables() noexcept {
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
   }
-  out_.printf("V3 TUNE legmode=CURRENT_TORQUE leg_kp=%.1f leg_kd=%.2f iqcomp=%.2f trim_gain=%.2f trim_max=%.2f "
+  out_.printf("V3 TUNE legmode=%s lying=%d standup=%d leg_kp=%.1f leg_kd=%.2f iqcomp=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
+                legs_.positionMode() ? "POSITION" : "CURRENT_TORQUE", lying_start_ ? 1 : 0,
+                ctrl_.config().standup.enabled ? 1 : 0,
                 legs_.config().joint_kp_nm_per_rad, legs_.config().joint_kd_nm_s_per_rad,
                 legs_.config().current_comp_gain,
                 c.balance_trim_gain_rad_per_m,
@@ -1052,7 +1145,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     static char text[96];
     if (!legsFresh(now_us)) {
       refuse = "leg encoder estimates (0x009) missing - motor supply on?";
-    } else if (!feedback_.allLegCurrentsFresh(now_us)) {
+    } else if (legIqNeeded() && !feedback_.allLegCurrentsFresh(now_us)) {
       refuse = "GDS68 Iq feedback (0x014) missing/stale - configure iq_rate_ms on all leg drivers";
     } else if (!feedback_.allWheelsFresh(now_us)) {
       refuse = "wheel feedback missing";
@@ -1090,6 +1183,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const bool ready_now = ctrl_.state() == V3Controller::State::Ready;
   cmd.go = go_pending_ || (tilt_test_ && ready_now);
   go_pending_ = false;
+  cmd.jump = jump_pending_;
+  cmd.jump_forward_m = jump_forward_m_;
+  jump_pending_ = false;
+  cmd.standup = standup_pending_;
+  standup_pending_ = false;
 
   V3Controller::Input in{};
   in.now_us = now_us;
@@ -1105,17 +1203,20 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.accel_z_m_s2 = body_.accel_m_s2[2];
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
-  in.leg_chain_rad = legChainRad();
+  in.leg_chain_rad = legChainRad() + homeHip() + homeKnee();
   // Measured joints per side, core frame (LegLock order LH LK RH RK).
   {
     const auto legs = tap_fw::board::MotorIds{}.leg_can;
     for (std::size_t side = 0; side < 2U; ++side) {
       const std::size_t hip = 2U * side, knee = hip + 1U;
-      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign;
-      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign;
+      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign + homeHip();
+      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign + homeKnee();
       in.hip_rate_rad_s[side] = legJointRate(hip) * legs[hip].driver_sign;
       in.knee_rate_rad_s[side] = legJointRate(knee) * legs[knee].driver_sign;
+      in.knee_current_a[side] = feedback_.legCurrentA(legs[knee].joint_index) * legs[knee].driver_sign;
     }
+    in.leg_current_valid = feedback_.legCurrentFresh(legs[1].joint_index, now_us) &&
+        feedback_.legCurrentFresh(legs[3].joint_index, now_us);
     in.legs_measured = legsFresh(now_us);
     // Noise of the hip velocity estimates (they feed theta_v_rate): rms per
     // SENS report, meaningful with the legs holding still.
@@ -1126,7 +1227,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   const bool closed_loop_due = legs_.engaged() && now_us - engage_us_ > kClosedLoopGraceUs;
   in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFresh(now_us) && legsFresh(now_us) &&
-      feedback_.allLegCurrentsFresh(now_us) &&
+      (!legIqNeeded() || feedback_.allLegCurrentsFresh(now_us)) &&
       legAxisProblem(now_us, closed_loop_due) == nullptr;
   bool legs_ready = legs_.atZero(now_us);
   for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
@@ -1158,6 +1259,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   const std::uint64_t p0 = nowUs();
   const auto out = ctrl_.update(in, cmd);
+  if (out.jump_refused != 0) {
+    out_.printf("V3 JUMP refused: %s\n",
+                out.jump_refused == 1 ? "tilted or held"
+                : out.jump_refused == 3 ? "no plan (SET jump 1 while disabled)"
+                : out.jump_refused == 5 ? "run-up speed not reached"
+                : out.jump_refused == 6 ? "backward jumps are not supported yet"
+                                        : "legs still moving (stand still first)");
+  }
   const std::uint64_t p1 = nowUs();
   prof(0, p1 - p0);
   prof_upd_sum_ += static_cast<std::uint32_t>(p1 - p0);
@@ -1173,10 +1282,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       start[leg] = feedback_.legEstimate(tap_fw::board::MotorIds{}.leg_can[leg].joint_index).pos_turns;
     }
     engage_us_ = now_us;
-    legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
+    if (out.state == V3Controller::State::StandUp) {
+      legs_.setOffsets(out.leg_hip_offset_rad - homeHip(), out.leg_knee_offset_rad - homeKnee());
+    } else {
+      legs_.setOffsets(ctrl_.legPose().hip_offset_rad - homeHip(), ctrl_.legPose().knee_offset_rad - homeKnee());
+    }
     (void)legs_.engage(start, now_us, transport_);
-    out_.printf("V3 legs locking (CURRENT_TORQUE): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
-                  legJointRad(0), legJointRad(1),
+    out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
+                  legs_.positionMode() ? "POSITION" : "CURRENT_TORQUE", legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
   }
   if (rec_active_ &&
@@ -1204,14 +1317,22 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand) rec_cmd_ = recExcitation(now_us);
     // The height pose plus the tier-2 hip offset (0 unless trunk is on and
     // balancing); the stand tests drive the bare pose.
-    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
-    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
+    // During a v3.5 jump the controller's output carries the leg path.
+    const bool jumping = !stand && ctrl_.jump().running();
+    // Stand-up: the controller's output carries the rocking trajectory (as the jump path).
+    const bool standing_up = !stand && out.state == V3Controller::State::StandUp;
+    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad
+                    : (jumping || standing_up) ? out.leg_hip_offset_rad : ctrl_.hipCommand();
+    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad
+                     : (jumping || standing_up) ? out.leg_knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
     if (stand && rec_kind_ == RecKind::KneeStand) {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad,
                             tap_fw::v3::LegHeight::kKneeMaxRad);
     }
-    legs_.setOffsets(hip_cmd, knee_cmd);
+    legs_.setOffsets(hip_cmd - homeHip(), knee_cmd - homeKnee());
+    legs_.setImpedanceScale(stand ? 1.0F : out.leg_hip_kp_scale, stand ? 1.0F : out.leg_hip_kd_scale,
+                            stand ? 1.0F : out.leg_kp_scale, stand ? 1.0F : out.leg_kd_scale);
     // Roll: per-side offsets (zero unless SET roll 1 and balancing).
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,

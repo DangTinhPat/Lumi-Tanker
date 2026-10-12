@@ -207,6 +207,38 @@ int main() {
     assert(lock.update(1000000, bus) && bus.can.size() == before);
     std::printf("paired CAN pacing: %d batches / 100 ms, no stall burst\n", batches);
   }
+  // Position mode: the driver's own position loop (Set_Input_Pos), no Kt / Iq / gravity model. The first
+  // set-point is the measured pose, then the target ramps to exactly 0 and moves by the offsets.
+  {
+    FakeTransport bus;
+    LegLock lock;
+    assert(lock.setMode(LegLock::Mode::Position) && lock.positionMode());
+    const std::array<float, 4> start{0.8F, -0.4F, 0.2F, 0.0F};
+    assert(lock.engage(start, 1'000'000U, bus));
+    assert(bus.can.size() == 16U);
+    for (int i = 0; i < 4; ++i) {
+      assert(cmdOf(bus.can[i]) == kSetLimitsCmdId);
+      assert(cmdOf(bus.can[4 + i]) == kSetControllerModeCmdId);
+      const auto mode = unpackSetControllerMode(bus.can[4 + i].data);
+      assert(mode.control_mode == kControlModePosition && mode.input_mode == kInputModePassthrough);
+      assert(cmdOf(bus.can[8 + i]) == kSetInputPosCmdId);
+      assert(near(unpackSetInputPosTurns(bus.can[8 + i].data), start[static_cast<std::size_t>(i)]));
+      assert(cmdOf(bus.can[12 + i]) == kSetAxisStateCmdId);
+    }
+    assert(!lock.setMode(LegLock::Mode::Torque));   // not while the legs are engaged
+    lock.setOffsets(0.5F, 0.0F);
+    bus.can.clear();
+    assert(lock.update(1'000'000U + 5'000'000U, bus));
+    assert(bus.can.size() == 4U);
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (int i = 0; i < 4; ++i) {
+      assert(cmdOf(bus.can[static_cast<std::size_t>(i)]) == kSetInputPosCmdId);
+      const bool knee = legs[static_cast<std::size_t>(i)].joint_index == 1U || legs[static_cast<std::size_t>(i)].joint_index == 4U;
+      const float expect = knee ? 0.0F : 0.5F * legs[static_cast<std::size_t>(i)].driver_sign * 8.0F / 6.28318530717958647692F;
+      assert(near(unpackSetInputPosTurns(bus.can[static_cast<std::size_t>(i)].data), expect));
+    }
+    std::printf("LegLock position mode: Set_Input_Pos, ramp to 0, offsets\n");
+  }
   // Current/torque mode is the only leg mode; targets still ramp from the
   // measured pose to exactly 0 before the controller moves the legs.
   {

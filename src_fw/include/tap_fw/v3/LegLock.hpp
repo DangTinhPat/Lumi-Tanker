@@ -15,12 +15,18 @@ namespace motor_transport = robot_control::motor_transport;
 // the offsets the controller asks for. The operator arranges the legs before the
 // motor supply is switched on, so "zero" is exactly that pose.
 //
-// All four joints use direct GDS68 torque mode. Local position/velocity
-// impedance creates a requested torque; fresh measured Iq applies delta-I
-// correction before it is sent to the driver.
+// Two leg modes (Config::mode, SET legmode; changeable only while the legs are free):
+//  Position: the driver's own position loop tracks Set_Input_Pos (target in rotor turns,
+//    velocity feed-forward in milli-turns/s). No Kt, no Iq feedback and no gravity model are involved;
+//    the driver current limit (current_limit_a) bounds the force.
+//  Torque: direct GDS68 torque mode. Local position/velocity impedance creates a requested torque;
+//    fresh measured Iq applies delta-I correction before it is sent to the driver.
 class LegLock {
  public:
+  enum class Mode { Position, Torque };
+
   struct Config {
+    Mode mode = Mode::Torque;              // the firmware app selects Position (SET legmode)
     float ramp_s = 1.0F;                   // current pose -> 0
     // 333 Hz, paced on the 500 Hz control clock (alternating 2/4 ms). Four
     // commands per cycle at 500 Hz would use ~88 % of the 500 kbit/s bus before
@@ -90,6 +96,19 @@ class LegLock {
     config_.joint_kp_nm_per_rad = kp;
     config_.joint_kd_nm_s_per_rad = kd;
   }
+  // Joint impedance scale per joint type (v3.5 jump thrust / soft landing);
+  // 1 = the configured gains. Leg order is MotorIds::leg_can: hips even, knees odd.
+  void setImpedanceScale(float hip_kp, float hip_kd, float knee_kp, float knee_kd) noexcept {
+    kp_scale_ = {hip_kp, knee_kp};
+    kd_scale_ = {hip_kd, knee_kd};
+  }
+  // Only while the legs are free: the driver controller mode is chosen at engage.
+  bool setMode(Mode mode) noexcept {
+    if (engaged_) return false;
+    config_.mode = mode;
+    return true;
+  }
+  [[nodiscard]] bool positionMode() const noexcept { return config_.mode == Mode::Position; }
   void setCurrentCompGain(float gain) noexcept {
     config_.current_comp_gain = std::clamp(gain, 0.0F, 1.0F);
   }
@@ -105,6 +124,8 @@ class LegLock {
   std::array<float, kLegs> feedback_velocity_rad_s_{};
   std::array<float, kLegs> feedback_current_a_{};
   std::array<bool, kLegs> feedback_valid_{};
+  std::array<float, 2> kp_scale_{1.0F, 1.0F};
+  std::array<float, 2> kd_scale_{1.0F, 1.0F};
   bool sendTargets(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
 
   Config config_{};

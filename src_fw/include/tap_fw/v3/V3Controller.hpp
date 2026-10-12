@@ -7,6 +7,10 @@
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
 #include "robot_control/LqrActuationPredictor.hpp"
+#include "tap_fw/v3/JumpSequence.hpp"
+#include "tap_fw/v3/StandUp.hpp"
+#include "tap_fw/v3/aac/FlightAttitude.hpp"
+#include "tap_fw/v3/aac/TakeoffMomentum.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
@@ -24,7 +28,8 @@ namespace tap_fw::v3 {
 // (ARMED) -> it engages after Engage::armed_go_s or at the first tip (or on GO).
 class V3Controller {
  public:
-  enum class State { Idle, Locking, Ready, Balancing, Fault };
+  // StandUp: the rocking stand-up from the lying pose (Command::standup, StandUp.hpp); it hands over to Balancing.
+  enum class State { Idle, Locking, Ready, Balancing, Fault, StandUp };
 
   // Lqr (SET algo 0) with the tiers is the shipped balancer. Pid (SET algo 1) is the
   // classic two-loop fallback. WholeBody (SET algo 2) is an opt-in single LQR for
@@ -362,10 +367,12 @@ class V3Controller {
     float preview_s = 0.12F;
     float plan_accel_m_s2 = 0.3F;
     float plan_jerk_m_s3 = 1.0F;
-    // Planned speed cap (0.55 m/s = the BLE full stick). Cruising within
+    // Planned speed cap (was 0.55 m/s = the BLE full stick). Cruising within
     // 0.05 m/s of the 0.8 m/s wheel cap leaves no headroom to stand the lean back
     // up; 0.55 held every plant variant (v3_tier_tests V15).
-    float plan_vmax_m_s = 0.55F;
+    // Opened to the wheel's no-load limit (BL4820M12 1000 rpm x 0.04 m = 4.1888 m/s; 400 rpm is the rated
+    // speed at the full 0.13 N.m). Limit it down as needed.
+    float plan_vmax_m_s = 4.1888F;
     // Motion envelope from the pendulum at the current height (SET tenv): the
     // planned speed cap becomes the wheel cap minus env_catch_rad * sqrt(g l)
     // (capture point: catching a lean theta needs about theta * sqrt(g l) of wheel
@@ -377,6 +384,17 @@ class V3Controller {
     // Whole-body LQR: the legs take the planned lean, so the planned acceleration
     // is the lean budget g * tan(env_lean_rad) (0.10 -> ~1 m/s^2).
     float env_lean_rad = 0.10F;
+    // Wheel torque-speed envelope (BL4820M12: the full 0.13 N.m up to the rated 400 rpm, the motoring
+    // torque falls linearly to 0 at the no-load 1000 rpm; braking keeps it). Near the no-load speed the
+    // wheels can no longer run out under a forward lean (sim: fell while accelerating at ~3.3 m/s, and on
+    // the throttle release, which first speeds the wheels up to tilt the body back). The planned speed is
+    // capped where the faster wheel still has motor_reserve of its torque, less the outer wheel's share
+    // of the turn; the turn rate is capped by lateral_accel_max (centripetal tip-over across the track).
+    bool wheel_envelope = true;
+    float wheel_rated_rad_s = 41.8879F;
+    float wheel_noload_rad_s = 104.7198F;
+    float motor_reserve = 0.45F;
+    float lateral_accel_max_m_s2 = 2.5F;
     // Knee-height compensation (SET khold). A hip swing dq moves the wheel
     // fore/aft at first order but drops the body by ~r (1 - cos dq), which a
     // linear controller cannot see. Paired hip/knee IK (coordinateTrunkAxle)
@@ -497,6 +515,9 @@ class V3Controller {
     #endif
     Tier tier{};
     Roll roll;
+    // v3.5 vertical jump (JumpSequence.hpp). Off by default.
+    JumpSequence::Config jump;
+    StandUp::Config standup;
     WheelPredict wheel_pred;
     Height height{};
     Engage engage{};
@@ -619,7 +640,7 @@ class V3Controller {
     float stand_leash_release_s = 5.0F;  // leash off this long after engage/release
     float runaway_v_tau_s = 1.5F;
     // The runaway guard stays off while the operator drives and this long
-    // after the last drive command (covers LqrBalancer's stop ramp).
+    // after the last drive command or the drive plan's stop (covers LqrBalancer's stop ramp).
     std::uint64_t drive_guard_hold_us = 1'500'000U;
     float wheel_radius_m = 0.04F;
   };
@@ -650,6 +671,8 @@ class V3Controller {
     std::array<float, 2> hip_rate_rad_s{};
     std::array<float, 2> knee_rate_rad_s{};
     bool legs_measured = false;
+    std::array<float, 2> knee_current_a{};  // measured knee driver current (core sign), left/right
+    bool leg_current_valid = false;
     bool sensors_ok = true;                 // IMU, wheels, legs fresh; no axis fault
     bool legs_ready = false;                // leg lock has reached its target
   };
@@ -658,6 +681,9 @@ class V3Controller {
     bool start = false;       // edge
     bool go = false;          // edge: engage balancing now (from Ready)
     bool disable = false;     // level: stop everything
+    bool jump = false;        // edge: start the v3.5 jump (Config::jump.enabled)
+    bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
+    float jump_forward_m = 0.0F;  // with jump: horizontal distance of the hop (NaN = the default hop, 0 = vertical, < 0 refused)
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
     // Requested hip-axle height [m]; <= 0 keeps the current request.
@@ -682,6 +708,13 @@ class V3Controller {
     std::array<float, 2> leg_roll_hip_rate{};
     std::array<float, 2> leg_roll_knee_rate{};
     bool legs_moving = false;
+    // Leg joint impedance scale (jump thrust / landing); 1 = normal.
+    float leg_kp_scale = 1.0F;
+    float leg_kd_scale = 1.0F;           // knees
+    float leg_hip_kp_scale = 1.0F;       // hips stay stiff to keep the CoM over the axle
+    float leg_hip_kd_scale = 1.0F;
+    int jump_phase = 0;         // JumpSequence::Phase, for the log
+    int jump_refused = 0;       // one tick: 1 = tilted/held, 3 = no plan, 4 = legs still moving
     const char* fault = nullptr;  // set on the tick a fault is raised
   };
 
@@ -742,6 +775,44 @@ class V3Controller {
   [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
   [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  [[nodiscard]] const JumpSequence& jump() const noexcept { return jump_; }
+  // Plans the jump from Config::jump.planner (FK/IK, mass, torque budget). Takes tens of
+  // milliseconds on the ESP32, so call it when the target changes, never inside the
+  // control tick; JUMP is refused until a plan exists.
+  const JumpPlan& prepareJump() noexcept {
+    jump_plan_ = planJump(config_.jump.planner);
+    if (jump_plan_.ok) {
+      // Effective inertia of the planned flight, T / integral(dt / I): what L turns the robot by.
+      FlightPlan f = jump_plan_.curve;
+      const auto top = LegHeight::forHeight(config_.jump.planner.top_height_m);
+      f.planTuck(config_.jump.planner, jump_plan_.takeoff_speed_m_s, 0.0F,
+                 LegHeight::hangHipCad() + top.hip_offset_rad, top.knee_offset_rad, 0.0F);
+      constexpr int kSamples = 9;
+      float hips[kSamples], knees[kSamples];
+      for (int i = 0; i < kSamples; ++i) {
+        knees[i] = f.kneeAt(f.flight_time_s * static_cast<float>(i) / (kSamples - 1));
+        hips[i] = f.tuckHip(knees[i]);
+      }
+      const float turn_per_l = freeRotation(1.0F, hips, knees, kSamples, f.flight_time_s);
+      if (turn_per_l > 0.0F) takeoff_inertia_ = f.flight_time_s / turn_per_l;
+    }
+    return jump_plan_;
+  }
+  [[nodiscard]] const JumpPlan& jumpPlan() const noexcept { return jump_plan_; }
+  [[nodiscard]] float jumpVz() const noexcept { return jump_vz_f_; }
+  [[nodiscard]] const BodyMomentum& jumpMomentum() const noexcept { return jump_momentum_; }
+  [[nodiscard]] float jumpTouchdownOffset() const noexcept { return jump_align_; }
+  [[nodiscard]] float jumpDriveSpeed() const noexcept { return jump_drive_ ? jump_drive_m_s_ : 0.0F; }
+  [[nodiscard]] float planSpeed() const noexcept { return plan_v_; }
+  [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
+  [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
+  [[nodiscard]] const robot_control::LqrBalancer::DebugState& lqrDebug() const noexcept { return lqr_.debugState(); }
+  [[nodiscard]] float lqrSpeedSeen() const noexcept { return pid_v_filt_; }
+  [[nodiscard]] float jumpTouchdownTarget() const noexcept { return jump_td_target_; }
+  [[nodiscard]] float jumpTouchdownPredicted() const noexcept { return jump_td_pred_; }
+  [[nodiscard]] float jumpAz() const noexcept { return jump_az_f_; }
+  [[nodiscard]] const AirborneEstimator::Output& airborneState() const noexcept { return aac_state_; }
+  [[nodiscard]] const TakeoffMomentum::Output& takeoffState() const noexcept { return takeoff_state_; }
   // Roll and coordinated trunk motion both need knee extension in reserve.
   // START/Ready still hold the exact power-up pose; this ceiling applies
   // only to the subsequent supported height profile.
@@ -883,6 +954,45 @@ class V3Controller {
   float height_speed_m_s_ = 0.0F;  // signed hip-axle speed, + = up
   float height_accel_m_s2_ = 0.0F; // signed acceleration of the height profile
   LegPose pose_{};
+  JumpSequence jump_{};
+  StandUp standup_{};
+  std::uint64_t standup_grace_until_us_ = 0U;   // wider fall limits until then (after a stand-up hand-over)
+  StandUp::Output standup_state_{};
+  float standup_lean_ = 0.0F;
+  AirborneEstimator aac_est_{};
+  FlightAttitude flight_att_{};
+  std::array<float, 2> jump_wheel_hold_{};
+  bool jump_wheel_hold_set_ = false;
+  TakeoffMomentum takeoff_{};
+  TakeoffMomentum::Output takeoff_state_{};
+  float jump_theta0_ = 0.0F;            // virtual pitch when the dip started
+  float last_ready_ = 0.0F;              // run-up: progress into the ready pose
+  bool ready_solved_ = false;
+  float ready_dhip_ = 0.0F;              // ready pose: CoM-line lean through the hip
+  float ready_knee0_ = 0.0F, ready_knee1_ = 0.0F;   // ready pose: knee command from / to (height state)
+  bool jump_return_ = false;              // after a jump: the height planner uses JumpSequence return_*
+  bool jump_height_saved_ = false;        // the operator's height target, kept during a hop's ready pose
+  float jump_saved_height_m_ = 0.0F, jump_saved_knee_target_ = 0.0F;
+  float jump_com_xw_ = 0.0F;            // CoM world-frame offset from the axle (for its rate)
+  bool jump_com_xw_valid_ = false;
+  float jump_vx_f_ = 0.0F;              // CoM horizontal ground speed, filtered
+  bool jump_drive_ = false;            // forward jump: run-up speed replaces the forward command
+  float jump_drive_m_s_ = 0.0F;
+  float takeoff_inertia_ = 0.0193F;   // whole-robot inertia at the planned flight shape (prepareJump)
+  AirborneEstimator::Output aac_state_{};
+  JumpPlan jump_plan_{};
+  JumpSequence::Phase jump_prev_phase_ = JumpSequence::Phase::Idle;
+  float jump_hip0_ = 0.0F, jump_knee0_ = 0.0F, jump_com_angle_ = 0.0F;  // at the jump start
+  float jump_pitch0_ = 0.0F;
+  float jump_align_ = 0.0F;       // hip offset from the zero-reaction curve that the touchdown law commands (flight)
+  BodyMomentum jump_momentum_{};   // angular momentum / inertia / CoM height from the encoders and the gyro
+  float jump_td_target_ = 0.0F;   // solved hip offset (diagnostic)
+  float jump_td_pred_ = 0.0F;     // virtual pitch predicted at the touchdown for that offset (diagnostic)
+  bool jump_td_valid_ = false;    // the touchdown law was seeded this flight
+  float jump_az_f_ = 0.0F;
+  float jump_vz_f_ = 0.0F;        // filtered CoM vertical speed (FK of the leg encoders)
+  float jump_land_angle_ = 0.0F;  // CoM line angle of the adopted standing pose
+  float jump_last_hip_ = 0.0F, jump_last_knee_ = 0.0F;  // last leg command sent by the jump
   float chain_prev_rad_ = 0.0F;
   float chain_rate_f_ = 0.0F;
   bool chain_init_ = false;
@@ -921,6 +1031,7 @@ class V3Controller {
   [[nodiscard]] bool readyStill(const Input& in, float body_pitch, float body_rate) noexcept;
   [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;
   void updateVirtualPitch(const Input& in);
+  [[nodiscard]] float hopPlannedLean() const noexcept;
   void updateTrunk(const Input& in, bool active, std::array<float, 2> wheel_cmd_rad_s);
   void updateLegLayers(const Input& in, bool active, std::array<float, 2> wheel_cmd_rad_s);
   #ifdef TAP_SPLIT_HOST_PROTOTYPE
@@ -939,6 +1050,8 @@ class V3Controller {
   struct PlanSample { float v, a; };
   void updatePlan(float target_v, float dt, bool reset);
   [[nodiscard]] float planCap(float vmax) const noexcept;
+  [[nodiscard]] float wheelEnvelopeSpeed() const noexcept;
+  void restoreJumpHeight() noexcept;
   // Knee offset from the pose that keeps the pose's hip-axle height with the
   // hip at pose + dhip (Tier::knee_hold), 0 when off.
   [[nodiscard]] float kneeHold(float dhip) noexcept;
@@ -1092,6 +1205,7 @@ class V3Controller {
   void engageBalance(const Input& in, float seed);
   void heldRezero(const Input& in);
   [[nodiscard]] float releaseBalance(const Input& in) const;
+  void applyJump(const Input& raw, const Input& in, const Command& cmd, Output& out);
   void updateLearnedTrim(const Input& in, float ex, float current_trim_rad);
   float learned_trim_rad_ = 0.0F;
   bool learned_trim_valid_ = false;

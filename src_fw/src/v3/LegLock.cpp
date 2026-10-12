@@ -32,8 +32,9 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
   for (std::size_t i = 0; i < kLegs; ++i) {
     const auto node = legs[i].node_id;
     ok = transport.sendCan(frame::canId(node, frame::kSetControllerModeCmdId),
-                           frame::packSetControllerMode(frame::kControlModeTorque,
-                                                        frame::kInputModePassthrough)) && ok;
+                           frame::packSetControllerMode(
+                               positionMode() ? frame::kControlModePosition : frame::kControlModeTorque,
+                               frame::kInputModePassthrough)) && ok;
   }
   // The first set-point equals the measured pose, so closing the loop does
   // not snap the leg anywhere; the ramp then walks it to 0.
@@ -83,6 +84,16 @@ bool LegLock::sendTargets(std::uint64_t now_us,
   last_send_us_ = now_us;
   bool ok = true;
   const auto legs = board::MotorIds{}.leg_can;
+  if (positionMode()) {
+    for (std::size_t i = 0; i < kLegs; ++i) {
+      // vel_ff in milli-turns/s (int16): the controller's rate reference (roll / stand-up), 0 otherwise.
+      const float vff = std::clamp(velFfTurns(i) * 1000.0F, -32767.0F, 32767.0F);
+      ok = transport.sendCan(frame::canId(legs[i].node_id, frame::kSetInputPosCmdId),
+                             frame::packSetInputPos(targetTurns(i, now_us),
+                                                    static_cast<std::int16_t>(std::lround(vff)), 0)) && ok;
+    }
+    return ok;
+  }
   std::array<float, kLegs> gravity_torque_nm{};
   for (std::size_t side = 0; side < 2U; ++side) {
     const std::size_t hip = side == 0U ? 0U : 2U;
@@ -104,10 +115,11 @@ bool LegLock::sendTargets(std::uint64_t now_us,
     // Torque mode uses output-joint Nm. A stale Iq sample suppresses the command.
     const float target_rad = turns * kTwoPi / config_.gear_ratio;
     const float target_rate = velFfTurns(i) * kTwoPi / config_.gear_ratio;
-    const float requested_nm = gravity_torque_nm[i] + config_.joint_kp_nm_per_rad *
+    const float kp = config_.joint_kp_nm_per_rad * kp_scale_[i % 2U];
+    const float kd = config_.joint_kd_nm_s_per_rad * kd_scale_[i % 2U];
+    const float requested_nm = gravity_torque_nm[i] + kp *
             (target_rad - feedback_position_rad_[i]) +
-        config_.joint_kd_nm_s_per_rad *
-            (target_rate - feedback_velocity_rad_s_[i]);
+        kd * (target_rate - feedback_velocity_rad_s_[i]);
     const auto current = currentTorqueCommand(requested_nm, feedback_current_a_[i],
         feedback_valid_[i], config_.kt_nm_per_a, config_.current_limit_a,
         config_.current_comp_gain);
