@@ -48,9 +48,9 @@ class TxSink {
  public:
   virtual ~TxSink() = default;
   virtual bool send(std::uint16_t id, const frame::MitBytes& data) = 0;
-  // Both wheels share one half-duplex UART bus (motor id picks the wheel,
-  // per MotorFrameCodec's Dynamixel-like framing); `bus` is unused but kept
-  // so a future multi-bus layout doesn't need to touch this interface.
+  // bus 0 = UART1 (right wheel, id 1), bus 1 = UART2 (left wheel, id 2) -
+  // two separate half-duplex single-wire buses, one motor each (see
+  // main.cpp's HalfDuplexBus).
   virtual bool sendUart(std::uint8_t bus, const frame::DxlFrame& frame) = 0;
 };
 
@@ -81,6 +81,15 @@ struct Config {
   std::uint64_t wheel_brake_us = 300'000U;     // Speed 0 before coasting.
   std::uint64_t wheel_disable_resend_us = 50'000U;
   std::uint64_t wheel_feedback_timeout_us = 150'000U;
+  // 2026-10-13: reg 0x11 (Velocity Mode, used by WHOLD to switch to
+  // Position mode) persists to FLASH on this driver, unlike Torque
+  // Enable/Moving Speed (RAM-only) - measured needing much more than
+  // wheel_settle_us to actually take effect on one specific motor unit
+  // (left wheel): it kept obeying its last Moving Speed command the whole
+  // time WHOLD showed it "holding" (state 3), because the mode switch
+  // hadn't really landed yet when we started sending Goal Position writes
+  // that a motor still in Speed mode just ignores.
+  std::uint64_t mode_switch_settle_us = 150'000U;
 };
 
 struct Settings {
@@ -118,12 +127,20 @@ struct Joint {
 inline constexpr std::size_t kWheelCount = 2U;
 
 // Bench-rig-only wiring: both wheels (Kpower BL4012, same Dynamixel-like
-// protocol) share one half-duplex UART bus (GPIO17, main.cpp), told apart
-// by motor id, set via Type-C config tool: right=1, left=2. This is NOT
-// how MotorMapping.hpp's kWheelUartBindings is defined - that file still
-// assumes the production src_fw wiring (2 separate full-duplex buses, each
-// with its own motor at id=1) and must stay that way for that code.
+// protocol). 2026-10-13: reverted from a single shared half-duplex bus
+// (both wheels in parallel on one GPIO, fragile under load - both wheels
+// losing feedback together during a stall, not recoverable without
+// widening margins indefinitely) to 2 SEPARATE half-duplex single-wire
+// buses, one motor each (main.cpp's HalfDuplexBus) - this PCB's "UART1"/
+// "UART2" connectors each carry one combined TX/RX wire per wheel, not
+// true 2-pin full-duplex (a same-day first attempt assumed full-duplex;
+// scanning IDs on one wheel's "RX" pin got an identical reply for every
+// ID 1-16, i.e. its own TX echo, not a real motor). This matches
+// MotorMapping.hpp's kWheelUartBindings topology (2 buses) again, just
+// with real (non-default) motor ids this time: UART1 (bus 0) = right
+// wheel, id 1; UART2 (bus 1) = left wheel, id 2.
 // Index order matches Wheel::name below: [0]=LW, [1]=RW.
+inline constexpr std::array<std::uint8_t, kWheelCount> kBenchWheelBus{{1U, 0U}};
 inline constexpr std::array<std::uint8_t, kWheelCount> kBenchWheelId{{2U, 1U}};
 // Confirmed on the assembled robot 2026-10-12: a "drive forward" command
 // spun the right wheel (id=1) correctly but the left wheel (id=2)
@@ -144,13 +161,15 @@ struct Wheel {
   bool disable_sent = false;
   // Latched after lost feedback; re-armed by releasing (WHEEL 0) or CLEAR.
   bool fault = false;
-  // WHOLD 1: switches the driver to Position mode (reg 0x11=2) and locks
-  // Goal Position at wherever the wheel was when the hold engaged -
-  // 2026-10-12, user report: Speed=0 "active brake" (the previous
-  // implementation) gave almost no resistance to hand-turning, because it
-  // only engages the driver's velocity loop, which is soft at zero; the
-  // position loop is much stiffer. A nonzero WHEEL command, DISABLE, ESTOP
-  // or CLEAR releases it and switches back to Speed mode (reg 0x11=1) -
+  // WHOLD <left> <right>, per wheel (2026-10-13 - each motor has its own
+  // UART bus now, so they hold independently): 1 switches the driver to
+  // Position mode (reg 0x11=2) and locks Goal Position at wherever the
+  // wheel was when the hold engaged - 2026-10-12, user report: Speed=0
+  // "active brake" (the previous implementation) gave almost no
+  // resistance to hand-turning, because it only engages the driver's
+  // velocity loop, which is soft at zero; the position loop is much
+  // stiffer. A nonzero WHEEL command for that wheel, DISABLE, ESTOP or
+  // CLEAR releases it and switches back to Speed mode (reg 0x11=1) -
   // required before normal Moving Speed driving works again.
   bool hold = false;
   // Position-mode hold sub-state (see tickWheels). position_mode mirrors
@@ -160,6 +179,15 @@ struct Wheel {
   bool position_mode = false;
   std::uint64_t mode_switch_us = 0U;
   std::uint16_t hold_goal_raw = 0U;
+  // 2026-10-13 incident: reg 0x11 persists to flash ON THE MOTOR, so a
+  // hold left engaged across an ESP32 reset/reflash (or a power loss
+  // mid-hold) leaves the motor in Position mode while this struct's
+  // position_mode defaults back to false - RAM and the real driver
+  // disagree, and Moving Speed writes to a motor actually in Position
+  // mode made it stop answering entirely (one wheel silently "lost").
+  // Force a real mode write once at boot, regardless of what this
+  // struct assumes, so the two can never start out of sync.
+  bool boot_synced = false;
   // Latest Present Data, core frame (speed) / raw single-turn position.
   std::uint16_t pos_raw = 0U;
   std::int16_t speed_raw = 0;
@@ -241,21 +269,20 @@ class LegJog {
       joints_[i].name = jointName(binding.joint_index);
     }
     for (std::size_t i = 0U; i < kWheelCount; ++i) {
-      // MotorMapping.hpp's motor_id/driver_sign assume the production
-      // 2-separate-buses wiring (src_fw) and must stay that way for that
-      // code. This bench rig instead has both wheels in parallel on one
-      // half-duplex bus (GPIO17), told apart by motor id, which needs a
-      // DIFFERENT id/sign pair - see kBenchWheelId/kBenchWheelSign below.
-      wheels_[i].bus = 0U;  // shared half-duplex bus.
+      // MotorMapping.hpp's motor_id defaults to 1 for both (point-to-point,
+      // id doesn't need to be unique there); this bench rig has real,
+      // distinct ids set on the motors, so override bus/id/sign here - see
+      // kBenchWheelBus/kBenchWheelId/kBenchWheelSign above.
+      wheels_[i].bus = kBenchWheelBus[i];
       wheels_[i].id = kBenchWheelId[i];
       wheels_[i].sign = kBenchWheelSign[i];
       wheels_[i].name = i == 0U ? "LW" : "RW";
     }
   }
 
-  // One checksum-valid wheel response (DxlStreamParser output). `bus` is
-  // unused: both wheels share one physical bus, so the response is matched
-  // to a wheel by its motor id instead.
+  // One checksum-valid wheel response (DxlStreamParser output). Matched to
+  // a wheel by its motor id rather than by `bus` directly, since ids are
+  // unique anyway and this works regardless of topology.
   void onUart(std::uint8_t bus, const frame::DxlFrame& input,
               std::uint64_t now_us) noexcept {
     (void)bus;
@@ -382,20 +409,22 @@ class LegJog {
       return;
     }
     if (std::strcmp(word, "WHOLD") == 0) {
-      float v[1]{};
-      if (!parseFloats(cursor, v, 1U)) {
-        say("EV ERR WHOLD <0|1> (1 = active-brake both wheels at max hold)");
+      // Per-wheel (2026-10-13): each motor has its own UART bus now, so
+      // one wheel can hold while the other drives/coasts independently.
+      float v[kWheelCount]{};
+      if (!parseFloats(cursor, v, kWheelCount)) {
+        say("EV ERR WHOLD <left 0|1> <right 0|1> (1 = active-brake that wheel at max hold)");
         return;
       }
       touchHost(now_us);
       last_wheel_cmd_us_ = now_us;  // arm the lease even without a WHEEL heartbeat
-      const bool on = v[0] != 0.0F;
-      for (auto& wheel : wheels_) {
-        wheel.hold = on;
-        if (on) wheel.fault = false;
+      for (std::size_t i = 0U; i < kWheelCount; ++i) {
+        const bool on = v[i] != 0.0F;
+        wheels_[i].hold = on;
+        if (on) wheels_[i].fault = false;
       }
-      say(on ? "EV OK WHOLD 1: both wheels holding (torque on, speed 0)"
-             : "EV OK WHOLD 0: hold released");
+      say("EV OK WHOLD %d %d", static_cast<int>(wheels_[0].hold),
+          static_cast<int>(wheels_[1].hold));
       return;
     }
     if (std::strcmp(word, "ENABLE") == 0) {
@@ -814,6 +843,18 @@ class LegJog {
         now_us - last_host_us_ <= config_.host_timeout_us &&
         now_us - last_wheel_cmd_us_ <= config_.wheel_lease_us;
     for (auto& wheel : wheels_) {
+      if (!wheel.boot_synced) {
+        // Force Speed mode once, regardless of what this struct assumes -
+        // see boot_synced's comment. Takes priority over everything else
+        // this wheel might otherwise do this tick.
+        (void)tx_.sendUart(wheel.bus,
+            frame::buildVelocityMode(wheel.id, frame::kDxlVelModeSpeed));
+        wheel.boot_synced = true;
+        wheel.position_mode = false;
+        wheel.mode_switch_us = now_us;
+        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        continue;
+      }
       if (wheel.torque_on && (!wheel.fb_valid ||
           now_us - wheel.fb_us > config_.wheel_feedback_timeout_us) &&
           now_us - wheel.torque_on_us > config_.wheel_feedback_timeout_us) {
@@ -826,11 +867,13 @@ class LegJog {
                       wheel.name);
         pushEvent(text);
       }
-      // A mode switch (reg 0x11, see below) may be a flash write on this
-      // driver - let it settle before sending anything else, in either
-      // direction, before checking what else this wheel needs this tick.
+      // A mode switch (reg 0x11, see below) is a flash write on this
+      // driver - let it settle (mode_switch_settle_us; measured needing
+      // much more than wheel_settle_us on at least one motor unit) before
+      // sending anything else, in either direction, before checking what
+      // else this wheel needs this tick.
       if (wheel.mode_switch_us != 0U &&
-          now_us - wheel.mode_switch_us < config_.wheel_settle_us) {
+          now_us - wheel.mode_switch_us < config_.mode_switch_settle_us) {
         (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
         continue;
       }
@@ -855,6 +898,12 @@ class LegJog {
         // is soft at zero on this driver). Never falls through to the
         // brake-timeout/coast path below.
         if (!wheel.position_mode) {
+          // Safety net: if the mode switch below hasn't actually taken
+          // effect by the time we start treating this wheel as held (see
+          // mode_switch_settle_us), the motor is still in Speed mode and
+          // would otherwise keep obeying whatever Moving Speed it last
+          // got - stop that first, in the mode it's still actually in.
+          sendWheelSpeed(wheel, 0);
           (void)tx_.sendUart(wheel.bus,
               frame::buildVelocityMode(wheel.id, frame::kDxlVelModePosition));
           wheel.position_mode = true;
@@ -885,16 +934,18 @@ class LegJog {
         } else if (now_us - wheel.torque_on_us >= config_.wheel_settle_us) {
           sendWheelSpeed(wheel, target);
         }
-      } else if (wheel.torque_on) {
-        if (now_us - wheel.last_nonzero_us < config_.wheel_brake_us &&
-            now_us - wheel.torque_on_us >= config_.wheel_settle_us) {
-          sendWheelSpeed(wheel, 0);
-        } else {
+      } else {
+        if (wheel.torque_on) {
+          if (now_us - wheel.last_nonzero_us < config_.wheel_brake_us &&
+              now_us - wheel.torque_on_us >= config_.wheel_settle_us) {
+            sendWheelSpeed(wheel, 0);
+          } else {
+            wheelTorqueOff(wheel, now_us);
+          }
+        } else if (!wheel.disable_sent ||
+                   now_us - wheel.last_disable_us >= config_.wheel_disable_resend_us) {
           wheelTorqueOff(wheel, now_us);
         }
-      } else if (!wheel.disable_sent ||
-                 now_us - wheel.last_disable_us >= config_.wheel_disable_resend_us) {
-        wheelTorqueOff(wheel, now_us);
       }
       (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
     }
