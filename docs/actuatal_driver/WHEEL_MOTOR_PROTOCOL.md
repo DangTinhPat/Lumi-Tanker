@@ -4,10 +4,25 @@
 bằng 2 động cơ Kpower BL4012 (gọi tắt "EC4012"/"R1-POC" trong các công cụ
 bench ở `TEST1/`). Cùng kiểu khung gói giống Dynamixel v1.0 và CÙNG bảng
 thanh ghi (0x18/0x20/0x24) nên toàn bộ mục 3–5 dưới đây không đổi — đã test
-lại thực tế trên 2 động cơ mới và vẫn đúng. Thứ thay đổi là: tên/datasheet
-động cơ (mục 1), và **topology bus** (mục 2): 2 động cơ giờ đấu SONG SONG
-trên CHUNG một bus UART bán song công (half-duplex), phân biệt bằng motor
-id, thay vì mỗi động cơ một bus UART song công riêng như trước.
+lại thực tế trên 2 động cơ mới và vẫn đúng. Thứ đổi là tên/datasheet động
+cơ (mục 1).
+
+Topology bus (mục 2) đã đi qua 3 giai đoạn, cùng trong ngày 2026-10-12/13:
+1. Đấu SONG SONG trên CHUNG một bus UART bán song công (half-duplex, 1 dây,
+   phân biệt bằng motor id) — bỏ vì không chịu được tải thật (cả 2 bánh
+   cùng mất feedback khi 1 bánh bị chặn/tải nặng, không sửa được bằng cách
+   nới thời gian chờ phản hồi).
+2. Quay lại **2 bus UART song công riêng** (2 dây TX/RX độc lập mỗi bus,
+   như bản BL4820M12 cũ) — bỏ vì đo thực tế trên PCB này, cả 2 đầu nối
+   U1/U2 thực ra chỉ có **1 dây DATA chung cho TX/RX** (bán song công ở
+   cấp phần cứng), nên code coi là song công bị tự nghe lại chính tiếng
+   mình gửi (echo) trên chân RX — quét ID 1-16 trên UART2 ra "phản hồi"
+   giống hệt nhau ở mọi ID, dấu hiệu rõ của echo chứ không phải motor thật.
+3. **2 bus UART bán song công RIÊNG BIỆT** (hiện tại): mỗi bus vẫn chỉ 1
+   dây DATA (TX/RX gộp, kỹ thuật nhả-bus/echo-filter như
+   TEST1/esp32s3_r1poc_bridge), nhưng là 2 instance độc lập (không chia sẻ
+   bus như giai đoạn 1) — UART1 = GPIO17 = bánh phải id 1, UART2 = GPIO15
+   = bánh trái id 2. ID vẫn giữ nguyên từ đợt test bus-chung ở giai đoạn 1.
 
 Nguồn số liệu mục 1: datasheet chính hãng `Kpower-4012-outer rotror
 brushless.pdf` (Kpower Technology, sales@kpower.com) — 性能参数/Performance
@@ -40,8 +55,8 @@ Present Position vẫn 0~1023/360° (mục 4), không đổi theo bit encoder v�
 | | |
 |---|---|
 | Baud | 1,000,000 bps, 8N1, không parity |
-| Topology | **Chung 1 bus half-duplex** (ESP32 GPIO17 trên `leg_jog_fw`), 2 động cơ đấu song song, TX/RX chung 1 dây — không còn 1 bus/1 động cơ như bản BL4820M12 cũ |
-| Motor ID | Đã set qua Type-C: bánh phải = `0x01`, bánh trái = `0x02` (bắt buộc khác ID vì chung bus, không còn mặc định `0x01` cho cả hai) |
+| Topology | **2 bus UART bán song công (half-duplex, 1 dây DATA) RIÊNG BIỆT**: UART1 (ESP32 GPIO17) = bánh phải, UART2 (GPIO15) = bánh trái. Mỗi bus 1 động cơ, không chia sẻ dây, nhưng mỗi bus TX/RX chung 1 chân |
+| Motor ID | Đã set qua Type-C: bánh phải = `0x01`, bánh trái = `0x02` — không bắt buộc khác ID vì mỗi bus chỉ 1 motor, nhưng giữ nguyên ID từ đợt test bus-chung trước đó |
 | Mode | Wheel Mode (CW Limit = CCW Limit = 0), đã set sẵn trong EEPROM |
 
 ## 3. Khung gói
@@ -164,8 +179,11 @@ triển khai protocol từ đầu.
 **Bản ghi cũ (BL4820M12, 2026-09-25, không còn đúng):** cả hai bánh dùng
 `driver_sign=+1`, mỗi bánh một bus UART riêng.
 
-**Bản ghi mới (Kpower BL4012, 2026-10-12):** sau khi đổi sang bus chung +
-motor id, lệnh "tiến" ban đầu làm bánh phải (id=1) quay đúng nhưng bánh
-trái (id=2) quay ngược. `MotorMapping.hpp` hiện tại: bánh trái (id=2)
-`driver_sign=+1`, bánh phải (id=1) `driver_sign=-1`. Phép kiểm tra này xác
-nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.
+**Bản ghi mới (Kpower BL4012, 2026-10-12, trên bus chung lúc đó):** lệnh
+"tiến" ban đầu làm bánh phải (id=1) quay đúng nhưng bánh trái (id=2) quay
+ngược. `tools/leg_jog_fw/src/LegJog.hpp`'s `kBenchWheelSign` (bench-only,
+KHÔNG phải `MotorMapping.hpp` - file đó vẫn giữ giả định production cũ):
+bánh trái (id=2) `sign=+1`, bánh phải (id=1) `sign=-1`. Giá trị này là
+thuộc tính của từng con motor/id, không phụ thuộc topology bus, nên vẫn
+giữ nguyên sau khi quay lại 2 bus riêng (2026-10-13). Phép kiểm tra này
+xác nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.
