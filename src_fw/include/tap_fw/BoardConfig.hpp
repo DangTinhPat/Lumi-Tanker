@@ -25,10 +25,13 @@ inline constexpr int kI2cSdaGpio = 8;
 inline constexpr int kI2cSclGpio = 9;
 inline constexpr int kCanTxGpio = 4;
 inline constexpr int kCanRxGpio = 5;
-inline constexpr int kUart1TxGpio = 17;
-inline constexpr int kUart1RxGpio = 18;
-inline constexpr int kUart2TxGpio = 15;
-inline constexpr int kUart2RxGpio = 16;
+// Each wheel has its own half-duplex single-wire bus (TX and RX on one pad).
+inline constexpr int kWheelLeftGpio = 15;    // "UART2" connector, UART_NUM_2, motor id 2
+inline constexpr int kWheelRightGpio = 17;   // "UART1" connector, UART_NUM_1, motor id 1
+// These PCB RX pads are tied to the corresponding DATA nets. The working
+// EC4012 bridge leaves them input-floating and receives on GPIO15/17 instead.
+inline constexpr int kWheelLeftUnusedRxGpio = 16;
+inline constexpr int kWheelRightUnusedRxGpio = 18;
 inline constexpr int kImuCsGpio = 10;
 inline constexpr int kImuMosiGpio = 11;
 inline constexpr int kImuSclkGpio = 12;

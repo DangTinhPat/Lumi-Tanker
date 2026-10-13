@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <limits>
 #include <vector>
 
 #include "robot_control/GeneratedGeometry.hpp"
@@ -239,7 +240,53 @@ int main() {
     }
     std::printf("LegLock position mode: Set_Input_Pos, ramp to 0, offsets\n");
   }
-  // Current/torque mode is the only leg mode; targets still ramp from the
+  // Stand-up in POS: measured nonzero power-up offsets must not be added
+  // twice or walked back to home during the first second. No Iq/Kt needed.
+  {
+    FakeTransport bus;
+    LegLock::Config cfg;
+    cfg.mode = LegLock::Mode::Position;
+    cfg.kt_nm_per_a = std::numeric_limits<float>::quiet_NaN();
+    LegLock lock(cfg);
+    constexpr float hip_core = 0.08F, knee_core = 0.025F;
+    lock.setOffsets(hip_core, knee_core);
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    std::array<float, 4> measured{};
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = i % 2U != 0U;
+      measured[i] = (knee ? knee_core : hip_core) * legs[i].driver_sign * 8.0F / 6.28318530718F;
+    }
+    // Control case: the old homing ramp adds start + offsets at t=0.
+    FakeTransport old_bus;
+    LegLock old_ramp(cfg);
+    old_ramp.setOffsets(hip_core, knee_core);
+    assert(old_ramp.engage(measured, 1'000'000U, old_bus));
+    assert(!near(unpackSetInputPosTurns(old_bus.can[8].data), measured[0]));
+    auto asymmetric_start = measured;
+    asymmetric_start[0] += 0.01F;
+    assert(lock.engage(asymmetric_start, 1'000'000U, bus, false));
+    for (std::size_t i = 0; i < 4U; ++i) {
+      assert(cmdOf(bus.can[8U+i]) == kSetInputPosCmdId);
+      assert(near(unpackSetInputPosTurns(bus.can[8U+i].data), asymmetric_start[i]));
+    }
+    assert(lock.atZero(1'000'000U));
+    bus.can.clear();
+    assert(lock.update(1'500'000U, bus));
+    for (std::size_t i = 0; i < 4U; ++i)
+      assert(near(unpackSetInputPosTurns(bus.can[i].data), measured[i]));
+    lock.setOffsets(hip_core + 0.02F, knee_core);
+    bus.can.clear();
+    assert(lock.update(1'504'000U, bus));
+    assert(near(unpackSetInputPosTurns(bus.can[0].data),
+                (hip_core + 0.02F) * legs[0].driver_sign * 8.0F / 6.28318530718F));
+    for (const auto& frame : bus.can) assert(cmdOf(frame) != kSetInputTorqueCmdId);
+    assert(lock.release(bus));
+    for (std::size_t i = bus.can.size()-4U; i < bus.can.size(); ++i)
+      assert(unpackSetAxisState(bus.can[i].data) == kAxisStateIdle);
+    std::puts("POS stand-up: no homing ramp, no Iq/Kt, IDLE release");
+  }
+  // Torque mode remains available to the reusable core tests; the fw POS app blocks it.
+  // Current/torque mode: targets still ramp from the
   // measured pose to exactly 0 before the controller moves the legs.
   {
     FakeTransport bus;

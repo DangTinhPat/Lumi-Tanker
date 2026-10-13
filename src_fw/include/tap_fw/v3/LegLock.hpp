@@ -45,9 +45,11 @@ class LegLock {
   LegLock() noexcept = default;
   explicit LegLock(Config config) noexcept : config_(config) {}
 
-  // Starts the lock from the measured rotor positions (driver turns).
+  // Starts the lock from measured rotor positions (driver turns).
+  // Stand-up uses ramp_to_zero=false: caller supplies the measured pose as
+  // offsets, then owns the trajectory; no homing ramp is superimposed.
   bool engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
-              motor_transport::Transport& transport) noexcept;
+              motor_transport::Transport& transport, bool ramp_to_zero = true) noexcept;
   // Sends the (ramped) hold target at the resend period. Call every tick.
   bool update(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
   // All legs to IDLE.
@@ -130,6 +132,7 @@ class LegLock {
 
   Config config_{};
   bool engaged_ = false;
+  bool ramp_to_zero_ = true;
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;
   std::uint64_t next_send_us_ = 0U;

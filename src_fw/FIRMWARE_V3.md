@@ -1,8 +1,15 @@
-# Firmware v3.3beta — POS baseline, con lắc ngược hai bánh với điều khiển phân tầng
+# Firmware v3.5 điều khiển POS — nhánh fw, skill đứng dậy
 
-`v3.3beta` giữ đường điều khiển vị trí POS của V3.3 và dùng hình học GIM6010-8
-từ `ROBOT (GIM6010-8).STEP`. Khối lượng, COM và mô-men quán tính là ước lượng
-theo mô hình khối lượng đã gán; xem `docs/GIM_SIM_PHYSICS_SPEC.md`.
+Bản tạm trước khi hiệu chuẩn tải/Kt: bốn khớp chân dùng position mode của
+GDS68 (`Set_Input_Pos`); bánh dùng tốc độ qua UART half-duplex mới.
+Không bù chênh lệch dòng và không cần phản hồi `Get_Iq` để chạy.
+Skill nhảy / nhảy tiến không khả dụng; `JUMP`, `SET jump` và chuyển
+`SET legmode 1` đều bị từ chối. Controller dùng nền v3.5.1 đã có trên `fw`.
+
+Đứng dậy từ tư thế HOME nằm, bàn giao sang cân bằng rồi giữ chiều cao thân
+130 mm theo thước body/root của SIM (khác khoảng cách hông–trục bánh).
+Chi tiết mốc encoder, lệnh và bằng chứng:
+[`V3.5_POS_STANDUP.md`](../docs/V3.5_POS_STANDUP.md).
 
 Mô hình khớp gối lấy 22° làm mốc 0 và giới hạn trên 135° (1.9722 rad); đùi dùng
 trục CAD GIM. Gốc encoder của driver so với mốc CAD này chưa được xác nhận trên
@@ -18,11 +25,10 @@ bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`)
 
 ## Tổng quan
 
-- **Cả bốn khớp chân chạy torque mode của GDS68** (`Set_Controller_Mode(torque, passthrough)` +
-  `Set_Input_Torque`, 250–333 Hz). V3 tạo mô-men trở kháng từ sai lệch góc/tốc độ, đổi sang dòng mục tiêu bằng
-  `Kt=0.47 N·m/A`, rồi bù theo `Iq_target - Iq_measured` từ `Get_Iq` (`0x014`). Phản hồi Iq quá 20 ms sẽ chặn điều khiển.
-  Mỗi lần engage gửi giới hạn `8 A` và `20 rev/s` trước khi vào closed loop. Driver phải được cấu hình phát `Get_Iq`
-  định kỳ (`iq_rate_ms` khác 0; khuyến nghị 10 ms) và lưu cấu hình; mặc định xuất xưởng là tắt.
+- **Cả bốn khớp chân chạy position mode GDS68** (`Set_Controller_Mode(position, passthrough)` +
+  `Set_Input_Pos`, khoảng 333 Hz). Vòng vị trí nằm trong driver; torque feed-forward bằng 0.
+  Không tính mô-men từ Kt/Iq và không yêu cầu Get_Iq. Giữ giới hạn dòng driver hiện có,
+  không suy ra khả năng chịu tải từ giới hạn này.
 - Người vận hành xếp chân (duỗi tự nhiên theo trọng lực) **trước khi cấp nguồn motor**; encoder mỗi GDS68 bằng 0 tại lúc cấp
   nguồn nên tư thế đó là mốc 0. Chiều cao, tầng 2 và roll cộng offset lên mốc này (`LegLock::setOffsets/setSideOffsets`).
 - Tầng 1 (bánh): `LqrBalancer` trên **góc con lắc ảo** θv = pitch + góc đường trục bánh–CoM đo từ hông/gối − góc ở tư thế treo.

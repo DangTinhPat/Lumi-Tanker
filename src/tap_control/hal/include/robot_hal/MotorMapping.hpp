@@ -19,8 +19,8 @@ struct LegCanBinding {
 struct WheelUartBinding {
   std::size_t joint_index = 0;
   std::uint8_t motor_id = 1;
-  // Driver coordinate = core coordinate * driver_sign. The wheel motor
-  // directions have not yet been checked on the assembled robot.
+  // Driver coordinate = core coordinate * driver_sign. Verified wheel
+  // directions and physical bus bindings are recorded below.
   float driver_sign = 1.0F;
 };
 
@@ -43,19 +43,13 @@ inline constexpr std::array<LegCanBinding, 4> kVerifiedLegCanBindings{{
 }};
 
 inline constexpr std::array<WheelUartBinding, 2> kWheelUartBindings{{
-    // Corrected on the robot 2026-09-26: a positive core wheel command drove
-    // both wheels backward (first balance run ran away at full speed), so a
-    // forward core velocity is a negative driver Moving Speed on both sides.
-    // Left/right in the IMU frame (+X forward, +Z up). Checked 2026-09-26: a
-    // swapped assignment spun the robot counter-clockwise with the gyro
-    // reading +yaw while the joint-2 wheel ran ~5x the joint-5 wheel.
-    // 2026-09-27 TILTTEST (operator, by eye): with {-1, -1} the two wheels
-    // turned opposite ways; with {+1, -1} both turned together but against
-    // the pitch (nose-down rolled toward the tail). So the right wheel was
-    // the reversed one: {-1, +1}. Encoders cannot show this because the same
-    // sign is applied to command and feedback.
-    {2U, 1U, -1.0F},  // UART1: left wheel (joint LW).
-    {5U, 1U, 1.0F},   // UART2: right wheel (joint RW).
+    // Kpower BL4012, one half-duplex single-wire bus per wheel (verified on the
+    // robot 2026-10-12/13): the left wheel is ID 2 on the "UART2" connector
+    // (GPIO15) and follows the core direction; the right wheel is ID 1 on the
+    // "UART1" connector (GPIO17) and is reversed. Index = bus handed to the
+    // transport: 0 = left, 1 = right.
+    {2U, 2U, 1.0F},   // left wheel (joint LW), id 2.
+    {5U, 1U, -1.0F},  // right wheel (joint RW), id 1.
 }};
 inline constexpr bool kWheelDirectionsVerified = true;
 // Present Speed readback scale. 2026-09-26 a balance trace suggested the

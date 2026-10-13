@@ -80,8 +80,11 @@ class AppV3 {
   Mpu6500Spi mpu_{};
   robot_control::ImuStateEstimator estimator_{};
   Esp32TwaiPort can_{};
-  Esp32UartPort uart1_{Serial1, tap_fw::board::kUart1TxGpio, tap_fw::board::kUart1RxGpio};
-  Esp32UartPort uart2_{Serial2, tap_fw::board::kUart2TxGpio, tap_fw::board::kUart2RxGpio};
+  // Transport bus 0 = left wheel (id 2), bus 1 = right wheel (id 1); see MotorMapping.hpp.
+  Esp32UartPort uart1_{2, tap_fw::board::kWheelLeftGpio,
+                       tap_fw::board::kWheelLeftUnusedRxGpio, 2U, "left"};
+  Esp32UartPort uart2_{1, tap_fw::board::kWheelRightGpio,
+                       tap_fw::board::kWheelRightUnusedRxGpio, 1U, "right"};
   tap_fw::CallbackBusTransport transport_;
   tap_fw::MotorFeedback feedback_{};
   tap_fw::v3::LegLock legs_{};
@@ -125,7 +128,6 @@ class AppV3 {
   bool start_pending_ = false;
   bool disable_pending_ = false;
   bool go_pending_ = false;
-  bool jump_pending_ = false;  // v3.5 jump request (SET jump 1 first)
   bool standup_pending_ = false;  // STANDUP request (SET standup 1, SET lying 1, legmode pos)
   // Lying start (SET lying 1): the motor supply was switched on with the robot in the `home` lying pose,
   // so the driver zero is that pose. The controller works in the CAD frame (hip 1.3055 rad, knee 0 there):
@@ -136,7 +138,6 @@ class AppV3 {
   [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : 0.0F; }
   [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : 0.0F; }
   [[nodiscard]] bool legIqNeeded() const noexcept { return !legs_.positionMode(); }
-  float jump_forward_m_ = 0.0F;   // JUMP <m>: hop distance of the next jump (NaN = default hop)
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;
