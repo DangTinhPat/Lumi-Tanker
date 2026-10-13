@@ -182,8 +182,16 @@ triển khai protocol từ đầu.
 **Bản ghi mới (Kpower BL4012, 2026-10-12, trên bus chung lúc đó):** lệnh
 "tiến" ban đầu làm bánh phải (id=1) quay đúng nhưng bánh trái (id=2) quay
 ngược. `tools/leg_jog_fw/src/LegJog.hpp`'s `kBenchWheelSign` (bench-only,
-KHÔNG phải `MotorMapping.hpp` - file đó vẫn giữ giả định production cũ):
+`MotorMapping.hpp` của app V3 đã đồng bộ mapping này ngày 2026-10-13):
 bánh trái (id=2) `sign=+1`, bánh phải (id=1) `sign=-1`. Giá trị này là
 thuộc tính của từng con motor/id, không phụ thuộc topology bus, nên vẫn
 giữ nguyên sau khi quay lại 2 bus riêng (2026-10-13). Phép kiểm tra này
 xác nhận chiều, không xác nhận hệ số quy đổi raw speed sang RPM ở mục 8.
+
+### Baseline app V3 ngày 2026-10-13
+
+App V3 v3.3beta và v3.5/v3.5.1 nhận RX trên chính DATA GPIO15/17;
+GPIO16/18 để input floating. Nhả TX theo hardware idle trong critical
+section bounded, không chờ task TX-done thức dậy. Xem
+[baseline UART](../WHEEL_UART_BASELINE_20261013.md) để phân biệt robot-log
+beta với build/test host v3.5; luồng bench có implementation riêng.

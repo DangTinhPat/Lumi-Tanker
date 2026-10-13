@@ -16,6 +16,14 @@ Build/nạp: `pio run -e esp32-s3-v3 [-t upload --upload-port /dev/ttyUSBx]`. Đ
 (tự kết nối, log ở `~/tap_logs/`; mở cổng serial reset ESP32 và mất mọi `SET` chạy). Không dùng BLE khi điều khiển
 bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`) đã gỡ ngày 08/10/2026 (mã, test, tài liệu); `esp32-s3-v3` là môi trường mặc định và duy nhất, còn lịch sử trong git.
 
+## Baseline UART bánh mới
+
+Nhánh v3.5 (bao gồm v3.5.1) dùng mặc định hai bus half-duplex một dây:
+trái GPIO15/UART2/ID2/sign +1; phải GPIO17/UART1/ID1/sign -1.
+GPIO16/18 để input floating; TX nhả DATA ngay khi hardware idle.
+Chi tiết cơ chế, log beta và giới hạn xác minh của port v3.5:
+[`WHEEL_UART_BASELINE_20261013.md`](../docs/WHEEL_UART_BASELINE_20261013.md).
+
 ## Tổng quan
 
 - **Cả bốn khớp chân chạy torque mode của GDS68** (`Set_Controller_Mode(torque, passthrough)` +

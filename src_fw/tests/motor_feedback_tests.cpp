@@ -90,14 +90,20 @@ int main() {
   assert(near(feedback.legCurrentA(3U), 0.6F));
   assert(near(feedback.legCurrentA(4U), 0.7F));
 
-  const auto left_first = buildPresentResponse(1U, 1020U, 10, 0);
+  // Physical BL4012 wiring contract: GPIO15/UART2 is left ID2;
+  // GPIO17/UART1 is right ID1. Command and feedback share these signs.
+  static_assert(motor_mapping::kWheelUartBindings[0].motor_id == 2U);
+  static_assert(motor_mapping::kWheelUartBindings[1].motor_id == 1U);
+  static_assert(motor_mapping::kWheelUartBindings[0].driver_sign == 1.0F);
+  static_assert(motor_mapping::kWheelUartBindings[1].driver_sign == -1.0F);
+  const auto left_first = buildPresentResponse(2U, 1020U, 10, 0);
   const auto right_first = buildPresentResponse(1U, 500U, -10, 0);
   assert(feedback.ingestUart(0U, left_first, 1'000U));
   assert(feedback.ingestUart(1U, right_first, 1'000U));
   assert(feedback.ready(21'000U));
   assert(!feedback.ready(21'001U));
 
-  const auto left_next = buildPresentResponse(1U, 4U, 12, 0);
+  const auto left_next = buildPresentResponse(2U, 4U, 12, 0);
   const auto right_next = buildPresentResponse(1U, 490U, -12, 0);
   assert(feedback.ingestUart(0U, left_next, 2'000U));
   assert(feedback.ingestUart(1U, right_next, 2'000U));
@@ -150,7 +156,7 @@ int main() {
   CanFrame wrong_command = lh;
   wrong_command.id = canId(3U, kSetAxisStateCmdId);
   assert(!feedback.ingestCan(wrong_command, 3'000U));
-  auto bad_wheel = buildPresentResponse(2U, 0U, 0, 0);
+  auto bad_wheel = buildPresentResponse(1U, 0U, 0, 0);
   assert(!feedback.ingestUart(0U, bad_wheel, 3'000U));
 
   // Get_Encoder_Estimates (0x009) is kept as the raw driver estimate (v3 leg

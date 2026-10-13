@@ -1578,6 +1578,11 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(line);
+  static char wbus[320];
+  uart1_.format(wbus, sizeof wbus);
+  out_.println(wbus);
+  uart2_.format(wbus, sizeof wbus);
+  out_.println(wbus);
   prof_max_.fill(0U);
   prof_upd_sum_ = 0U;
   prof_upd_n_ = 0U;
