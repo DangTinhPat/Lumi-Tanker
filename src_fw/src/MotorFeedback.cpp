@@ -257,6 +257,24 @@ bool MotorFeedback::ingestUart(std::uint8_t bus,
   velocity_rad_s_[joint] = bindings[bus].driver_sign *
       frame::wheelRawSpeedToRadPerSec(present.speed_raw) *
       mapping::kWheelPresentSpeedScale;
+  if (wheel_position_velocity_) {
+    // Keep the recent unwrapped positions; the speed is the slope to the newest sample that is at
+    // least one window old (nearest to the window, so the delay stays ~window / 2).
+    const std::size_t h = (wheel_hist_head_[bus] + 1U) % kWheelHistory;
+    wheel_hist_head_[bus] = h;
+    wheel_hist_rad_[bus][h] = wheel_unwrapped_rad_[bus];
+    wheel_hist_us_[bus][h] = now_us;
+    if (wheel_hist_count_[bus] < kWheelHistory) ++wheel_hist_count_[bus];
+    for (std::size_t back = 1U; back < wheel_hist_count_[bus]; ++back) {
+      const std::size_t i = (h + kWheelHistory - back) % kWheelHistory;
+      const std::uint64_t dt_us = now_us - wheel_hist_us_[bus][i];
+      if (dt_us >= wheel_velocity_window_us_) {
+        velocity_rad_s_[joint] = (wheel_unwrapped_rad_[bus] - wheel_hist_rad_[bus][i]) /
+            (static_cast<float>(dt_us) * 1.0e-6F);
+        break;
+      }
+    }
+  }
   effort_nm_[joint] = 0.0F;
   stamp_us_[joint] = now_us;
   valid_[joint] = true;

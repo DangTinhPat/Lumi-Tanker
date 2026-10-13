@@ -78,8 +78,11 @@ class AppV3 {
   Mpu6500Spi mpu_{};
   robot_control::ImuStateEstimator estimator_{};
   Esp32TwaiPort can_{};
-  Esp32UartPort uart1_{Serial1, tap_fw::board::kUart1TxGpio, tap_fw::board::kUart1RxGpio};
-  Esp32UartPort uart2_{Serial2, tap_fw::board::kUart2TxGpio, tap_fw::board::kUart2RxGpio};
+  // Transport bus 0 = left wheel (id 2), bus 1 = right wheel (id 1); see MotorMapping.hpp.
+  Esp32UartPort uart1_{2, tap_fw::board::kWheelLeftGpio,
+                       tap_fw::board::kWheelLeftUnusedRxGpio, 2U, "left"};
+  Esp32UartPort uart2_{1, tap_fw::board::kWheelRightGpio,
+                       tap_fw::board::kWheelRightUnusedRxGpio, 1U, "right"};
   tap_fw::CallbackBusTransport transport_;
   tap_fw::MotorFeedback feedback_{};
   tap_fw::v3::LegLock legs_{};

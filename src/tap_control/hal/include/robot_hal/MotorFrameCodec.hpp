@@ -279,6 +279,9 @@ inline MitFeedback unpackMitFeedback(const MitBytes& b) {
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kDxlTorqueEnableAddr = 0x18;
+constexpr std::uint8_t kDxlVelocityModeAddr = 0x11;  // 1=Speed/Wheel mode, 2=Position mode (flash write on the motor).
+constexpr std::uint8_t kDxlVelModeSpeed = 1;
+constexpr std::uint8_t kDxlVelModePosition = 2;
 constexpr std::uint8_t kDxlMovingSpeedAddr = 0x20;
 constexpr std::uint8_t kDxlPresentAddr = 0x24;
 constexpr std::uint8_t kDxlPresentLen = 6;
@@ -361,6 +364,13 @@ inline DxlFrame buildReadPresent(std::uint8_t id) {
   return detail::buildFrame(id, kDxlInsRead, params, 2);
 }
 
+// Writes the Velocity Mode register. It PERSISTS TO FLASH on this motor: callers
+// read it first and write only on a real difference, never per tick.
+inline DxlFrame buildVelocityMode(std::uint8_t id, std::uint8_t mode) {
+  const std::uint8_t params[2] = {kDxlVelocityModeAddr, mode};
+  return detail::buildFrame(id, kDxlInsWrite, params, 2);
+}
+
 struct DxlParsed {
   bool ok = false;
   std::uint8_t id = 0;
@@ -436,7 +446,7 @@ inline DxlParsed parseDxlResponse(const std::uint8_t* bytes, std::size_t n) {
   const std::uint8_t id = bytes[2];
   const std::uint8_t len = bytes[3];
   const std::uint8_t err = bytes[4];
-  if (static_cast<std::size_t>(len) + 4 > n) return out;
+  if (len < 5U || static_cast<std::size_t>(len) + 4U != n) return out;
   const std::uint8_t* params = bytes + 5;
   const std::uint8_t param_n = static_cast<std::uint8_t>(len - 2);  // exclude ins/err slot + chk
   const std::uint8_t chk_index = static_cast<std::uint8_t>(4 + len - 1);

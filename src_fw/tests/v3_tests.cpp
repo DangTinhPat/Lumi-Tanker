@@ -119,8 +119,9 @@ int main() {
     const float shift = geo::parts[0].mass * cfg.tier.body_com_dx_m / geo::total_mass_kg;
     auto line = [&](float hip_offset) {
       const float hip = tap_fw::v3::LegHeight::hangHipCad() + hip_offset;
-      const auto m = robot_control::WholeBodyModel{}.compute(hip, 0.0F, hip, 0.0F);
-      const auto j = robot_control::WholeBodyModel::symmetricComOffsetJacobian(hip, 0.0F);
+      const float knee_cad = tap_fw::v3::LegHeight::cadKnee(0.0F);
+      const auto m = robot_control::WholeBodyModel{}.compute(hip, knee_cad, hip, knee_cad);
+      const auto j = robot_control::WholeBodyModel::symmetricComOffsetJacobian(hip, knee_cad);
       const float x = m.com_offset_x_m + shift, z = m.com_above_axle_m;
       return std::array<float, 2>{std::atan2(x, z),
           (z * j.d_com_offset_x_d_hip - x * j.d_com_above_axle_d_hip) / (x*x + z*z)};

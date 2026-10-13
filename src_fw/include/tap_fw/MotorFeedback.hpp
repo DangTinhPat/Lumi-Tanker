@@ -43,6 +43,19 @@ class MotorFeedback {
   [[nodiscard]] bool allWheelsFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] std::uint64_t sequence() const noexcept { return sequence_; }
 
+  // Wheel speed from the encoder POSITION instead of the driver's speed register.
+  // The Kpower BL4012 reports speed in 7.2 RPM steps (0.75 rad/s, 7x coarser than the wheel
+  // it replaced), which the LQR velocity term and the trim estimator amplify into chatter and a
+  // drifting balance angle. The 10-bit position moves 0.0061 rad per count, so a finite
+  // difference over `window_us` resolves 0.0061 / window (0.15 rad/s at 40 ms) with window / 2 of
+  // delay (the wheel's own lag on the floor is ~70-90 ms). Off by default (host tests, bench);
+  // the firmware turns it on. Until a sample older than the window exists the driver speed is used.
+  void setWheelPositionVelocity(bool enabled, std::uint64_t window_us) noexcept {
+    wheel_position_velocity_ = enabled;
+    wheel_velocity_window_us_ = window_us;
+  }
+  [[nodiscard]] bool wheelPositionVelocity() const noexcept { return wheel_position_velocity_; }
+
   // Leg zero reference. GDS68 positions restart from zero at every driver
   // power-up, so the legs are homed on the support fixture, whose pose is the
   // neutral geometry: core = driver_sign * driver_raw + offset.
@@ -112,6 +125,12 @@ class MotorFeedback {
   std::array<std::uint16_t, 2> wheel_previous_raw_{};
   std::array<float, 2> wheel_unwrapped_rad_{};
   std::array<bool, 2> wheel_position_seeded_{};
+  static constexpr std::size_t kWheelHistory = 32U;
+  std::array<std::array<float, kWheelHistory>, 2> wheel_hist_rad_{};
+  std::array<std::array<std::uint64_t, kWheelHistory>, 2> wheel_hist_us_{};
+  std::array<std::size_t, 2> wheel_hist_head_{}, wheel_hist_count_{};
+  bool wheel_position_velocity_ = false;
+  std::uint64_t wheel_velocity_window_us_ = 40'000U;
   std::uint64_t last_can_probe_us_ = 0U;
   std::uint64_t last_wheel_poll_us_ = 0U;
   std::uint64_t sequence_ = 0U;

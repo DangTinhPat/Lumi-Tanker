@@ -239,7 +239,7 @@ static void analyticHeightContract() {
     const float knee = LegHeight::kKneeMinRad * i/300.0F;
     float old_hip = LegHeight::hangHipCad()-0.52F*knee;
     for (int j = 0; j < 30; ++j) {
-      const auto fk = WholeBodyModel::legHeight(old_hip, knee);
+      const auto fk = WholeBodyModel::legHeight(old_hip, LegHeight::cadKnee(knee));
       if (std::abs(fk.x_m) < 1.0e-7F) break;
       old_hip -= fk.x_m / fk.d_x_d_hip;
     }
@@ -269,7 +269,7 @@ static void axlePlaneContract() {
         const auto q = LegHeight::forAxleOnPlane(x, depth, pitch);
         assert(q.ok);
         const auto fk = WholeBodyModel::legHeight(LegHeight::hangHipCad() + q.hip_offset_rad,
-                                                  q.knee_offset_rad);
+                                                  LegHeight::cadKnee(q.knee_offset_rad));
         const float wx = std::cos(pitch)*fk.x_m + std::sin(pitch)*fk.height_m;
         const float wz = -std::sin(pitch)*fk.x_m + std::cos(pitch)*fk.height_m;
         worst_z = std::max(worst_z, std::abs(wz + depth));
@@ -287,7 +287,8 @@ static void axlePlaneContract() {
   assert(worst_z < 2.0e-6F && worst_x < 2.0e-6F && worst_nominal < 1.0e-5F);
   assert(limited > 0 && coordinated > 20);
   // The old fixed-hip/clamped-knee path loses height at full extension.
-  const auto old = WholeBodyModel::legHeight(LegHeight::hangHipCad() + 0.25F, 0);
+  const auto old = WholeBodyModel::legHeight(LegHeight::hangHipCad() + 0.25F,
+                                             LegHeight::cadKnee(0.0F));
   const float sag = LegHeight::maxHeight() + old.height_m;
   const auto q = LegHeight::forAxleOnPlane(-LegHeight::maxHeight()*std::sin(0.25F),
                                         LegHeight::maxHeight(), 0);
@@ -342,7 +343,8 @@ static void trunkPlaneContract() {
     for (std::size_t side = 0; side < 2; ++side) {
       const float hip = ctrl.hipCommand() + out.leg_roll_hip_rad[side];
       const float knee = ctrl.kneeCommand() + out.leg_roll_knee_rad[side];
-      const auto fk = WholeBodyModel::legHeight(LegHeight::hangHipCad()+hip, knee);
+      const auto fk = WholeBodyModel::legHeight(LegHeight::hangHipCad()+hip,
+                                                LegHeight::cadKnee(knee));
       mean_z += 0.5F * (-std::sin(pitch)*fk.x_m + std::cos(pitch)*fk.height_m);
       in.hip_rate_rad_s[side] = (hip-in.hip_rad[side])/in.dt_s;
       in.knee_rate_rad_s[side] = (knee-in.knee_rad[side])/in.dt_s;
@@ -491,12 +493,13 @@ int main() {
     cmd.go = false;
     assert(out.state == V3Controller::State::Balancing);
     const auto common = WholeBodyModel::legHeight(
-        LegHeight::hangHipCad() + ctrl.hipCommand(), ctrl.kneeCommand());
+        LegHeight::hangHipCad() + ctrl.hipCommand(), LegHeight::cadKnee(ctrl.kneeCommand()));
     asymmetric = asymmetric || std::abs(ctrl.rollSideHeight()) > 0.002F;
     for (std::size_t side = 0; side < 2; ++side) {
       const float hip = ctrl.hipCommand() + out.leg_roll_hip_rad[side];
       const float knee = ctrl.kneeCommand() + out.leg_roll_knee_rad[side];
-      const auto leg = WholeBodyModel::legHeight(LegHeight::hangHipCad() + hip, knee);
+      const auto leg = WholeBodyModel::legHeight(LegHeight::hangHipCad() + hip,
+                                                 LegHeight::cadKnee(knee));
       const float dh = (side == 0 ? 1 : -1) * ctrl.rollSideHeight();
       worst_x = std::max(worst_x, std::abs(leg.x_m - common.x_m));
       worst_h = std::max(worst_h, std::abs(-leg.height_m + common.height_m - dh));
@@ -514,10 +517,11 @@ int main() {
   // Supported-leg velocity with constant body-frame height: hip and knee
   // Jacobian terms cancel. Knee-only velocity falsely sees vertical motion.
   const float hip = LegHeight::hangHipCad() + 0.3F, knee = -0.5F;
-  const auto leg = WholeBodyModel::legHeight(hip, knee);
+  const auto leg = WholeBodyModel::legHeight(hip, LegHeight::cadKnee(knee));
   const float hip_rate = 0.7F;
   const float knee_rate = -leg.d_height_d_hip * hip_rate / leg.d_height_d_knee;
-  const auto v = WholeBodyModel::imuVelocityThroughLeg(0, 0, hip, knee, hip_rate, knee_rate, 0);
+  const auto v = WholeBodyModel::imuVelocityThroughLeg(0, 0, hip,
+      LegHeight::cadKnee(knee), hip_rate, knee_rate, 0);
   const float knee_only = -leg.d_height_d_knee * knee_rate;
   std::printf("constant-height velocity: full %.9f m/s knee-only %.6f m/s\n", v.vertical_m_s, knee_only);
   assert(std::abs(v.vertical_m_s) < 1.0e-6F && std::abs(knee_only) > 0.001F);

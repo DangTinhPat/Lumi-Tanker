@@ -606,8 +606,8 @@ float V3Controller::lqrInertiaLength() noexcept {
     lqr_leff_knee_ = pose_.knee_offset_rad;
     lqr_leff_hip_ = pose_.hip_offset_rad;
     const float hip = LegHeight::hangHipCad() + pose_.hip_offset_rad;
-    const auto b = robot_control::WholeBodyModel{}.compute(hip, pose_.knee_offset_rad, hip,
-                                                           pose_.knee_offset_rad);
+    const float knee_cad = LegHeight::cadKnee(pose_.knee_offset_rad);
+    const auto b = robot_control::WholeBodyModel{}.compute(hip, knee_cad, hip, knee_cad);
     const float l = std::hypot(b.com_offset_x_m, b.com_above_axle_m);
     if (l > 0.01F && b.pitch_inertia_at_axle_kg_m2 > 0.0F) {
       lqr_leff_m_ = b.pitch_inertia_at_axle_kg_m2 /
@@ -1176,7 +1176,8 @@ std::array<float, 2> V3Controller::wbUpdate(const Input& in, const Command& cmd)
   // The axle's speed relative to the hip from the measured joint rates
   // (leg Jacobian) is taken off before comparing.
   {
-    const auto leg = robot_control::WholeBodyModel::legHeight(LegHeight::hangHipCad() + q, k);
+    const auto leg = robot_control::WholeBodyModel::legHeight(
+        LegHeight::hangHipCad() + q, LegHeight::cadKnee(k));
     const float v_leg = leg.d_x_d_hip * qd + leg.d_x_d_knee * kd;
     wb_held_v_ = wb_cmd_f_ - config_.wb_held_leg_sign * v_leg;
   }
@@ -1278,7 +1279,7 @@ bool V3Controller::readyStill(const Input& in, float body_pitch, float body_rate
 V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
   namespace geo = robot_control::geometry;
   const float hip = LegHeight::hangHipCad() + hip_offset;
-  const float knee = knee_offset;
+  const float knee = LegHeight::cadKnee(knee_offset);
   const auto body = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
   const auto jac = robot_control::WholeBodyModel::symmetricComOffsetJacobian(hip, knee);
   const float cx = body.com_offset_x_m +
@@ -1293,7 +1294,8 @@ V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset)
 float V3Controller::legModelError() const noexcept {
   // The sign guard/trace needs only the angle, not a second full Jacobian.
   namespace geo = robot_control::geometry;
-  const float hip = LegHeight::hangHipCad() + hipCommand(), knee = kneeCommand();
+  const float hip = LegHeight::hangHipCad() + hipCommand();
+  const float knee = LegHeight::cadKnee(kneeCommand());
   const auto model = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
   const float x = model.com_offset_x_m + geo::parts[0].mass *
       config_.tier.body_com_dx_m / geo::total_mass_kg;
@@ -1354,7 +1356,7 @@ void V3Controller::updateImuVelocity(const Input& raw, bool free) {
   for (std::size_t side = 0; side < 2U; ++side) {
     const auto s = robot_control::WholeBodyModel::imuVelocityThroughLeg(
         raw.pitch_rad, raw.pitch_rate_rad_s,
-        LegHeight::hangHipCad() + raw.hip_rad[side], raw.knee_rad[side],
+        LegHeight::hangHipCad() + raw.hip_rad[side], LegHeight::cadKnee(raw.knee_rad[side]),
         raw.hip_rate_rad_s[side], raw.knee_rate_rad_s[side], raw.wheel_rad_s[side],
         config_.wheel_radius_m);
     v.horizontal_m_s += 0.5F * s.horizontal_m_s;
@@ -1766,7 +1768,7 @@ void V3Controller::updateRoll(const Input& in, bool active) {
     // Shared hip/knee commands already include trunk, knee hold and
     // suspension. Reserve roll range around THAT pose, not the height plan.
     const auto common = robot_control::WholeBodyModel::legHeight(
-        LegHeight::hangHipCad() + hipCommand(), kneeCommand());
+        LegHeight::hangHipCad() + hipCommand(), LegHeight::cadKnee(kneeCommand()));
     const float h = -common.height_m, x2 = common.x_m * common.x_m;
     const float hi = std::sqrt(std::max(LegHeight::maxHeight() * LegHeight::maxHeight() - x2, 0.0F));
     const float lo = std::sqrt(std::max(LegHeight::minHeight() * LegHeight::minHeight() - x2, 0.0F));
@@ -1801,7 +1803,8 @@ void V3Controller::updateRoll(const Input& in, bool active) {
   // changing its vertical distance. No cached linear Jacobian can become
   // stale when suspension/trunk changes the common pose at a fixed knee plan.
   const float hc = hipCommand(), kc = kneeCommand();
-  const auto common = robot_control::WholeBodyModel::legHeight(LegHeight::hangHipCad() + hc, kc);
+  const auto common = robot_control::WholeBodyModel::legHeight(
+      LegHeight::hangHipCad() + hc, LegHeight::cadKnee(kc));
   std::array<float, 2> knee{}, hip{};
   for (std::size_t side = 0; side < 2U; ++side) {
     const float dh = (side == 0U ? 1.0F : -1.0F) * roll_dh_ * (r.sign < 0.0F ? -1.0F : 1.0F);
@@ -1845,7 +1848,8 @@ void V3Controller::coordinateTrunkAxle(float dt_s) noexcept {
   // Cartesian solve below owns both final joints and the height constraint.
   const float provisional_knee = pose_.knee_offset_rad + kneeHold(dhip_);
   const auto provisional = robot_control::WholeBodyModel::legHeight(
-      LegHeight::hangHipCad() + pose_.hip_offset_rad + dhip_, provisional_knee);
+      LegHeight::hangHipCad() + pose_.hip_offset_rad + dhip_,
+      LegHeight::cadKnee(provisional_knee));
   const float requested_x = std::cos(body_pitch_)*provisional.x_m +
       std::sin(body_pitch_)*provisional.height_m;
   // At the deepest fold, h*cos(pitch) can fall below the supported minimum
@@ -1887,7 +1891,7 @@ float V3Controller::kneeHold(float dhip) noexcept {
   float k = std::clamp(pose_.knee_offset_rad + knee_hold_, LegHeight::kKneeMinRad,
                        LegHeight::kKneeMaxRad);
   for (int i = 0; i < 3; ++i) {
-    const auto leg = robot_control::WholeBodyModel::legHeight(hip, k);
+    const auto leg = robot_control::WholeBodyModel::legHeight(hip, LegHeight::cadKnee(k));
     if (std::abs(leg.d_height_d_knee) < 1.0e-4F) break;
     const float step = (leg.height_m - target) / leg.d_height_d_knee;
     k = std::clamp(k - step, LegHeight::kKneeMinRad, LegHeight::kKneeMaxRad);
@@ -2134,7 +2138,8 @@ void V3Controller::updateSuspension(const Input& in) {
     float vz_legs = 0.0F;
     for (std::size_t side = 0; side < 2U; ++side) {
       const auto v = robot_control::WholeBodyModel::imuVelocityThroughLeg(
-          body_pitch_, body_rate_, LegHeight::hangHipCad() + in.hip_rad[side], in.knee_rad[side],
+          body_pitch_, body_rate_, LegHeight::hangHipCad() + in.hip_rad[side],
+          LegHeight::cadKnee(in.knee_rad[side]),
           in.hip_rate_rad_s[side], in.knee_rate_rad_s[side], in.wheel_rad_s[side],
           config_.wheel_radius_m);
       vz_legs += 0.5F * v.vertical_m_s;
@@ -2263,8 +2268,8 @@ V3Controller::Config defaultV3Config() {
   cfg.fall_pitch_rad = 0.60F;
   // COM height of the legs locked extended (hanging-straight pose).
   robot_control::WholeBodyModel model;
-  const float knee = robot_control::geometry::native_knee_max_rad;
-  const float hip = LegHeight::hangHipCad() + LegHeight::forKnee(knee).hip_offset_rad;
+  const float knee = LegHeight::cadKnee(0.0F);
+  const float hip = LegHeight::hangHipCad();
   cfg.com_height_m = model.compute(hip, knee, hip, knee).com_height_m;
   return cfg;
 }

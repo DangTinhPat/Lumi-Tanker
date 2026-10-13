@@ -71,14 +71,14 @@ int main() {
   assert(feedback.ingestCan(rh, 1'000U));
   assert(feedback.ingestCan(rk, 1'000U));
 
-  const auto left_first = buildPresentResponse(1U, 1020U, 10, 0);
+  const auto left_first = buildPresentResponse(2U, 1020U, 10, 0);
   const auto right_first = buildPresentResponse(1U, 500U, -10, 0);
   assert(feedback.ingestUart(0U, left_first, 1'000U));
   assert(feedback.ingestUart(1U, right_first, 1'000U));
   assert(feedback.ready(21'000U));
   assert(!feedback.ready(21'001U));
 
-  const auto left_next = buildPresentResponse(1U, 4U, 12, 0);
+  const auto left_next = buildPresentResponse(2U, 4U, 12, 0);
   const auto right_next = buildPresentResponse(1U, 490U, -12, 0);
   assert(feedback.ingestUart(0U, left_next, 2'000U));
   assert(feedback.ingestUart(1U, right_next, 2'000U));
@@ -111,6 +111,27 @@ int main() {
   assert(near(state.joints.velocity_rad_s[bus1.joint_index],
               bus1.driver_sign * speed_scale * -12.0F * 6.28318530718F / 60.0F));
 
+  // Position-derived wheel speed (BL4012: the speed register moves in 7.2 RPM steps). A wheel turning
+  // at 10 rad/s, polled every 3 ms with the register stuck at 0, still reads 10 rad/s from the position
+  // once a 40 ms window exists; before that the register is used.
+  {
+    tap_fw::MotorFeedback pv;
+    pv.setWheelPositionVelocity(true, 40'000U);
+    const auto& left = motor_mapping::kWheelUartBindings[0];
+    constexpr float kRad = 6.28318530717958647692F / 1024.0F;
+    float angle = 0.0F;
+    for (int k = 0; k < 40; ++k) {
+      angle += 10.0F * 0.003F / left.driver_sign;
+      const auto counts = static_cast<std::uint16_t>(static_cast<int>(angle / kRad) & 0x3FF);
+      const auto response = buildPresentResponse(left.motor_id, counts, 0, 0);
+      assert(pv.ingestUart(0U, response, 1'000U + 3'000U * static_cast<unsigned>(k)));
+      RobotState st{};
+      pv.writeTo(st);
+      if (k < 5) assert(near(st.joints.velocity_rad_s[left.joint_index], 0.0F));      // register until a window exists
+      if (k >= 20) assert(std::abs(st.joints.velocity_rad_s[left.joint_index] - 10.0F) < 0.5F);
+    }
+  }
+
   // The robot's GDS68 drivers send MIT feedback with DLC 6.
   tap_fw::MotorFeedback short_frames;
   CanFrame dlc6 = legFeedback(3U, 0.25F, 0.0F, 0.0F);
@@ -128,7 +149,7 @@ int main() {
   CanFrame wrong_command = lh;
   wrong_command.id = canId(3U, kSetAxisStateCmdId);
   assert(!feedback.ingestCan(wrong_command, 3'000U));
-  auto bad_wheel = buildPresentResponse(2U, 0U, 0, 0);
+  auto bad_wheel = buildPresentResponse(3U, 0U, 0, 0);  // not the id bound to bus 0 (left = 2)
   assert(!feedback.ingestUart(0U, bad_wheel, 3'000U));
 
   // Get_Encoder_Estimates (0x009) is kept as the raw driver estimate (v3 leg

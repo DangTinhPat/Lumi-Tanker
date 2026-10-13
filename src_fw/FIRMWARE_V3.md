@@ -4,9 +4,11 @@
 từ `ROBOT (GIM6010-8).STEP`. Khối lượng, COM và mô-men quán tính là ước lượng
 theo mô hình khối lượng đã gán; xem `docs/GIM_SIM_PHYSICS_SPEC.md`.
 
-Mô hình khớp gối lấy 22° làm mốc 0 và giới hạn trên 135° (1.9722 rad); đùi dùng
-trục CAD GIM. Gốc encoder của driver so với mốc CAD này chưa được xác nhận trên
-robot thật, nên thông số hình học là đầu vào mô phỏng, chưa phải hiệu chuẩn phần cứng.
+Mô hình CAD khớp gối lấy 22° làm mốc 0 và giới hạn trên 135° (1.9722 rad); đùi dùng
+trục CAD GIM. Người vận hành xác nhận ngày 13/10/2026 rằng robot được xếp ở tư thế
+cao nhất trước khi cấp nguồn, nên firmware lấy encoder gối 0 tương ứng CAD 135°
+và dùng offset âm để gập gối. Chiều cao 184,8 mm tại offset 0 là kết quả FK từ CAD,
+chưa phải số đo chiều cao hoặc hiệu chuẩn chiều quay motor trên robot.
 
 Tài liệu tham chiếu cho app `esp32-s3-v3` (`firmware_esp32/src/AppV3.cpp`, lõi `src_fw/src/v3/`). Trạng thái dự án, cấu hình
 boot, số đo phần cứng và các hướng đã loại nằm ở `docs/V3.3_HANDOFF.md`; nhật ký cũ ở
@@ -15,6 +17,21 @@ boot, số đo phần cứng và các hướng đã loại nằm ở `docs/V3.3_
 Build/nạp: `pio run -e esp32-s3-v3 [-t upload --upload-port /dev/ttyUSBx]`. Điều khiển: `python3 tools/tap_serial_control_gui.py`
 (tự kết nối, log ở `~/tap_logs/`; mở cổng serial reset ESP32 và mất mọi `SET` chạy). Không dùng BLE khi điều khiển
 bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`) đã gỡ ngày 08/10/2026 (mã, test, tài liệu); `esp32-s3-v3` là môi trường mặc định và duy nhất, còn lịch sử trong git.
+
+UART bánh EC4012 dùng một chân DATA cho cả TX/RX: UART1 GPIO17, UART2 GPIO15.
+Theo POC `ROBOT-POC-ESP32_UART_HALF_DUPLEX-main/esp32s3_uart2`, GPIO18/16
+(RX riêng trên PCB, đã nối vào DATA) để input floating; echo tự phát được lọc
+trước khi parse status. Riêng thời điểm nhả TX phải theo hardware idle trong
+đoạn critical bounded 500 µs: chờ task `uart_wait_tx_done` giữ dây 180–309 µs
+cho gói READ 80 µs và làm mất phản hồi trong log `tap_20261013_150521`.
+Bản sửa nhả TX ghi `tx_hold_us` khoảng 83–110 µs và `tx_late=0` trong phần
+đã kiểm tra của log `tap_20261013_150747`. Idle hơn 80 s có hơn 32.000 phản hồi
+mỗi bánh và chưa có timeout/gói lỗi. Lượt cuối 216.152–246.573 s cân bằng
+30.421 s rồi người vận hành DISABLE: 151 SENS đều `uart_wheels=1`, không tăng
+timeout/bad frame; người vận hành xác nhận cân bằng thành công. Hai lượt trước
+vẫn fault mất feedback tại 170.445 s và 191.974 s, nên chưa kết luận hết lỗi
+trong mọi tải. Cơ chế này đã port sang v3.5/v3.5.1; v3.5 mới build/test host,
+chưa nạp/thử robot với port này.
 
 ## Tổng quan
 
@@ -25,7 +42,7 @@ bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`)
 - Tầng 1 (bánh): `LqrBalancer` trên **góc con lắc ảo** θv = pitch + góc đường trục bánh–CoM đo từ hông/gối − góc ở tư thế treo.
   Tầng 2 (hông, `dhip`): phản xạ + preview + vòng level; IK cặp hông/gối giữ trục bánh trên mặt phẳng ngang. Gối: profile chiều
   cao, suspension vị trí, knee hold. Kiến trúc đầy đủ ở HANDOFF mục 2.
-- Chiều cao là khoảng cách hông–trục bánh, 188.6 mm (treo) → 78 mm. `START` vào `Ready` ở chiều cao tối đa; khi cân bằng, bộ
+- Chiều cao là khoảng cách hông–trục bánh, 184,8 mm (tư thế duỗi) → 38,2 mm (giới hạn CAD thấp). `START` vào `Ready` ở chiều cao tối đa; khi cân bằng, bộ
   khởi động hạ chậm một đoạn để chừa hành trình knee cho tầng 2 (12 mm khi roll bật), rồi chiều cao yêu cầu được áp dụng.
 - Bộ ước lượng khi Balancing (`balancingEstimatorConfig`): hiệu chỉnh gia tốc kế 0.2 Hz, tắt nhánh Kalman nhanh, tắt học bias gyro
   lúc yên. Khi bánh đẩy trên sàn gia tốc kế chỉ thấy ~17 % độ nghiêng thật (IMU gần tâm va chạm), cấu hình gốc (55 /s) làm vòng

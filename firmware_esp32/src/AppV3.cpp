@@ -191,11 +191,16 @@ bool AppV3::begin() noexcept {
   ctrl_.config().roll.cmd_preview = true;
   ctrl_.config().roll.latch = true;
   ctrl_.config().roll.gimbal_link = true;  // roll = lateral axis of the gimbal (Tier::level)
-  // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
-  // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
+  // Height-adaptive wheel-loop lead: lead = tall + (low - tall) * clamp((0.95 - ratio) / 0.45) s.
+  // SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
+  // 0.05 / 0.09 s: fitted for a wheel whose speed trails the command by ~75-90 ms. The balance logs of
+  // the BL4012 on the floor show the same trailing (70-90 ms, gain ~1), so the pair stays. (An attempt
+  // to scale it down by the free-spinning bench response, 30 ms, made the loop worse: 12:38 log.)
   ctrl_.config().lqr_lead_adaptive = true;
   ctrl_.config().lqr_lead_tall_s = 0.05F;
   ctrl_.config().lqr_lead_low_s = 0.09F;
+  // Wheel speed from the encoder position (see MotorFeedback::setWheelPositionVelocity).
+  feedback_.setWheelPositionVelocity(true, 24'000U);
   // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
   // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
   // the fixed deadband, SET tsus 0 turns the suspension off (HANDOFF 5.47).
@@ -525,6 +530,10 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "lqrlead")) {
       ctrl_.config().lqr_lead_s = std::clamp(v, 0.0F, 0.2F);
       ctrl_.config().lqr_lead_adaptive = false;  // a fixed value pins the lead
+    }
+    else if (!std::strcmp(key, "wvel")) {
+      feedback_.setWheelPositionVelocity(v >= 0.5F, 24'000U);
+      out_.printf("V3 wheel speed from %s\n", feedback_.wheelPositionVelocity() ? "encoder position (24 ms)" : "driver speed register");
     }
     else if (!std::strcmp(key, "lqradapt")) ctrl_.config().lqr_lead_adaptive = v >= 0.5F;
     else if (!std::strcmp(key, "lqrleadtall")) ctrl_.config().lqr_lead_tall_s = std::clamp(v, 0.0F, 0.2F);
@@ -1496,6 +1505,11 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(line);
+  static char wbus[320];
+  uart1_.format(wbus, sizeof wbus);
+  out_.println(wbus);
+  uart2_.format(wbus, sizeof wbus);
+  out_.println(wbus);
   prof_max_.fill(0U);
   prof_upd_sum_ = 0U;
   prof_upd_n_ = 0U;
