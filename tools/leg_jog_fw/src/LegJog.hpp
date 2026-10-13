@@ -90,6 +90,10 @@ struct Config {
   // hadn't really landed yet when we started sending Goal Position writes
   // that a motor still in Speed mode just ignores.
   std::uint64_t mode_switch_settle_us = 150'000U;
+  std::uint64_t wheel_silent_us = 100'000U;    // no valid frame for this long = silent.
+  std::uint64_t wheel_probe_us = 100'000U;     // transaction period for a silent wheel.
+  std::uint64_t boot_read_period_us = 50'000U; // boot mode read retries.
+  std::uint64_t boot_sync_timeout_us = 2'000'000U;
 };
 
 struct Settings {
@@ -188,6 +192,20 @@ struct Wheel {
   // Force a real mode write once at boot, regardless of what this
   // struct assumes, so the two can never start out of sync.
   bool boot_synced = false;
+  // Boot mode sync: READ reg 0x11 first and write only when the driver is not
+  // already in Speed mode (every write is a flash write; a reset or power loss
+  // mid-write must not be a routine part of every boot). drv_mode is the last
+  // value read back (-1 unknown).
+  std::int16_t drv_mode = -1;
+  std::uint8_t boot_stage = 0U;      // 0 read, 1 settle after a write, 2 verify read
+  std::uint8_t boot_tries = 0U;
+  std::uint64_t boot_start_us = 0U;
+  std::uint64_t boot_next_us = 0U;
+  // A silent driver costs a full reply window per transaction. Once nothing
+  // valid has come back for wheel_silent_us, probe it only every
+  // wheel_probe_us so it cannot eat the 10 ms tick that also streams the legs.
+  std::uint64_t last_reply_us = 0U;
+  std::uint64_t next_probe_us = 0U;
   // Latest Present Data, core frame (speed) / raw single-turn position.
   std::uint16_t pos_raw = 0U;
   std::int16_t speed_raw = 0;
@@ -291,6 +309,13 @@ class LegJog {
     Wheel* const wheel = findWheelById(parsed.id);
     if (wheel == nullptr) return;
     wheel->err = parsed.err;
+    wheel->last_reply_us = now_us;
+    // READ of reg 0x11 (Velocity Mode): one data byte after the echoed [LEN, INS, ADDR].
+    if (parsed.err == 0U && parsed.payload_len == 1U && input.len > 7U &&
+        input.bytes[6] == frame::kDxlInsRead && input.bytes[7] == frame::kDxlVelocityModeAddr) {
+      wheel->drv_mode = parsed.payload[0];
+      return;
+    }
     const auto present = frame::parsePresentPayload(parsed);
     if (!present.valid) return;  // Write ack.
     wheel->pos_raw = static_cast<std::uint16_t>(present.position_raw & 0x03FFU);
@@ -836,6 +861,56 @@ class LegJog {
                       static_cast<std::int16_t>(std::lround(driver_raw)))));
   }
 
+  [[nodiscard]] bool wheelSilent(const Wheel& wheel, std::uint64_t now_us) const noexcept {
+    const std::uint64_t ref = wheel.last_reply_us != 0U ? wheel.last_reply_us : wheel.boot_start_us;
+    return now_us > ref && now_us - ref > config_.wheel_silent_us;
+  }
+
+  // Reads the driver's mode register and writes Speed mode only if it differs,
+  // then verifies. Never writes blind: a driver that does not answer the read
+  // is left alone and reported (wheel.fault keeps it from being driven).
+  void bootSyncWheel(Wheel& wheel, std::uint64_t now_us) noexcept {
+    if (wheel.boot_start_us == 0U) wheel.boot_start_us = now_us;
+    if (now_us < wheel.boot_next_us) return;
+    const auto giveUp = [&](const char* why) {
+      // Never drive a wheel whose mode is unknown (a Moving Speed to a driver left in Position mode made
+      // one motor stop answering): it stays un-synced, so tickWheels sends it no motion commands, and the
+      // sync restarts after a pause.
+      wheel.boot_start_us = now_us;
+      wheel.boot_next_us = now_us + 1'000'000U;
+      wheel.boot_stage = 0U;
+      wheel.boot_tries = 0U;
+      wheel.drv_mode = -1;
+      char text[96];
+      std::snprintf(text, sizeof(text), "EV WHEEL %s boot mode sync failed: %s (retrying)", wheel.name, why);
+      pushEvent(text);
+    };
+    if (wheel.boot_stage == 1U) {            // a write was sent: wait for the flash write, then verify
+      if (now_us - wheel.mode_switch_us < config_.mode_switch_settle_us) return;
+      wheel.boot_stage = 2U;
+      wheel.drv_mode = -1;
+    }
+    if (wheel.drv_mode >= 0) {
+      if (wheel.drv_mode == static_cast<std::int16_t>(frame::kDxlVelModeSpeed)) {
+        wheel.boot_synced = true;
+        wheel.position_mode = false;
+        return;
+      }
+      if (wheel.boot_stage == 2U || wheel.boot_tries >= 2U) return giveUp("driver stays out of Speed mode");
+      ++wheel.boot_tries;
+      (void)tx_.sendUart(wheel.bus, frame::buildVelocityMode(wheel.id, frame::kDxlVelModeSpeed));
+      wheel.mode_switch_us = now_us;
+      wheel.boot_stage = 1U;
+      wheel.boot_next_us = now_us + config_.mode_switch_settle_us;
+      wheel.drv_mode = -1;
+      return;
+    }
+    if (now_us - wheel.boot_start_us > config_.boot_sync_timeout_us) return giveUp("no reply to the mode read");
+    const std::uint8_t params[2] = {frame::kDxlVelocityModeAddr, 1U};
+    (void)tx_.sendUart(wheel.bus, frame::detail::buildFrame(wheel.id, frame::kDxlInsRead, params, 2U));
+    wheel.boot_next_us = now_us + config_.boot_read_period_us;
+  }
+
   // Hold-to-run: Torque Enable, settle, Moving Speed; on release brake at
   // speed 0 briefly, then coast (Torque Disable, repeated while stopped).
   void tickWheels(std::uint64_t now_us) noexcept {
@@ -844,15 +919,7 @@ class LegJog {
         now_us - last_wheel_cmd_us_ <= config_.wheel_lease_us;
     for (auto& wheel : wheels_) {
       if (!wheel.boot_synced) {
-        // Force Speed mode once, regardless of what this struct assumes -
-        // see boot_synced's comment. Takes priority over everything else
-        // this wheel might otherwise do this tick.
-        (void)tx_.sendUart(wheel.bus,
-            frame::buildVelocityMode(wheel.id, frame::kDxlVelModeSpeed));
-        wheel.boot_synced = true;
-        wheel.position_mode = false;
-        wheel.mode_switch_us = now_us;
-        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        bootSyncWheel(wheel, now_us);
         continue;
       }
       if (wheel.torque_on && (!wheel.fb_valid ||
@@ -866,6 +933,14 @@ class LegJog {
                       "EV WHEEL %s feedback lost -> torque off (release to re-arm)",
                       wheel.name);
         pushEvent(text);
+      }
+      if (wheelSilent(wheel, now_us)) {
+        if (now_us < wheel.next_probe_us) continue;
+        wheel.next_probe_us = now_us + config_.wheel_probe_us;
+        // One torque-off + one read per probe: enough to notice it came back.
+        if (wheel.torque_on || !wheel.disable_sent) wheelTorqueOff(wheel, now_us);
+        (void)tx_.sendUart(wheel.bus, frame::buildReadPresent(wheel.id));
+        continue;
       }
       // A mode switch (reg 0x11, see below) is a flash write on this
       // driver - let it settle (mode_switch_settle_us; measured needing
