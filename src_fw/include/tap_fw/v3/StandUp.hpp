@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace tap_fw::v3 {
@@ -36,6 +37,12 @@ class StandUp {
     bool enabled = false;               // V3Controller refuses Command::standup unless on
     bool smooth_balance_handover = false;  // opt-in MIN experiment; rocking path unchanged
     bool settled_balance_handover = false; // opt-in: settle at catch pose, then release only when quiet
+    bool repeatable_balance_capture = false; // minrecover: fresh catch state and measured LQR pose
+    bool capture_governor = false; // capturegov: single arrest/verify/adjust/observe supervisor
+    bool safe_balance_capture = false; // mincapture: paired pose, speed-qualified transfer, bounded failure
+    float capture_speed_max_m_s = 0.6F; // provisional stand-only envelope, not calibrated motor capability
+    float capture_quiet_speed_m_s = 0.10F;
+    bool hold_transferred_pose = false; // minposehold: stop dynamic geometry correction in Normal
     float handover_hip_rate_rad_s = 0.35F; // first grace interval, bounds release of the catch pose
     float hold_s = 0.3F;
     float extra_fold_rad = 0.0F;       // opt-in final fold trim (0..4 deg); tighter catch when nonzero
@@ -75,6 +82,7 @@ class StandUp {
     float lean_rad = 0.0F;              // pitch + CoM line angle
     float lean_rate_rad_s = 0.0F;
     float hip_goal_rad = 0.0F;          // the hip that gives lean = leanTarget() at the current pitch and knee
+    float catch_lean_target_rad = 0.0F; // model lean at that goal, including configured hip trims
     float pitch_rad = 0.0F;             // body pitch (IMU)
     float pitch_rate_rad_s = 0.0F;
     float wheel_rate_rad_s = 0.0F;      // measured joint speed (mean of both wheels)
@@ -97,6 +105,7 @@ class StandUp {
     t_ = 0.0F;
     rise_t_ = 0.0F;
     caught_s_ = 0.0F;
+    lean_target_ = 0.0F;
     hip_cmd_ = hip_rad;
     knee_cmd_ = knee_rad;
   }
@@ -113,8 +122,21 @@ class StandUp {
     t_ += in.dt_s;
     if (!in.sensors_ok || !std::isfinite(in.lean_rad) || t_ > config_.timeout_s) phase_ = Phase::Failed;
     if (phase_ == Phase::Hold && t_ >= config_.hold_s) phase_ = Phase::Rise;
+    const float catch_rate = config_.capture_governor
+        ? std::min(config_.catch_rate_rad_s, 0.7F) : config_.catch_rate_rad_s;
+    const bool body_catch = !config_.capture_governor || std::abs(in.pitch_rate_rad_s) < 0.7F;
+    const float catch_hold = config_.capture_governor ? std::max(config_.catch_hold_s,0.05F) : config_.catch_hold_s;
     const float catch_lean = config_.extra_fold_rad > 0.0F
         ? std::min(config_.catch_lean_rad, 0.025F) : config_.catch_lean_rad;
+    // The trimmed hip goal need not have zero CAD lean. Qualify either the
+    // original axle crossing or the reachable trimmed goal, within the same
+    // outer capture corridor. Otherwise a quiet, tracking robot can wait for
+    // an accidental disturbance to enter an unreachable zero-centred band.
+    // This is a model consistency check, never a contact/support detector.
+    const bool near_capture = std::abs(in.lean_rad) < catch_lean ||
+        (config_.capture_governor && std::isfinite(in.catch_lean_target_rad) &&
+         std::abs(in.lean_rad) < config_.catch_lean_rad &&
+         std::abs(in.lean_rad - in.catch_lean_target_rad) < catch_lean);
     float wheel = 0.0F;
     if (phase_ == Phase::Rise) {
       rise_t_ += in.dt_s;
@@ -129,11 +151,11 @@ class StandUp {
                          -config_.wheel_max_rad_s, config_.wheel_max_rad_s) +
           (config_.wheel_free ? in.wheel_rate_rad_s : 0.0F);
       if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
-      const bool over_axle = std::abs(in.lean_rad) < catch_lean &&
-          std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s &&
+      const bool over_axle = near_capture &&
+          body_catch && std::abs(in.lean_rate_rad_s) < catch_rate &&
           std::abs(hip_cmd_ - in.hip_goal_rad) < config_.catch_hip_tol_rad;
       caught_s_ = over_axle ? caught_s_ + in.dt_s : 0.0F;
-      if (caught_s_ >= config_.catch_hold_s) {
+      if (phase_ != Phase::Failed && caught_s_ >= catch_hold) {
         // Over the axle: if the body is still pitched, level it with the hips first.
         phase_ = std::abs(in.pitch_rad) > config_.level_done_pitch_rad ? Phase::Level : Phase::Caught;
         caught_s_ = 0.0F;
@@ -147,9 +169,9 @@ class StandUp {
       wheel = config_.wheel_free ? in.wheel_rate_rad_s : 0.0F;
       if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
       const bool done = std::abs(in.pitch_rad) < config_.level_done_pitch_rad &&
-          std::abs(in.lean_rad) < catch_lean && std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s;
+          near_capture && body_catch && std::abs(in.lean_rate_rad_s) < catch_rate;
       caught_s_ = done ? caught_s_ + in.dt_s : 0.0F;
-      if (caught_s_ >= config_.catch_hold_s) phase_ = Phase::Caught;
+      if (caught_s_ >= catch_hold) phase_ = Phase::Caught;
     }
     out.phase = phase_;
     out.hip_target_rad = hip_cmd_;

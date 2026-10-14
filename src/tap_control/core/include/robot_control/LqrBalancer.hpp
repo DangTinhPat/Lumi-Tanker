@@ -174,6 +174,11 @@ class LqrBalancer {
   // After a reset while the robot already moves (landing from a forward jump): the velocity
   // references start at this speed instead of ramping up from zero.
   void seedForwardVelocity(float velocity_m_s) noexcept;
+  // Bumpless actuator command seed; operator/standing velocity references stay zero.
+  void seedWheelCommandVelocity(float velocity_m_s) noexcept {
+    if (std::isfinite(velocity_m_s)) commanded_ground_velocity_m_s_ = std::clamp(
+        velocity_m_s, -config_.max_ground_velocity_m_s, config_.max_ground_velocity_m_s);
+  }
 
   [[nodiscard]] Output update(const RobotState& state,
                               const ControlCommand& command,

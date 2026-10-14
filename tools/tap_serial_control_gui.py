@@ -496,7 +496,8 @@ class TapSerialControlApp:
             self._append_log("Xác nhận nguồn motor đã bật ở tư thế HOME; mốc encoder phải đúng trước khi đứng dậy.")
             return
         self._clear_drive_inputs()
-        for command in ("SET legmode 0", "SET lying 1", "SET standmin 1", "SET minbal 1", "SET minsettle 1", "SET standextra 1", "SET standup 1", "STANDUP"):
+        for command in ("SET legmode 0", "SET lying 1", "SET standmin 1", "SET capturegov 1",
+                        "SET standextra 1", "SET standup 1", "STANDUP"):
             if not self._send(command):
                 return
         self.session_active = True

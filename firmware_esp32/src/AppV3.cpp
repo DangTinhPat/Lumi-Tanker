@@ -468,6 +468,11 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                      "is put on the floor and let go)");
     }
   } else if (std::strncmp(line, "HMOVE ", 6U) == 0) {
+    if (ctrl_.config().standup.hold_transferred_pose &&
+        ctrl_.postStandUpPhase() == tap_fw::v3::PostStandUpBalance::Phase::Normal) {
+      out_.println("V3 HMOVE refused: minposehold keeps the stand-up pose (DISABLE first)");
+      return;
+    }
     int dir = 0;
     if (std::sscanf(line + 6, "%d", &dir) == 1) setHeightMove(dir, now_us);
   } else if (std::strcmp(line, "GO NOW") == 0) {
@@ -517,6 +522,11 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "kd")) ctrl_.config().pid.kd = std::clamp(v, 0.0F, 30.0F);
     else if (!std::strcmp(key, "kv")) ctrl_.config().pid.kv = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "height")) {
+      if (ctrl_.config().standup.hold_transferred_pose &&
+          ctrl_.postStandUpPhase() == tap_fw::v3::PostStandUpBalance::Phase::Normal) {
+        out_.println("V3 SET height refused: minposehold keeps the stand-up pose (DISABLE first)");
+        return;
+      }
       // Hip-to-axle height in mm; clamped to the planner's range.
       height_request_m_ = std::clamp(v * 0.001F, tap_fw::v3::LegHeight::minHeight(),
                                      tap_fw::v3::LegHeight::maxHeight());
@@ -704,6 +714,42 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n", lying_start_ ? "ON" : "off",
                   homeHip(), homeKnee());
     }
+    else if (!std::strcmp(key, "capturegov")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET capturegov refused: DISABLE first");
+        return;
+      }
+      auto& stand = ctrl_.config().standup;
+      stand.capture_governor = v >= 0.5F;
+      stand.smooth_balance_handover = stand.settled_balance_handover =
+          stand.repeatable_balance_capture = stand.safe_balance_capture =
+          stand.hold_transferred_pose = stand.capture_governor;
+      out_.printf("V3 capturegov=%d (arrest/verify/adjust/observe/static Normal; legacy profile selected together)\n", v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "mincapture")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET mincapture refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.safe_balance_capture = v >= 0.5F;
+      out_.printf("V3 mincapture=%d (needs minsettle: fixed knee, speed-qualified transfer, stand speed cap 0.6 m/s)\n", v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "minposehold")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET minposehold refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.hold_transferred_pose = v >= 0.5F;
+      out_.printf("V3 minposehold=%d (needs minsettle; Normal holds delivered hip/knee pose)\n", v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "minrecover")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET minrecover refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.repeatable_balance_capture = v >= 0.5F;
+      out_.printf("V3 minrecover=%d (needs minsettle; fresh catch seed, reset level, measured LQR pose)\n", v >= 0.5F ? 1 : 0);
+    }
     else if (!std::strcmp(key, "minsettle")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET minsettle refused: DISABLE first");
@@ -757,7 +803,18 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 SET unknown key '%s'\n", key);
       return;
     }
-    printTunables();
+    // GUI STANDUP sends a configuration burst. Dumping every tunable after
+    // every SET takes >20 ms and can starve the next wheel poll even with a
+    // corrected timestamp. Keep these acknowledgements short; GET retains
+    // the complete dump.
+    if (!std::strcmp(key, "legmode") || !std::strcmp(key, "lying") ||
+        !std::strcmp(key, "standmin") || !std::strcmp(key, "standextra") ||
+        !std::strcmp(key, "standup") || !std::strcmp(key, "capturegov") ||
+        !std::strncmp(key, "min", 3U)) {
+      out_.printf("V3 SET %s=%.3f OK\n", key, v);
+    } else {
+      printTunables();
+    }
   } else if (std::strcmp(line, "BALANCE") == 0) {
     if (!imuFresh(now_us)) {
       out_.println("V3 BALANCE refused: IMU not ready");
@@ -1472,6 +1529,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" hcmd=").fix(hip_cmd, 4, true).str(" kcmd=").fix(knee_cmd, 4, true)
         .str(" mhlim=").i32(ctrl_.standupHipTrackingLimited() ? 1 : 0)
         .str(" mhphase=").i32(static_cast<int>(ctrl_.postStandUpPhase()))
+        .str(" cgphase=").i32(ctrl_.captureGovernorPhase())
+        .str(" cgrms=").fix(ctrl_.captureGovernorRateRms(), 3)
+        .str(" scphase=").i32(static_cast<int>(ctrl_.standupState().phase))
+        .str(" sclean=").fix(ctrl_.standupLean(), 4, true)
+        .str(" sctgt=").fix(ctrl_.standupCatchTarget(), 4, true)
         .str(" ta=").fix(ctrl_.trunkAuthority(), 2).str(" me=").fix(ctrl_.legModelError(), 3, true)
         .str(" lvl=").fix(ctrl_.levelHip(), 4, true).str(" ho=").i32(ctrl_.heldOuterOff() ? 1 : 0)
         .str(" lt=").fix(ctrl_.learnedTrim(), 4, true).chr('/').i32(ctrl_.learnedTrimValid() ? 1 : 0)

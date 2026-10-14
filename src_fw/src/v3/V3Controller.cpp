@@ -215,6 +215,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         height_startup_ = false;
         dhip_ = dknee_ = axle_hip_correction_ = 0.0F;
         standup_.config() = config_.standup;
+        standup_catch_target_ = 0.0F;
         standup_.begin(0.5F * (raw.hip_rad[0] + raw.hip_rad[1]), pose_.knee_offset_rad);
         out.leg_hip_offset_rad = 0.5F * (raw.hip_rad[0] + raw.hip_rad[1]);
         out.leg_knee_offset_rad = pose_.knee_offset_rad;
@@ -338,13 +339,20 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         }
         si.hip_goal_rad = 0.5F * (lo + hi) + config_.standup.hip_goal_offset_rad -
             std::clamp(config_.standup.extra_fold_rad, 0.0F, 0.06981317F);
+        if (config_.standup.capture_governor) {
+          si.catch_lean_target_rad = raw.pitch_rad +
+              comLine(si.hip_goal_rad, standup_state_.knee_target_rad).angle;
+        }
       }
       si.pitch_rad = raw.pitch_rad;
+      standup_catch_target_ = si.catch_lean_target_rad;
       si.pitch_rate_rad_s = raw.pitch_rate_rad_s;
       si.wheel_rate_rad_s = 0.5F * (raw.wheel_rad_s[0] + raw.wheel_rad_s[1]);
       si.sensors_ok = true;
       standup_state_ = standup_.update(si);
-      if (standup_state_.phase == StandUp::Phase::Failed) return fault("stand-up failed", out);
+      if (standup_state_.phase == StandUp::Phase::Failed) {
+        return fault("stand-up failed", out);
+      }
       out.wheels_enabled = standup_state_.wheels_on;
       out.leg_hip_offset_rad = standup_state_.hip_target_rad;
       out.leg_knee_offset_rad = standup_state_.knee_target_rad;
@@ -356,7 +364,23 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         pose_ = LegHeight::forKnee(knee_cmd_rad_);
         height_target_m_ = pose_.axle_below_hip_m;
         dhip_ = standup_state_.hip_target_rad - pose_.hip_offset_rad;
-        const float seed = balance_set_ ? balance_rad_ : learned_trim_valid_ ? learned_trim_rad_ : in.pitch_rad;
+        // A trim learned after leveling is not the initial condition of a new
+        // rocking catch. Preserve an explicit operator reference, but seed this
+        // supervised capture from this episode's measured virtual angle.
+        const bool fresh_capture = config_.standup.repeatable_balance_capture &&
+            config_.standup.settled_balance_handover;
+        const float seed = balance_set_ ? balance_rad_ :
+            fresh_capture ? (config_.standup.capture_governor
+                ? in.pitch_rad-std::clamp(in.pitch_rate_rad_s/std::sqrt(9.80665F/std::max(com_meas_height_m_,0.05F)), -0.04F,0.04F)
+                : in.pitch_rad) : learned_trim_valid_ ? learned_trim_rad_ : in.pitch_rad;
+        if (fresh_capture) {
+          level_i_ = level_beta_ = trunk_alpha_ = 0.0F;
+          level_init_ = false;
+          body_lp_ = body_pitch_;
+          body_rate_damp_f_ = body_rate_;
+          lean_rate_f_ = 0.0F;
+          learn_since_us_ = 0U;
+        }
         if (config_.standup.smooth_balance_handover && config_.algo == Algo::Lqr) {
           // At MIN, virtual pitch contains the fixed CAD hang-reference offset.
           // Robot catches at 0.24-0.26 rad: clipping that seed to 0.20 creates
@@ -374,6 +398,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         standup_grace_until_us_ = in.now_us + static_cast<std::uint64_t>(config_.standup.grace_s * 1.0e6F);
         out.leg_hip_offset_rad = hipCommand();
         out.leg_knee_offset_rad = kneeCommand();
+        standup_hold_knee_rad_ = out.leg_knee_offset_rad;
+        standup_speed_limit_s_ = 0.0F;
         standup_last_hip_command_rad_ = out.leg_hip_offset_rad;
         standup_hip_handover_active_ = config_.standup.smooth_balance_handover;
         standup_hip_tracking_limited_ = config_.standup.settled_balance_handover;
@@ -391,7 +417,19 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
           }
           const float offset = std::clamp(0.5F*(lo+hi) - pose_.hip_offset_rad,
               -config_.tier.level_max_rad, config_.tier.level_max_rad);
-          post_standup_balance_.begin(out.leg_hip_offset_rad, pose_.hip_offset_rad + offset);
+          const float model_goal = pose_.hip_offset_rad + offset;
+          // The governor starts from the delivered pose and closes on IMU
+          // response. The older profile retains its CAD-derived endpoint.
+          const float goal = config_.standup.capture_governor ? out.leg_hip_offset_rad : model_goal;
+          post_standup_balance_.begin(out.leg_hip_offset_rad, goal);
+          if (config_.standup.capture_governor) {
+            // Pratt et al., Capture Point (Humanoids 2006): rate/omega above
+            // estimates the release equilibrium. Retain measured wheel speed
+            // only as the actuator command initial condition, never a DRIVE.
+            lqr_.seedWheelCommandVelocity(ground_v_);
+            pid_v_filt_ = ground_v_;
+            out.wheel_cmd_rad_s = lqrUpdate(in, cmd);
+          }
         }
       } else {
         if (standup_state_.wheels_on) out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
@@ -407,6 +445,21 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     out.legs_locked = true;
     out.wheels_enabled = true;
     if (!in.sensors_ok) return fault("sensor feedback lost while balancing", out);
+    const bool safe_capture = config_.standup.safe_balance_capture &&
+        post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive;
+    if (safe_capture) {
+      const float speed_cap = std::max(config_.standup.capture_speed_max_m_s, 0.1F);
+      const float wheel_speed = config_.wheel_radius_m *
+          std::max(std::abs(in.wheel_rad_s[0]), std::abs(in.wheel_rad_s[1]));
+      if (wheel_speed > speed_cap + 0.15F)
+        return fault("stand-up capture: wheel speed outside envelope", out);
+      // A bound is not a successful catch. Stop persistent saturation rather
+      // than permit repeated held re-seeding to launch a robot across the floor.
+      const bool at_limit = std::abs(lqr_.debugState().commanded_ground_velocity_m_s) >= speed_cap * 0.95F;
+      standup_speed_limit_s_ = at_limit ? standup_speed_limit_s_ + in.dt_s : 0.0F;
+      if (standup_speed_limit_s_ >= 0.4F)
+        return fault("stand-up capture: sustained wheel saturation", out);
+    }
     // Right after a stand-up hand-over the body is still pitched (the belly front rests on the floor) while the
     // tiers level it: the fall limits are wider for a few seconds.
     const float fall_limit = in.now_us < standup_grace_until_us_
@@ -472,14 +525,19 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
       // re-zeroed mid-catch, sim TIER_GENERAL episode 37).
       if (std::abs(in.pitch_rad - runaway_start_pitch_) < 0.15F &&
           std::abs(ground_v_ - runaway_v_imu_) > config_.runaway_dv_m_s) {
+        if (safe_capture) return fault("stand-up capture: ambiguous held/runaway motion", out);
         heldRezero(in);
         out.wheel_cmd_rad_s = {0.0F, 0.0F};
         out.state = state_;
         return out;
       }
     }
-    updateHeight(in, cmd);        // nominal height profile (knee_cmd_rad_)
-    applyPoseOffsets(in);         // suspension / KNEETEST offsets on top of it
+    const bool fixed_stand_pose = config_.standup.hold_transferred_pose &&
+        post_standup_balance_.phase() == PostStandUpBalance::Phase::Normal;
+    if (!fixed_stand_pose && !safe_capture) {
+      updateHeight(in, cmd);      // nominal height profile (knee_cmd_rad_)
+      applyPoseOffsets(in);       // suspension / KNEETEST offsets on top of it
+    }
     updateWheelLegCoordination(in);
     if (wholeBody()) {
       axle_hip_correction_ = 0.0F;
@@ -509,10 +567,32 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
           pi.virtual_rate_rad_s = in.pitch_rate_rad_s;
           pi.body_rate_rad_s = body_rate_;
           pi.held = held_outer_off_ || held_quiet_;
+          pi.smooth_transfer = config_.standup.repeatable_balance_capture;
+          pi.hold_normal_pose = config_.standup.hold_transferred_pose;
+          pi.governor_enabled = config_.standup.capture_governor;
+          pi.body_pitch_rad = body_pitch_;
+          pi.speed_qualified = safe_capture;
+          pi.ground_speed_m_s = ground_v_;
+          pi.command_speed_m_s = config_.wheel_radius_m *
+              std::max(std::abs(out.wheel_cmd_rad_s[0]), std::abs(out.wheel_cmd_rad_s[1]));
+          pi.quiet_speed_m_s = config_.standup.capture_quiet_speed_m_s;
           pi.settle_s = config_.tier.settle_s;
           pi.grace_s = config_.standup.grace_s;
           pi.max_hip_rate_rad_s = config_.standup.handover_hip_rate_rad_s;
           const auto transfer = post_standup_balance_.update(pi);
+          if (transfer.failed) {
+            const char* reason = "post stand-up balance did not settle";
+            if (config_.standup.capture_governor) {
+              using F = BalanceCaptureGovernor::Failure;
+              switch (post_standup_balance_.governorFailure()) {
+                case F::Timeout: reason="capture governor: did not settle before deadline"; break;
+                case F::Travel: reason="capture governor: correction travel exhausted"; break;
+                case F::Response: reason="capture governor: measured body response worsened"; break;
+                default: reason="capture governor: invalid input"; break;
+              }
+            }
+            return fault(reason, out);
+          }
           limited = transfer.hip_rad;
           standup_hip_tracking_limited_ = transfer.limited;
         } else {
@@ -536,6 +616,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
                 -config_.tier.level_max_rad, config_.tier.level_max_rad);
             level_init_ = true;
             level_beta_ = 1.0F;
+            if (!safe_capture) standup_hold_knee_rad_ = kneeCommand();
             dhip_ = level_i_;
             axle_hip_correction_ += limited - hipCommand();
           }
@@ -544,6 +625,12 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
             standup_hip_handover_active_ = false;
             standup_hip_tracking_limited_ = false;
           }
+        }
+        if (safe_capture || (config_.standup.hold_transferred_pose &&
+            post_standup_balance_.phase() == PostStandUpBalance::Phase::Normal)) {
+          // Keep the delivered pair, not only dhip: otherwise live Cartesian
+          // knee compensation would still inject gyro-driven geometry motion.
+          dknee_ = standup_hold_knee_rad_ - pose_.knee_offset_rad;
         }
       }
     }
@@ -933,6 +1020,14 @@ float V3Controller::hopPlannedLean() const noexcept {
 }
 
 void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_trim_rad) {
+  // Capture/transfer are transients, not calibration windows. A quiet sample
+  // of a tilted catch must not become the seed of the next rocking attempt.
+  if (config_.standup.repeatable_balance_capture &&
+      post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive &&
+      post_standup_balance_.phase() != PostStandUpBalance::Phase::Normal) {
+    learn_since_us_ = 0U;
+    return;
+  }
   // Only while genuinely free, calm and standing (not driving): that is
   // exactly when the current trim IS the true balance angle, not just a
   // transient guess. tierVirtual() gate: without the virtual pendulum the
@@ -1195,13 +1290,16 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
 float V3Controller::lqrInertiaLength() noexcept {
   // I_axle / (m l) of the whole robot at the commanded pose (CAD masses and
   // inertia; wheels roll with the axle). Recomputed only when the pose moves.
-  if (std::abs(pose_.knee_offset_rad - lqr_leff_knee_) > 1.0e-3F ||
-      std::abs(pose_.hip_offset_rad - lqr_leff_hip_) > 1.0e-3F) {
-    lqr_leff_knee_ = pose_.knee_offset_rad;
-    lqr_leff_hip_ = pose_.hip_offset_rad;
-    const float hip = LegHeight::hangHipCad() + pose_.hip_offset_rad;
-    const auto b = robot_control::WholeBodyModel{}.compute(hip, pose_.knee_offset_rad, hip,
-                                                           pose_.knee_offset_rad);
+  const bool measured_capture = config_.standup.repeatable_balance_capture &&
+      post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive && legs_measured_;
+  const float knee = measured_capture ? knee_meas_ : pose_.knee_offset_rad;
+  const float hip_offset = measured_capture ? hip_meas_ : pose_.hip_offset_rad;
+  if (std::abs(knee - lqr_leff_knee_) > 1.0e-3F ||
+      std::abs(hip_offset - lqr_leff_hip_) > 1.0e-3F) {
+    lqr_leff_knee_ = knee;
+    lqr_leff_hip_ = hip_offset;
+    const float hip = LegHeight::hangHipCad() + hip_offset;
+    const auto b = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
     const float l = std::hypot(b.com_offset_x_m, b.com_above_axle_m);
     if (l > 0.01F && b.pitch_inertia_at_axle_kg_m2 > 0.0F) {
       lqr_leff_m_ = b.pitch_inertia_at_axle_kg_m2 /
@@ -1216,14 +1314,20 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
   // A hop runs faster than the operator's drive cap (distance / flight time up to forward_speed_max).
   const bool hop_speed = config_.jump.enabled && jump_drive_;
-  const float vmax = hop_speed ? std::max(config_.lqr.max_ground_velocity_m_s, config_.jump.forward_speed_max_m_s)
+  const bool safe_capture = config_.standup.safe_balance_capture &&
+      post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive;
+  const float configured_vmax = hop_speed ? std::max(config_.lqr.max_ground_velocity_m_s, config_.jump.forward_speed_max_m_s)
                                : config_.lqr.max_ground_velocity_m_s;
+  const float vmax = safe_capture ? std::min(configured_vmax,
+      std::max(config_.standup.capture_speed_max_m_s, 0.1F)) : configured_vmax;
   lqr_.setMaxGroundVelocity(vmax);
   // The pendulum length tracks the current leg height every tick; with the gain
   // table built this is a cheap interpolation.
   lqr_.setComHeight(config_.lqr_inertia_length
       ? lqrInertiaLength() / std::max(config_.lqr.pendulum_length_per_com_height, 0.1F)
-      : pose_.com_above_axle_m);
+      : config_.standup.repeatable_balance_capture &&
+          post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive && legs_measured_
+          ? com_meas_height_m_ : pose_.com_above_axle_m);
   if (held_quiet_) {
     const float wheels = radius * 0.5F * (in.wheel_rad_s[0] + in.wheel_rad_s[1]);
     const bool tilted = std::abs(in.pitch_rad - (lqr_.balanceTrim() + ffPitch())) > 0.03F;
@@ -1452,7 +1556,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
         held_max_rate_ < p.held_rate_rad_s && mean_accel < p.held_accel_m_s2 &&
         !pid_driving_;
     held_window_start_us_ = 0U;
-    if (held) {
+    if (held && !safe_capture) {
       heldRezero(in);
       return {0.0F, 0.0F};
     }
@@ -1512,9 +1616,12 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
           body_rate_ + in.hip_rate_rad_s[side] + in.knee_rate_rad_s[side], -3.0F, 3.0F);
     }
   }
-  const std::array<float, 2> sent{
+  std::array<float, 2> sent{
       comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
       comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
+  if (safe_capture) {
+    for (auto& speed : sent) speed = std::clamp(speed, -vmax/radius, vmax/radius);
+  }
   lqr_prediction_.record(config_.lqr.left_wheel_sign * radius * .5F * (sent[0]+sent[1]));
   return sent;
 }
@@ -2249,7 +2356,11 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   // realise the gimbal request yet. Don't accumulate correction behind it.
   // See existing Cartesian workspace anti-windup below; same actuator limit.
   const bool handover_blocked = config_.standup.settled_balance_handover &&
-      standup_hip_handover_active_ && standup_hip_tracking_limited_;
+      standup_hip_handover_active_ && (standup_hip_tracking_limited_ ||
+          (config_.standup.hold_transferred_pose &&
+           post_standup_balance_.phase() == PostStandUpBalance::Phase::Normal) ||
+          (config_.standup.repeatable_balance_capture &&
+           post_standup_balance_.phase() != PostStandUpBalance::Phase::Normal));
   if (level_on && !handover_blocked && !level_init_) {
     // Seed from the measured error, not zero: level_beta_ below already ramps
     // 0 -> 1 over the same schedule as trunk_alpha_, so the output is bumpless

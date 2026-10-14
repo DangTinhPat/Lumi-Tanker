@@ -807,6 +807,7 @@ class V3Controller {
   [[nodiscard]] float planSpeed() const noexcept { return plan_v_; }
   [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
   [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
+  [[nodiscard]] float standupCatchTarget() const noexcept { return standup_catch_target_; }
   [[nodiscard]] const robot_control::LqrBalancer::DebugState& lqrDebug() const noexcept { return lqr_.debugState(); }
   [[nodiscard]] float lqrSpeedSeen() const noexcept { return pid_v_filt_; }
   [[nodiscard]] float jumpTouchdownTarget() const noexcept { return jump_td_target_; }
@@ -883,6 +884,8 @@ class V3Controller {
   [[nodiscard]] float hipCommand() const noexcept {
     return pose_.hip_offset_rad + dhip_ + axle_hip_correction_;
   }
+  [[nodiscard]] int captureGovernorPhase() const noexcept { return config_.standup.capture_governor ? static_cast<int>(post_standup_balance_.governorPhase()) : 0; }
+  [[nodiscard]] float captureGovernorRateRms() const noexcept { return config_.standup.capture_governor ? post_standup_balance_.governorRateRms() : 0.0F; }
   [[nodiscard]] PostStandUpBalance::Phase postStandUpPhase() const noexcept { return post_standup_balance_.phase(); }
   [[nodiscard]] bool standupHipTrackingLimited() const noexcept { return standup_hip_tracking_limited_; }
   [[nodiscard]] bool trunkWorkspaceLimited() const noexcept { return axle_limited_; }
@@ -968,6 +971,7 @@ class V3Controller {
   float standup_last_hip_command_rad_ = 0.0F;
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
+  float standup_catch_target_ = 0.0F;
   AirborneEstimator aac_est_{};
   FlightAttitude flight_att_{};
   std::array<float, 2> jump_wheel_hold_{};
@@ -1138,6 +1142,8 @@ class V3Controller {
   // Static level loop (Tier::level): integrated hip offset, its authority,
   // the filtered body pitch it integrates, and whether it has been started.
   float level_i_ = 0.0F;
+  float standup_hold_knee_rad_ = 0.0F;
+  float standup_speed_limit_s_ = 0.0F;
   float level_beta_ = 0.0F;
   float body_lp_ = 0.0F;
   bool level_init_ = false;
