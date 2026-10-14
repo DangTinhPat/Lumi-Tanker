@@ -17,6 +17,8 @@ constexpr float kTwoPi = 6.28318530717958647692F;
 
 bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
                      motor_transport::Transport& transport, bool ramp_to_zero) noexcept {
+  position_hold_ = false;
+  last_position_targets_ = start_turns;
   ramp_to_zero_ = ramp_to_zero;
   start_turns_ = start_turns;
   engage_us_ = now_us;
@@ -49,6 +51,7 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
 
 float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept {
   if (leg >= kLegs) return 0.0F;
+  if (position_hold_) return last_position_targets_[leg];
   // Close the driver loop at each joint's own measured position, even when
   // the two sides are not exactly symmetric; subsequent updates own the path.
   if (!ramp_to_zero_ && now_us <= engage_us_) return start_turns_[leg];
@@ -69,6 +72,7 @@ float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept
 }
 
 float LegLock::velFfTurns(std::size_t leg) const noexcept {
+  if (position_hold_) return 0.0F;
   if (leg >= kLegs) return 0.0F;
   const auto binding = board::MotorIds{}.leg_can[leg];
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
@@ -92,9 +96,12 @@ bool LegLock::sendTargets(std::uint64_t now_us,
     for (std::size_t i = 0; i < kLegs; ++i) {
       // vel_ff in milli-turns/s (int16): the controller's rate reference (roll / stand-up), 0 otherwise.
       const float vff = std::clamp(velFfTurns(i) * 1000.0F, -32767.0F, 32767.0F);
-      ok = transport.sendCan(frame::canId(legs[i].node_id, frame::kSetInputPosCmdId),
-                             frame::packSetInputPos(targetTurns(i, now_us),
-                                                    static_cast<std::int16_t>(std::lround(vff)), 0)) && ok;
+      const float target = targetTurns(i, now_us);
+      const bool sent = transport.sendCan(frame::canId(legs[i].node_id, frame::kSetInputPosCmdId),
+                             frame::packSetInputPos(target,
+                                                    static_cast<std::int16_t>(std::lround(vff)), 0));
+      if (sent) last_position_targets_[i] = target;
+      ok = sent && ok;
     }
     return ok;
   }

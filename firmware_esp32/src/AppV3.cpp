@@ -136,6 +136,10 @@ AppV3::AppV3() noexcept
       ctrl_(tap_fw::v3::defaultV3Config()) {
   (void)legs_.setMode(tap_fw::v3::LegLock::Mode::Position);  // v3.5 POS: fixed driver position loop
   ctrl_.config().jump.enabled = false;
+  // First lift segment: 28 degrees of hip travel from the HOME reference.
+  // The subsequent slow fold and final catch goal remain unchanged.
+  constexpr float kFirstLiftHipTravelRad = 28.0F * 3.14159265358979323846F / 180.0F;
+  ctrl_.config().standup.hip_mid_rad = kHomeHipRad - kFirstLiftHipTravelRad;
 }
 
 bool AppV3::begin() noexcept {
@@ -299,7 +303,8 @@ void AppV3::controlTaskEntry(void* arg) noexcept {
 }
 
 void AppV3::step(bool task) noexcept {
-  const std::uint64_t now_us = nowUs();
+  const std::uint64_t step_start_us = nowUs();
+  std::uint64_t now_us = step_start_us;
   if (task) {
     // Command lines the loop task queued: handled here, so every state
     // change happens in this task.
@@ -311,10 +316,15 @@ void AppV3::step(bool task) noexcept {
   const std::uint64_t t_serial = nowUs();
   pollBle(now_us);
   const std::uint64_t t_ble = nowUs();
+  // SET bursts can take longer than the 20 ms wheel freshness limit.
+  // Stamp newly drained feedback and run the controller at the time AFTER
+  // command handling, otherwise a fresh UART reply inherits the old tick
+  // start and is falsely stale on the very next STANDUP tick.
+  now_us = t_ble;
   can_.service(now_us);
   drainFeedback(now_us);
   const std::uint64_t t_bus = nowUs();
-  pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - now_us));
+  pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - step_start_us));
   pre_ble_max_us_ = std::max(pre_ble_max_us_, static_cast<std::uint32_t>(t_ble - t_serial));
   pre_bus_max_us_ = std::max(pre_bus_max_us_, static_cast<std::uint32_t>(t_bus - t_ble));
   constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
@@ -325,6 +335,8 @@ void AppV3::step(bool task) noexcept {
     if (last_tick_us_ != 0U && now_us - last_tick_us_ > kPeriod + kPeriod / 2U) ++tick_late_;
     next_control_us_ = now_us + kPeriod;
     controlPart(now_us);
+    tick_exec_max_us_ = std::max(tick_exec_max_us_,
+        static_cast<std::uint32_t>(nowUs() - step_start_us));
     return;
   }
   if (now_us >= next_control_us_) {
@@ -337,6 +349,8 @@ void AppV3::step(bool task) noexcept {
     next_control_us_ += kPeriod;
     if (now_us >= next_control_us_ + 4U * kPeriod) next_control_us_ = now_us + kPeriod;
     controlPart(now_us);
+    tick_exec_max_us_ = std::max(tick_exec_max_us_,
+        static_cast<std::uint32_t>(nowUs() - step_start_us));
   }
 }
 
@@ -417,11 +431,18 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     } else if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
       out_.println("V3 STANDUP refused: not idle (DISABLE first)");
     } else {
-      // Match the 130 mm body/root height requested for the SIM stand-up.
-      height_request_m_ = std::clamp(0.130F - robot_control::geometry::wheel_radius_m +
+      // Choose the post-catch height; optional standextra trims the final fold.
+      height_request_m_ = standup_min_height_ ? tap_fw::v3::LegHeight::minHeight()
+          : std::clamp(0.130F - robot_control::geometry::wheel_radius_m +
           robot_control::geometry::origins[0].z, tap_fw::v3::LegHeight::minHeight(),
           ctrl_.supportedMaxHeight());
       standup_pending_ = true;
+      out_.printf("V3 STANDUP height_after_catch=%.1f mm hip-to-axle standmin=%d\n",
+                  height_request_m_ * 1000.0F, standup_min_height_ ? 1 : 0);
+      out_.printf("V3 STANDUP first_lift_hip_travel=28 deg hip_mid=%.4f rad\n",
+                  ctrl_.config().standup.hip_mid_rad);
+      out_.printf("V3 STANDUP extra_fold=%.1f deg\n",
+                  ctrl_.config().standup.extra_fold_rad / 0.0174532925F);
       out_.println("V3 STANDUP");
     }
   } else if (std::strcmp(line, "GO") == 0) {
@@ -682,6 +703,42 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       lying_start_ = v >= 0.5F;
       out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n", lying_start_ ? "ON" : "off",
                   homeHip(), homeKnee());
+    }
+    else if (!std::strcmp(key, "minsettle")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET minsettle refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.settled_balance_handover = v >= 0.5F;
+      out_.printf("V3 minsettle=%d (needs minbal; transfer <=0.12 rad/s, normal <=0.35 rad/s)\n", v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standextra")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standextra refused: DISABLE first");
+        return;
+      }
+      const float degrees = std::clamp(v, 0.0F, 4.0F);
+      ctrl_.config().standup.extra_fold_rad = degrees * 0.0174532925F;
+      out_.printf("V3 standextra=%.1f deg catch_lean=%.4f rad\n", degrees,
+          degrees > 0.0F ? std::min(ctrl_.config().standup.catch_lean_rad, 0.025F)
+                         : ctrl_.config().standup.catch_lean_rad);
+    }
+    else if (!std::strcmp(key, "minbal")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET minbal refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.smooth_balance_handover = v >= 0.5F;
+      out_.printf("V3 minbal=%d (smooth balance handover; rocking unchanged)\n", v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standmin")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standmin refused: DISABLE first");
+        return;
+      }
+      standup_min_height_ = v >= 0.5F;
+      out_.printf("V3 standmin=%d (next STANDUP: %s)\n", standup_min_height_ ? 1 : 0,
+                  standup_min_height_ ? "balance at MIN" : "130 mm body height");
     }
     else if (!std::strcmp(key, "standup")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1295,7 +1352,22 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const std::uint64_t wheel_send_us = nowUs() - p_wheel;
   const std::uint64_t p2 = nowUs();
   float hip_cmd = 0.0F, knee_cmd = 0.0F;
-  if (out.legs_locked) {
+  if (out.legs_locked && out.state == V3Controller::State::Fault) {
+    // A stand-up sensor fault must not replace the lying/folding command
+    // with the nominal balance pose (a ~75 deg hip jump in the HOME frame).
+    // Keep the last POS frame per joint, including side offsets/ramp state.
+    legs_.holdLastPositionTargets();
+    const auto bindings = tap_fw::board::MotorIds{}.leg_can;
+    hip_cmd = homeHip() + 0.5F * kTwoPi / 8.0F *
+        (legs_.targetTurns(0, now_us)*bindings[0].driver_sign +
+         legs_.targetTurns(2, now_us)*bindings[2].driver_sign);
+    knee_cmd = homeKnee() + 0.5F * kTwoPi / 8.0F *
+        (legs_.targetTurns(1, now_us)*bindings[1].driver_sign +
+         legs_.targetTurns(3, now_us)*bindings[3].driver_sign);
+    if (rec_active_) stopRecording(false);
+    (void)legs_.update(now_us, transport_);
+  } else if (out.legs_locked) {
+    legs_.resumePositionTargets();
     const bool stand = rec_active_ && recStand();
     if (stand) rec_cmd_ = recExcitation(now_us);
     // The height pose plus the tier-2 hip offset (0 unless trunk is on and
@@ -1397,6 +1469,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" knee=").fix(ctrl_.legPose().knee_offset_rad, 3, true)
         .str(" tv=").fix(ctrl_.virtualPitch(), 4, true)
         .str(" tvr=").fix(ctrl_.virtualPitchRate(), 3, true).str(" dhip=").fix(ctrl_.trunkHip(), 4, true)
+        .str(" hcmd=").fix(hip_cmd, 4, true).str(" kcmd=").fix(knee_cmd, 4, true)
+        .str(" mhlim=").i32(ctrl_.standupHipTrackingLimited() ? 1 : 0)
+        .str(" mhphase=").i32(static_cast<int>(ctrl_.postStandUpPhase()))
         .str(" ta=").fix(ctrl_.trunkAuthority(), 2).str(" me=").fix(ctrl_.legModelError(), 3, true)
         .str(" lvl=").fix(ctrl_.levelHip(), 4, true).str(" ho=").i32(ctrl_.heldOuterOff() ? 1 : 0)
         .str(" lt=").fix(ctrl_.learnedTrim(), 4, true).chr('/').i32(ctrl_.learnedTrimValid() ? 1 : 0)

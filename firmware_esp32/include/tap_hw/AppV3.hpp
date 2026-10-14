@@ -133,6 +133,7 @@ class AppV3 {
   // so the driver zero is that pose. The controller works in the CAD frame (hip 1.3055 rad, knee 0 there):
   // measured joints get this offset added and every leg target has it subtracted.
   bool lying_start_ = false;
+  bool standup_min_height_ = false;  // SET standmin: isolate balance at the lower stop
   static constexpr float kHomeHipRad = 1.30550628F;
   static constexpr float kHomeKneeRad = 0.0F;
   [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : 0.0F; }

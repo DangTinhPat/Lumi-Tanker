@@ -55,6 +55,10 @@ class LegLock {
   // All legs to IDLE.
   bool release(motor_transport::Transport& transport) noexcept;
 
+  // Fault in the POS app: retain each joint's last transmitted target,
+  // including an unfinished ramp; suppress velocity feed-forward.
+  void holdLastPositionTargets() noexcept { if (engaged_ && positionMode()) position_hold_ = true; }
+  void resumePositionTargets() noexcept { position_hold_ = false; }
   [[nodiscard]] bool engaged() const noexcept { return engaged_; }
   // Ramp finished: every leg is commanded to exactly 0.
   [[nodiscard]] bool atZero(std::uint64_t now_us) const noexcept;
@@ -132,6 +136,8 @@ class LegLock {
 
   Config config_{};
   bool engaged_ = false;
+  bool position_hold_ = false;
+  std::array<float, kLegs> last_position_targets_{};
   bool ramp_to_zero_ = true;
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;

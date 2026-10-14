@@ -285,6 +285,42 @@ int main() {
       assert(unpackSetAxisState(bus.can[i].data) == kAxisStateIdle);
     std::puts("POS stand-up: no homing ramp, no Iq/Kt, IDLE release");
   }
+  // POS Fault must freeze the last CAN target, not evaluate a new pose/ramp.
+  for (bool ramp : {false, true}) {
+    FakeTransport bus;
+    LegLock lock;
+    assert(lock.setMode(LegLock::Mode::Position));
+    const std::array<float, 4> start{0.30F, 0.02F, -0.29F, -0.01F};
+    lock.setOffsets(0.08F, 0.01F);
+    assert(lock.engage(start, 1'000'000U, bus, ramp));
+    lock.setSideOffsets({0.01F, -0.02F}, {0.0F, 0.01F}, {0.1F, -0.1F});
+    bus.can.clear();
+    assert(lock.update(1'010'000U, bus));
+    std::array<float, 4> last{};
+    for (int i = 0; i < 4; ++i) last[i] = unpackSetInputPosTurns(bus.can[i].data);
+    // Negative control: evaluating the default/home offset would jump.
+    lock.setOffsets(-1.30550628F, 0.0F);
+    assert(!near(lock.targetTurns(0, 2'000'000U), last[0]));
+    lock.holdLastPositionTargets();
+    lock.setSideOffsets({}, {}, {1.0F, 1.0F});
+    for (auto now : {1'014'000U, 1'500'000U, 2'100'000U}) {
+      bus.can.clear();
+      assert(lock.update(now, bus));
+      for (int i = 0; i < 4; ++i) {
+        assert(near(unpackSetInputPosTurns(bus.can[i].data), last[i]));
+        assert(lock.velFfTurns(i) == 0.0F);
+      }
+    }
+    lock.resumePositionTargets();
+    assert(!near(lock.targetTurns(0, 2'104'000U), last[0]));
+    assert(lock.release(bus) && !lock.engaged());
+    // A new engage must clear the frozen state even without explicit resume.
+    assert(lock.engage(start, 3'000'000U, bus, false));
+    lock.holdLastPositionTargets();
+    assert(lock.release(bus));
+    assert(lock.engage(start, 4'000'000U, bus, false));
+    assert(!near(lock.targetTurns(0, 4'004'000U), start[0]));
+  }
   // Torque mode remains available to the reusable core tests; the fw POS app blocks it.
   // Current/torque mode: targets still ramp from the
   // measured pose to exactly 0 before the controller moves the legs.

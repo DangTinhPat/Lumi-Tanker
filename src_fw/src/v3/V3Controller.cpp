@@ -151,7 +151,21 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     out.leg_hip_offset_rad = pose_.hip_offset_rad;
     out.leg_knee_offset_rad = pose_.knee_offset_rad;
   }
+  if (state_ == State::Balancing && standup_hip_handover_active_) {
+    // Early safety/held exits must hold the last issued pose, not jump to
+    // the nominal pose before the transfer limiter runs.
+    out.leg_hip_offset_rad = standup_last_hip_command_rad_;
+    out.leg_knee_offset_rad = kneeCommand();
+  }
   if (cmd.disable) {
+    if (standup_trim_range_active_) {
+      lqr_.setBalanceTrimMax(standup_previous_trim_max_rad_);
+      standup_trim_range_active_ = false;
+    }
+    standup_hip_handover_active_ = false;
+    standup_hip_tracking_limited_ = false;
+    post_standup_balance_.reset();
+    standup_grace_until_us_ = 0U;
     lqr_prediction_.reset();
     legs_held_ = false;
     #ifdef TAP_SPLIT_HOST_PROTOTYPE
@@ -175,6 +189,15 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     case State::Idle:
     case State::Fault:
       if (cmd.standup && config_.standup.enabled) {
+        // A Fault retry must not inherit a previous experimental trim range.
+        if (standup_trim_range_active_) {
+          lqr_.setBalanceTrimMax(standup_previous_trim_max_rad_);
+          standup_trim_range_active_ = false;
+        }
+        standup_hip_handover_active_ = false;
+        standup_hip_tracking_limited_ = false;
+        post_standup_balance_.reset();
+        standup_grace_until_us_ = 0U;
         // Rocking stand-up from the lying pose: the legs lock where they are (the encoders count from the
         // power-up pose), the knees stay at their homing stop (0) and the hips fold; StandUp hands over to
         // the balancer when the CoM is over the axle.
@@ -199,6 +222,14 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         return out;
       }
       if (cmd.start) {
+        if (standup_trim_range_active_) {
+          lqr_.setBalanceTrimMax(standup_previous_trim_max_rad_);
+          standup_trim_range_active_ = false;
+        }
+        standup_hip_handover_active_ = false;
+        standup_hip_tracking_limited_ = false;
+        post_standup_balance_.reset();
+        standup_grace_until_us_ = 0U;
         if (!in.sensors_ok) return fault("sensors not ready", out);
         state_ = State::Locking;
         state_since_us_ = in.now_us;
@@ -305,7 +336,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
           const float mid = 0.5F * (lo + hi);
           (raw.pitch_rad + comLine(mid, standup_state_.knee_target_rad).angle > standup_.leanTarget() ? hi : lo) = mid;
         }
-        si.hip_goal_rad = 0.5F * (lo + hi) + config_.standup.hip_goal_offset_rad;
+        si.hip_goal_rad = 0.5F * (lo + hi) + config_.standup.hip_goal_offset_rad -
+            std::clamp(config_.standup.extra_fold_rad, 0.0F, 0.06981317F);
       }
       si.pitch_rad = raw.pitch_rad;
       si.pitch_rate_rad_s = raw.pitch_rate_rad_s;
@@ -324,11 +356,43 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         pose_ = LegHeight::forKnee(knee_cmd_rad_);
         height_target_m_ = pose_.axle_below_hip_m;
         dhip_ = standup_state_.hip_target_rad - pose_.hip_offset_rad;
-        engageBalance(in, balance_set_ ? balance_rad_ : learned_trim_valid_ ? learned_trim_rad_ : in.pitch_rad);
+        const float seed = balance_set_ ? balance_rad_ : learned_trim_valid_ ? learned_trim_rad_ : in.pitch_rad;
+        if (config_.standup.smooth_balance_handover && config_.algo == Algo::Lqr) {
+          // At MIN, virtual pitch contains the fixed CAD hang-reference offset.
+          // Robot catches at 0.24-0.26 rad: clipping that seed to 0.20 creates
+          // a reference step. Extend only the trim range, bounded by the existing
+          // app SET trim_max ceiling (0.35), not the fall or actuation limits.
+          if (!standup_trim_range_active_) {
+            standup_previous_trim_max_rad_ = lqr_.config().balance_trim_max_rad;
+            standup_trim_range_active_ = true;
+          }
+          lqr_.setBalanceTrimMax(std::max(standup_previous_trim_max_rad_,
+              std::min(std::abs(seed) + 0.05F, 0.35F)));
+        }
+        engageBalance(in, seed);
         height_startup_ = false;                 // the stand-up is the slow start already
         standup_grace_until_us_ = in.now_us + static_cast<std::uint64_t>(config_.standup.grace_s * 1.0e6F);
         out.leg_hip_offset_rad = hipCommand();
         out.leg_knee_offset_rad = kneeCommand();
+        standup_last_hip_command_rad_ = out.leg_hip_offset_rad;
+        standup_hip_handover_active_ = config_.standup.smooth_balance_handover;
+        standup_hip_tracking_limited_ = config_.standup.settled_balance_handover;
+        post_standup_balance_.reset();
+        if (config_.standup.settled_balance_handover && standup_hip_handover_active_) {
+          // Transfer toward a level-body equilibrium, not nominal hip zero:
+          // theta_v = body + comLine - hang. Reuse the existing CAD/encoder
+          // model as a bounded initial guess; IMU level feedback follows later.
+          const float com_target = balanceRef() + ffPitch() + com_line_hang_ -
+              config_.tier.level_pitch_rad;
+          float lo = -1.5F, hi = 2.0F;
+          for (int i = 0; i < 20; ++i) {
+            const float mid = 0.5F*(lo+hi);
+            (comLine(mid, kneeCommand()).angle > com_target ? hi : lo) = mid;
+          }
+          const float offset = std::clamp(0.5F*(lo+hi) - pose_.hip_offset_rad,
+              -config_.tier.level_max_rad, config_.tier.level_max_rad);
+          post_standup_balance_.begin(out.leg_hip_offset_rad, pose_.hip_offset_rad + offset);
+        }
       } else {
         if (standup_state_.wheels_on) out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
       }
@@ -429,6 +493,59 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
       out.wheel_cmd_rad_s = config_.algo == Algo::Pid ? pidUpdate(in, cmd) : lqrUpdate(in, cmd);
       updateLegLayers(in, true, out.wheel_cmd_rad_s);
       coordinateTrunkAxle(in.dt_s);
+      if (standup_hip_handover_active_) {
+        // Limit the FINAL hip target: the Cartesian correction at MIN can
+        // otherwise bypass a limiter on dhip alone. During this short transfer
+        // the exact axle-plane target may lag; encoder-based pitch still owns
+        // the wheel feedback and all model/fall guards remain active.
+        const float wanted = hipCommand();
+        float limited;
+        const auto previous_phase = post_standup_balance_.phase();
+        if (config_.standup.settled_balance_handover) {
+          PostStandUpBalance::Input pi{};
+          pi.dt_s = in.dt_s;
+          pi.desired_hip_rad = wanted;
+          pi.virtual_error_rad = in.pitch_rad - (balanceRef() + ffPitch());
+          pi.virtual_rate_rad_s = in.pitch_rate_rad_s;
+          pi.body_rate_rad_s = body_rate_;
+          pi.held = held_outer_off_ || held_quiet_;
+          pi.settle_s = config_.tier.settle_s;
+          pi.grace_s = config_.standup.grace_s;
+          pi.max_hip_rate_rad_s = config_.standup.handover_hip_rate_rad_s;
+          const auto transfer = post_standup_balance_.update(pi);
+          limited = transfer.hip_rad;
+          standup_hip_tracking_limited_ = transfer.limited;
+        } else {
+          const float step = std::max(config_.standup.handover_hip_rate_rad_s, 0.0F) * in.dt_s;
+          limited = standup_last_hip_command_rad_ +
+              std::clamp(wanted - standup_last_hip_command_rad_, -step, step);
+          standup_hip_tracking_limited_ = std::abs(wanted - limited) > 1e-5F;
+        }
+        axle_hip_correction_ += limited - wanted;
+        standup_last_hip_command_rad_ = limited;
+        // After grace, release only once the live target is reached. A hard
+        // timer exit could reintroduce the command jump this path avoids.
+        if (config_.standup.settled_balance_handover
+              ? previous_phase != PostStandUpBalance::Phase::Normal &&
+                post_standup_balance_.phase() == PostStandUpBalance::Phase::Normal
+              : in.now_us >= standup_grace_until_us_ && std::abs(wanted - limited) < 1e-6F) {
+          if (config_.standup.settled_balance_handover) {
+            // Bumpless normal-loop entry: carry the delivered static hip bias
+            // into the gimbal instead of snapping back to nominal then reseeding.
+            level_i_ = std::clamp(limited - pose_.hip_offset_rad,
+                -config_.tier.level_max_rad, config_.tier.level_max_rad);
+            level_init_ = true;
+            level_beta_ = 1.0F;
+            dhip_ = level_i_;
+            axle_hip_correction_ += limited - hipCommand();
+          }
+          // minsettle keeps command/anti-windup supervision in Normal.
+          if (!config_.standup.settled_balance_handover) {
+            standup_hip_handover_active_ = false;
+            standup_hip_tracking_limited_ = false;
+          }
+        }
+      }
     }
     out.leg_hip_offset_rad = hipCommand();
     out.leg_knee_offset_rad = kneeCommand();
@@ -2128,16 +2245,31 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   body_lp_ += lp * (body_pitch_ - body_lp_);
   const bool level_on = on && t.level;
   const float lmax = std::max(t.level_max_rad, 0.0F);
-  if (level_on && !level_init_) {
+  // Conditional integration anti-windup: a rate-limited final hip cannot
+  // realise the gimbal request yet. Don't accumulate correction behind it.
+  // See existing Cartesian workspace anti-windup below; same actuator limit.
+  const bool handover_blocked = config_.standup.settled_balance_handover &&
+      standup_hip_handover_active_ && standup_hip_tracking_limited_;
+  if (level_on && !handover_blocked && !level_init_) {
     // Seed from the measured error, not zero: level_beta_ below already ramps
     // 0 -> 1 over the same schedule as trunk_alpha_, so the output is bumpless
     // regardless of the seed; a zero seed costs a ~3*tau_s crawl (v3_tier_tests
     // V17/V25 settle-time bounds).
-    level_i_ = std::clamp((body_lp_ - t.level_pitch_rad) / jh, -lmax, lmax);
+    // The post-catch supervisor can defer init until beta is already 1;
+    // then the old error seed would jump the output. Begin at zero correction.
+    level_i_ = config_.standup.settled_balance_handover &&
+        post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive
+        ? 0.0F : std::clamp((body_lp_ - t.level_pitch_rad) / jh, -lmax, lmax);
     level_init_ = true;
-  } else if (level_on && level_beta_ >= 1.0F && trunk_alpha_ >= 1.0F && !wheel_saturating) {
-    const float increment = in.dt_s / level_tau *
-        (body_lp_ - t.level_pitch_rad) / jh;
+  } else if (level_on && !handover_blocked && level_beta_ >= 1.0F && trunk_alpha_ >= 1.0F && !wheel_saturating) {
+    float increment = in.dt_s / level_tau * (body_lp_ - t.level_pitch_rad) / jh;
+    if (config_.standup.settled_balance_handover &&
+        post_standup_balance_.phase() != PostStandUpBalance::Phase::Inactive) {
+      // Deliberate posture correction is slow compared with the wheel loop;
+      // bound its integral rate without clipping the fast wheel/hip reflex.
+      const float step = 0.05F * in.dt_s;
+      increment = std::clamp(increment, -step, step);
+    }
     // Do not wind farther into an unreachable axle target. Still allow
     // unwinding when the body error reverses, even at the workspace edge.
     if (!axle_limited_ || increment * axle_limit_direction_ <= 0.0F)

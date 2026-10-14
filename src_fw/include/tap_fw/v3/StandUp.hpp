@@ -34,7 +34,11 @@ class StandUp {
 
   struct Config {
     bool enabled = false;               // V3Controller refuses Command::standup unless on
+    bool smooth_balance_handover = false;  // opt-in MIN experiment; rocking path unchanged
+    bool settled_balance_handover = false; // opt-in: settle at catch pose, then release only when quiet
+    float handover_hip_rate_rad_s = 0.35F; // first grace interval, bounds release of the catch pose
     float hold_s = 0.3F;
+    float extra_fold_rad = 0.0F;       // opt-in final fold trim (0..4 deg); tighter catch when nonzero
     float hip_goal_offset_rad = -0.0396F;   // added to the hip that puts the CoM line vertical (body level)
     float knee_end_rad = 0.0061F;          // the knees extend to this during the rise (0 = they stay at the homing stop)
     float knee_rate_rad_s = 0.5566F;
@@ -109,6 +113,8 @@ class StandUp {
     t_ += in.dt_s;
     if (!in.sensors_ok || !std::isfinite(in.lean_rad) || t_ > config_.timeout_s) phase_ = Phase::Failed;
     if (phase_ == Phase::Hold && t_ >= config_.hold_s) phase_ = Phase::Rise;
+    const float catch_lean = config_.extra_fold_rad > 0.0F
+        ? std::min(config_.catch_lean_rad, 0.025F) : config_.catch_lean_rad;
     float wheel = 0.0F;
     if (phase_ == Phase::Rise) {
       rise_t_ += in.dt_s;
@@ -123,7 +129,7 @@ class StandUp {
                          -config_.wheel_max_rad_s, config_.wheel_max_rad_s) +
           (config_.wheel_free ? in.wheel_rate_rad_s : 0.0F);
       if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
-      const bool over_axle = std::abs(in.lean_rad) < config_.catch_lean_rad &&
+      const bool over_axle = std::abs(in.lean_rad) < catch_lean &&
           std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s &&
           std::abs(hip_cmd_ - in.hip_goal_rad) < config_.catch_hip_tol_rad;
       caught_s_ = over_axle ? caught_s_ + in.dt_s : 0.0F;
@@ -141,7 +147,7 @@ class StandUp {
       wheel = config_.wheel_free ? in.wheel_rate_rad_s : 0.0F;
       if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
       const bool done = std::abs(in.pitch_rad) < config_.level_done_pitch_rad &&
-          std::abs(in.lean_rad) < config_.catch_lean_rad && std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s;
+          std::abs(in.lean_rad) < catch_lean && std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s;
       caught_s_ = done ? caught_s_ + in.dt_s : 0.0F;
       if (caught_s_ >= config_.catch_hold_s) phase_ = Phase::Caught;
     }

@@ -215,7 +215,7 @@ class TapSerialControlApp:
         self.algorithm_var = tk.StringVar(value="Chưa đọc được")
         self.enable_var = tk.StringVar(value="—")
         self.imu_var = tk.StringVar(value="Chưa có dữ liệu")
-        self.feedback_var = tk.StringVar(value="CAN chân: —   UART bánh: —   Zero chân: —")
+        self.feedback_var = tk.StringVar(value="CAN chân: —   UART bánh: —   Lệnh giữ chân: —")
         self.speed_var = tk.DoubleVar(value=0.08)
         self.yaw_var = tk.DoubleVar(value=0.25)
         self.session_active = False
@@ -331,7 +331,7 @@ class TapSerialControlApp:
                         text="Đã bật nguồn motor khi robot ở đúng tư thế nằm HOME (mốc encoder)",
                         variable=self.lying_zero_confirmed).grid(
             row=6, column=0, columnspan=5, padx=4, pady=3, sticky="w")
-        ttk.Button(actions, text="ĐỨNG DẬY → 130 mm (v3.5 POS)",
+        ttk.Button(actions, text="ĐỨNG DẬY → cân bằng tại MIN (v3.5 POS)",
                    command=self.standup).grid(
             row=7, column=0, columnspan=5, padx=4, pady=3, sticky="ew")
         for column in range(5):
@@ -342,19 +342,6 @@ class TapSerialControlApp:
         tiers = ttk.LabelFrame(self.root, text="v3.3 điều khiển phân tầng (luôn bật)", padding=10)
         tiers.pack(fill="x", padx=10, pady=(0, 8))
         ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
-
-        # Measurements for the hardware sessions (docs/V3.3_HANDOFF.md §7):
-        # recorded at 250 Hz in the firmware, dumped as RC lines into the log.
-        measure = ttk.LabelFrame(self.root, text="Đo đạc (ghi 250 Hz, tự đổ vào log)", padding=10)
-        measure.pack(fill="x", padx=10, pady=(0, 8))
-        for column, (label, command) in enumerate((
-                ("Ghi 6 s (REC)", "REC 6"),
-                ("Gối trên giá (KNEETEST)", "KNEETEST 0.05"),
-                ("Gối trên sàn (KNEETEST FLOOR)", "KNEETEST FLOOR 0.03"),
-                ("Hông trên giá (HIPTEST)", "HIPTEST 0.05"))):
-            ttk.Button(measure, text=label, command=lambda c=command: self._send(c)).grid(
-                row=0, column=column, padx=4, sticky="ew")
-            measure.columnconfigure(column, weight=1)
 
         console = ttk.LabelFrame(self.root, text="Lệnh console (vd: SET leg_kp 15 · SET leg_kd 0.5 · GET)",
                                  padding=10)
@@ -509,7 +496,7 @@ class TapSerialControlApp:
             self._append_log("Xác nhận nguồn motor đã bật ở tư thế HOME; mốc encoder phải đúng trước khi đứng dậy.")
             return
         self._clear_drive_inputs()
-        for command in ("SET legmode 0", "SET lying 1", "SET standup 1", "STANDUP"):
+        for command in ("SET legmode 0", "SET lying 1", "SET standmin 1", "SET minbal 1", "SET minsettle 1", "SET standextra 1", "SET standup 1", "STANDUP"):
             if not self._send(command):
                 return
         self.session_active = True
@@ -1053,6 +1040,11 @@ class TapSerialControlApp:
                              f"Chân trái/phải: ±{float(rdh.group(1)):+.1f} mm")
                 if held and held.group(1) == "1":
                     text += "   [đang bị giữ/nhấc: bánh giới hạn]"
+                phase = re.search(r"\bmhphase=([0-3])", line)
+                if phase and phase.group(1) != "0" and "mode=Balancing" in line:
+                    phase_text = {"1": "Giữ tư thế bắt cân bằng", "2": "Chuyển thân chậm",
+                                  "3": "Cân bằng thường"}[phase.group(1)]
+                    text += f"\nSau đứng dậy: {phase_text}"
                 self.tier_var.set(text)
         if match := MODE_RE.search(line):
             mode = match.group(1)
@@ -1076,7 +1068,7 @@ class TapSerialControlApp:
             self.feedback_var.set(
                 f"CAN chân: {'OK' if match.group(1) == '1' else '—'}   "
                 f"UART bánh: {'OK' if match.group(2) == '1' else '—'}   "
-                f"Zero chân: {'OK' if match.group(3) == '1' else '—'}")
+                f"Lệnh giữ chân: {'Bật' if match.group(3) == '1' else 'Tắt'}")
             self.imu_var.set(
                 f"IMU pitch: {float(match.group(5)):+.3f} rad   "
                 f"pitch rate: {float(match.group(6)):+.3f} rad/s")

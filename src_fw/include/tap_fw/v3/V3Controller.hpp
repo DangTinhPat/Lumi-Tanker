@@ -9,6 +9,7 @@
 #include "robot_control/LqrActuationPredictor.hpp"
 #include "tap_fw/v3/JumpSequence.hpp"
 #include "tap_fw/v3/StandUp.hpp"
+#include "tap_fw/v3/PostStandUpBalance.hpp"
 #include "tap_fw/v3/aac/FlightAttitude.hpp"
 #include "tap_fw/v3/aac/TakeoffMomentum.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
@@ -882,6 +883,8 @@ class V3Controller {
   [[nodiscard]] float hipCommand() const noexcept {
     return pose_.hip_offset_rad + dhip_ + axle_hip_correction_;
   }
+  [[nodiscard]] PostStandUpBalance::Phase postStandUpPhase() const noexcept { return post_standup_balance_.phase(); }
+  [[nodiscard]] bool standupHipTrackingLimited() const noexcept { return standup_hip_tracking_limited_; }
   [[nodiscard]] bool trunkWorkspaceLimited() const noexcept { return axle_limited_; }
   struct TrunkSchedule {
     float com_ratio = 1.0F;
@@ -957,6 +960,12 @@ class V3Controller {
   JumpSequence jump_{};
   StandUp standup_{};
   std::uint64_t standup_grace_until_us_ = 0U;   // wider fall limits until then (after a stand-up hand-over)
+  bool standup_hip_handover_active_ = false;
+  bool standup_hip_tracking_limited_ = false;
+  PostStandUpBalance post_standup_balance_{};
+  bool standup_trim_range_active_ = false;
+  float standup_previous_trim_max_rad_ = 0.0F;
+  float standup_last_hip_command_rad_ = 0.0F;
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
   AirborneEstimator aac_est_{};
