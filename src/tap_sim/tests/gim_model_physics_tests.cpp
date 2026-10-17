@@ -32,9 +32,11 @@ int main(int argc, char** argv) {
   const std::array<int, 4> joints{
       id(mjOBJ_JOINT, "hip_left"), id(mjOBJ_JOINT, "knee_left"),
       id(mjOBJ_JOINT, "hip_right"), id(mjOBJ_JOINT, "knee_right")};
-  for (int joint : joints) {
+  for (int index = 0; index < static_cast<int>(joints.size()); ++index) {
+    const int joint = joints[static_cast<std::size_t>(index)];
     assert(near(model->jnt_axis[3 * joint + 1], 1));
-    assert(near(model->dof_frictionloss[model->jnt_dofadr[joint]], .1));
+    const double expected_friction = index % 2 == 0 ? .05 : .1;
+    assert(near(model->dof_frictionloss[model->jnt_dofadr[joint]], expected_friction));
     assert(model->dof_damping[model->jnt_dofadr[joint]] == 0);
   }
   assert(model->npair == 2);

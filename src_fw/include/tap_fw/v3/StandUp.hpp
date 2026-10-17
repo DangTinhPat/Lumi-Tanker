@@ -5,75 +5,80 @@
 
 namespace tap_fw::v3 {
 
-// StandUp: "rocking" stand-up from the lying pose (MJCF keyframe `home`: belly shell and both wheels on the
-// floor, body level, the CoM ahead of the axle), adapted from the RockerLower of branch tpa (the old RB; its
-// numbers are for that geometry and a 0.8 N.m wheel). A pre-balance maneuver: it never balances itself, it
-// only brings the CoM over the axle and then V3Controller engages its own balancer at that moment.
-//
-// Sensors only (IMU pitch, leg encoders, through the CoM line angle of the leg model):
-//     lean = pitch + comLine(hip, knee).angle      (+ : the CoM is ahead of the axle; 0 = over the axle)
-//
-//  Hold   legs still, wheels still: the IMU and the leg encoders settle.
-//  (Defaults: CEM-tuned in the simulator at a 0.05 N.m wheel ceiling over 8 scenarios, docs/STANDUP_ROCKING.md.)
-//  Rise   the hips fold to the hip where the CoM line is vertical (the controller recomputes it for the knee
-//         now commanded: ~0.2 rad at knee 0), fast to hip_mid, then slowly. The knees may extend (knee_end):
-//         the legs, 3.76 N.m each, lift the belly where the wheels (0.13 N.m) cannot drag it on the floor. Both wheels push forward at
-//         wheel_push (joint-space speed; the driver torque limit, 0.13 N.m, is what limits the force) plus
-//         wheel_lean_gain x lean: the push fades and reverses as the CoM crosses over the axle. The hips alone
-//         cannot lift the belly (their reaction just rolls the wheels back); the push puts the axle under the CoM.
-//  Level  the CoM is over the axle but the body is still pitched (belly front on the floor): the hips - not the
-//         weak wheels - level it. Gravity turns the body about the axle when the CoM is off the axle line
-//         (pitch'' ~ 52 x lean), the hips place the CoM: the lean asked is a PD on the pitch,
-//             lean_target = -(level_kp x pitch + level_kd x pitch rate)     (clamped),
-//         the hip goal is recomputed from the measured pitch every tick so the hips unfold as the pitch falls.
-//  Caught the body is level and the CoM is over the axle: the caller engages the V3 balancer.
-//  Failed the CoM fell behind the axle, or the time ran out.
+// Recovery from the configured lying pose. Only IMU and encoder-derived
+// kinematics enter this bounded, allocation-free state machine.
 class StandUp {
  public:
-  enum class Phase { Idle, Hold, Rise, Level, Caught, Failed };
+  enum class Phase { Idle, Folding, Kneeling, Pitching, Flipped, Catching, Support, Failed };
 
   struct Config {
-    bool enabled = false;               // V3Controller refuses Command::standup unless on
-    float hold_s = 0.3F;
-    float hip_goal_offset_rad = -0.0396F;   // added to the hip that puts the CoM line vertical (body level)
-    float knee_end_rad = 0.0061F;          // the knees extend to this during the rise (0 = they stay at the homing stop)
-    float knee_rate_rad_s = 0.5566F;
-    float knee_delay_s = 0.1119F;          // after the hips start
-    float hip_rate1_rad_s = 0.8845F;       // hips fold at this rate down to hip_mid ...
-    float hip_mid_rad = 0.6678F;
-    float hip_rate2_rad_s = 0.7081F;       // ... then at this one to the goal
-    bool wheels_off = true;             // wheel torque disabled during Hold / Rise / Level (the hip fold needs none:
-                                        // measured, it works with a 0 N.m wheel ceiling); on again at the hand-over
-    bool wheel_free = true;             // (wheels on) the wheels are commanded their own measured speed (no torque): they roll
-                                        // with the legs' geometry; a speed command of 0 would brake the axle
-    float wheel_push_rad_s = 0.6707F;      // forward joint speed of both wheels added during the rise
-    float wheel_delay_s = 0.0F;         // push starts this long after the hips start
-    float wheel_ramp_s = 0.2F;
-    float wheel_lean_gain = 1.5456F;       // rad/s per rad of lean added to the push (negative lean brakes)
-    float wheel_max_rad_s = 60.0F;
-    float catch_lean_rad = 0.0654F;       // |lean| below this ...
-    float catch_rate_rad_s = 1.4965F;      // ... and |lean rate| below this ...
-    float catch_hip_tol_rad = 0.1430F;    // ... with the hip this close to the goal: hand over
-    float catch_hold_s = 0.03F;
-    float level_kp = 0.3F;              // Level: lean (rad) asked per rad of pitch (nose-down pitch asks the CoM behind the axle)
-    float level_kd = 0.15F;             // ... per rad/s of pitch rate (damping)
-    float level_lean_max_rad = 0.25F;   // |lean target| limit (behind the axle); the front limit is +0.1
-    float level_rate_rad_s = 3.0F;      // Level: hip rate limit (both ways)
-    float level_done_pitch_rad = 0.9F;  // Level ends (hand-over) when the body pitch is below this; above ~0.65 (the pitch at the catch) there is no Level phase
-    float fall_lean_rad = 0.5F;         // lean below -this (fell backwards): failed
-    float timeout_s = 8.0F;
-    float grace_s = 4.0F;               // after the hand-over the balancer's fall limits are wider for this long ...
-    float grace_fall_pitch_rad = 1.0F;  // ... (the body is still pitched: the tiers level it)
+    bool enabled = false;
+    float fold_rate_rad_s = 0.35F;
+    float fold_travel_rad = 2.30F;
+    float fold_direction = -1.0F;
+    float fold_pitch_limit_rad = 0.72F;
+    float kneel_hold_s = 1.0F;
+    bool hold_at_kneel = false;    // diagnostic operator hold, FLIP advances
+    bool hold_after_flip = false;  // diagnostic stop after step 3
+    float flip_pitch_kp_rad_s_per_rad = 1.0F;
+    float flip_pitch_kd = 0.08F;
+    float flip_hip_rate_max_rad_s = 0.20F;
+    float flip_travel_max_rad = 1.0F;
+    float pitch_target_tol_rad = 0.04F;
+    float pitch_rate_tol_rad_s = 0.10F;
+    float pitch_settle_s = 0.15F;
+    // Start capture while still pitching, once the body envelope clears the
+    // floor. Core opt-in; the GIM runner enables this overlapping sequence.
+    bool overlap_after_lift = false;
+    float lift_clearance_m = 0.003F;
+    float lift_progress_rad = 0.06F;
+    float lift_confirm_s = 0.02F;
+    float catch_blend_s = 0.15F;
+    // Hip allocation: reduce CoM lean, damp its motion, and level the body.
+    // Signed feedback permits correction in either direction; no oscillation
+    // or timed sweep is injected to "search" for the centre of mass.
+    float catch_hip_gain = 4.0F;       // (rad/s)/rad, before dividing by FK Jacobian
+    float catch_hip_damping_s = 0.2F;
+    float catch_body_gain = 1.0F;
+    float catch_body_damping_s = 0.0F;
+    float catch_wheel_peak_s = 0.0F;    // opt-in actuator request, bounded window
+    float catch_hip_rate_max_rad_s = 1.0F;
+    float catch_hip_accel_rad_s2 = 12.0F;
+    float catch_hip_travel_rad = 1.2F;
+    float catch_hip_tracking_max_rad = 0.12F;
+    // Wheel inner loop on physical CoM lean: acceleration -> speed, with
+    // actuator-lag lead, tracking anti-windup and inverse carrier kinematics.
+    float catch_accel_gain = 35.0F;     // (m/s^2)/rad
+    float catch_accel_damping = 4.0F;   // (m/s^2)/(rad/s)
+    float catch_speed_gain = 2.0F;      // 1/s, outer-loop stopping feedback
+    float catch_accel_max = 2.0F;       // m/s^2, below the 0.13 Nm pair's ideal cap
+    float catch_wheel_lead_s = 0.075F;
+    float catch_wheel_max_rad_s = 10.0F;
+    float catch_tracking_margin_m_s = 0.15F;
+    float catch_lean_tol_rad = 0.08F;
+    float catch_capture_tol_rad = 0.06F;
+    float catch_body_tol_rad = 0.25F;
+    float catch_rate_tol_rad_s = 1.5F;
+    float catch_speed_tol_m_s = 0.5F;
+    float catch_settle_s = 0.04F;
+    float pitch_limit_rad = 0.72F;
+    float timeout_s = 20.0F;            // per moving phase
   };
 
   struct Input {
     float dt_s = 0.002F;
-    float lean_rad = 0.0F;              // pitch + CoM line angle
-    float lean_rate_rad_s = 0.0F;
-    float hip_goal_rad = 0.0F;          // the hip that gives lean = leanTarget() at the current pitch and knee
-    float pitch_rad = 0.0F;             // body pitch (IMU)
+    float pitch_rad = 0.0F;             // +Y rotation, positive nose-down
     float pitch_rate_rad_s = 0.0F;
-    float wheel_rate_rad_s = 0.0F;      // measured joint speed (mean of both wheels)
+    float capture_lean_rad = 0.0F;      // physical axle->CoM angle, no hanging-pose rebase
+    float capture_rate_rad_s = 0.0F;    // gyro + full measured FK Jacobian * joint rates
+    float hip_jacobian = 1.0F;
+    float hip_measured_rad = 0.0F;
+    float carrier_rate_rad_s = 0.0F;    // body + hip + knee angular velocity
+    float ground_speed_m_s = 0.0F;      // encoders + carrier, assumes rolling support
+    float wheel_radius_m = 0.04F;
+    float capture_omega_rad_s = 10.0F;  // sqrt(m*g*l/I_axle), model constants + encoders
+    float body_clearance_m = 0.0F;     // conservative CAD/IMU/encoder estimate
+    bool body_clearance_valid = false;
     bool sensors_ok = true;
   };
 
@@ -81,105 +86,253 @@ class StandUp {
     Phase phase = Phase::Idle;
     float hip_target_rad = 0.0F;
     float knee_target_rad = 0.0F;
-    float wheel_rad_s = 0.0F;           // joint-space speed command, common to both wheels
-    bool wheels_on = true;              // false: the wheel torque is disabled (free-rolling wheels, 0 N.m)
+    float wheel_rad_s = 0.0F;
+    bool wheels_on = true;
+    float capture_point_rad = 0.0F;
+    float capture_rate_rad_s = 0.0F;
+    float hip_rate_rad_s = 0.0F;
+    float phase_elapsed_s = 0.0F;
+    float body_clearance_m = 0.0F;
+    bool body_clearance_valid = false;
+    float catch_blend = 0.0F;
+    bool wheel_peak_requested = false;
   };
 
   StandUp() noexcept = default;
   explicit StandUp(Config config) noexcept : config_(config) {}
 
   void begin(float hip_rad, float knee_rad) noexcept {
-    phase_ = Phase::Hold;
-    t_ = 0.0F;
-    rise_t_ = 0.0F;
-    caught_s_ = 0.0F;
-    hip_cmd_ = hip_rad;
-    knee_cmd_ = knee_rad;
+    phase_ = std::isfinite(hip_rad) && std::isfinite(knee_rad) ? Phase::Folding : Phase::Failed;
+    elapsed_s_ = pitch_settle_s_ = 0.0F;
+    hip_start_rad_ = hip_cmd_ = std::isfinite(hip_rad) ? hip_rad : 0.0F;
+    flip_start_hip_rad_ = catch_start_hip_rad_ = hip_cmd_;
+    knee_cmd_ = std::isfinite(knee_rad) ? knee_rad : 0.0F;
+    hip_rate_cmd_ = wheel_velocity_m_s_ = 0.0F;
+    catch_leveling_ = true;
+    catch_stall_s_ = 0.0F;
+    flip_pitch_initialized_ = catch_overlap_ = false;
+    lift_clear_s_ = catch_entry_rate_ = 0.0F;
   }
+
   void reset() noexcept { phase_ = Phase::Idle; }
+
+  bool advanceFromKneeling() noexcept {
+    if (phase_ != Phase::Kneeling) return false;
+    phase_ = Phase::Pitching;
+    elapsed_s_ = pitch_settle_s_ = 0.0F;
+    flip_start_hip_rad_ = hip_cmd_;
+    flip_pitch_initialized_ = false;
+    lift_clear_s_ = 0.0F;
+    return true;
+  }
 
   [[nodiscard]] Output update(const Input& in) noexcept {
     Output out{};
-    if (phase_ == Phase::Idle || phase_ == Phase::Caught || phase_ == Phase::Failed) {
-      out.phase = phase_;
-      out.hip_target_rad = hip_cmd_;
-      out.knee_target_rad = knee_cmd_;
-      return out;                       // (wheels_on stays true: the balancer takes over)
+    if (phase_ == Phase::Idle || phase_ == Phase::Failed) return output(out);
+    if (!valid(in)) {
+      phase_ = Phase::Failed;
+      return output(out);
     }
-    t_ += in.dt_s;
-    if (!in.sensors_ok || !std::isfinite(in.lean_rad) || t_ > config_.timeout_s) phase_ = Phase::Failed;
-    if (phase_ == Phase::Hold && t_ >= config_.hold_s) phase_ = Phase::Rise;
-    float wheel = 0.0F;
-    if (phase_ == Phase::Rise) {
-      rise_t_ += in.dt_s;
-      const float rate = hip_cmd_ > config_.hip_mid_rad ? config_.hip_rate1_rad_s : config_.hip_rate2_rad_s;
-      hip_cmd_ = std::max(hip_cmd_ - rate * in.dt_s, in.hip_goal_rad);
-      if (rise_t_ >= config_.knee_delay_s) {
-        knee_cmd_ = std::min(knee_cmd_ + config_.knee_rate_rad_s * in.dt_s, std::max(config_.knee_end_rad, knee_cmd_));
+    const float dt = std::clamp(in.dt_s, 0.0F, 0.01F);
+    elapsed_s_ += dt;
+    const float pitch_limit = phase_ == Phase::Folding
+        ? config_.fold_pitch_limit_rad : config_.pitch_limit_rad;
+    const bool moving = phase_ == Phase::Folding || phase_ == Phase::Pitching || phase_ == Phase::Catching;
+    if (std::abs(in.pitch_rad) > pitch_limit || (moving && elapsed_s_ > config_.timeout_s)) {
+      phase_ = Phase::Failed;
+      return output(out);
+    }
+    out.capture_rate_rad_s = in.capture_rate_rad_s;
+    out.body_clearance_m = in.body_clearance_m;
+    out.body_clearance_valid = in.body_clearance_valid && std::isfinite(in.body_clearance_m);
+    // Divergent-mode/capture-point gate, following Pratt et al., Humanoids 2006,
+    // doi:10.1109/ICHR.2006.321385. This angular approximation is used only
+    // inside the small-angle capture region, not as proof of ground contact.
+    out.capture_point_rad = in.capture_lean_rad + in.capture_rate_rad_s / in.capture_omega_rad_s;
+    const float previous_hip = hip_cmd_;
+    if (phase_ == Phase::Folding) {
+      const float remaining = std::max(config_.fold_travel_rad - std::abs(hip_cmd_ - hip_start_rad_), 0.0F);
+      const float step = std::min(config_.fold_rate_rad_s * dt, remaining);
+      hip_cmd_ += (config_.fold_direction < 0.0F ? -1.0F : 1.0F) * step;
+      if (step >= remaining) {
+        phase_ = Phase::Kneeling;
+        elapsed_s_ = 0.0F;
       }
-      const float ramp = std::clamp((rise_t_ - config_.wheel_delay_s) / std::max(config_.wheel_ramp_s, 1.0e-3F),
-                                    0.0F, 1.0F);
-      wheel = std::clamp(ramp * config_.wheel_push_rad_s + config_.wheel_lean_gain * in.lean_rad,
-                         -config_.wheel_max_rad_s, config_.wheel_max_rad_s) +
-          (config_.wheel_free ? in.wheel_rate_rad_s : 0.0F);
-      if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
-      const bool over_axle = std::abs(in.lean_rad) < config_.catch_lean_rad &&
-          std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s &&
-          std::abs(hip_cmd_ - in.hip_goal_rad) < config_.catch_hip_tol_rad;
-      caught_s_ = over_axle ? caught_s_ + in.dt_s : 0.0F;
-      if (caught_s_ >= config_.catch_hold_s) {
-        // Over the axle: if the body is still pitched, level it with the hips first.
-        phase_ = std::abs(in.pitch_rad) > config_.level_done_pitch_rad ? Phase::Level : Phase::Caught;
-        caught_s_ = 0.0F;
+    } else if (phase_ == Phase::Kneeling) {
+      if (!config_.hold_at_kneel && elapsed_s_ >= config_.kneel_hold_s) advanceFromKneeling();
+    } else if (phase_ == Phase::Pitching) {
+      if (!flip_pitch_initialized_) {
+        flip_start_pitch_rad_ = in.pitch_rad;
+        flip_pitch_initialized_ = true;
       }
+      const float rate = std::clamp(config_.flip_pitch_kp_rad_s_per_rad * in.pitch_rad +
+          config_.flip_pitch_kd * in.pitch_rate_rad_s,
+          -config_.flip_hip_rate_max_rad_s, config_.flip_hip_rate_max_rad_s);
+      hip_cmd_ = std::clamp(hip_cmd_ + rate * dt,
+          flip_start_hip_rad_ - config_.flip_travel_max_rad,
+          flip_start_hip_rad_ + config_.flip_travel_max_rad);
+      const bool level = std::abs(in.pitch_rad) <= config_.pitch_target_tol_rad &&
+          std::abs(in.pitch_rate_rad_s) <= config_.pitch_rate_tol_rad_s;
+      pitch_settle_s_ = level ? pitch_settle_s_ + dt : 0.0F;
+      const bool overlap = config_.overlap_after_lift && !config_.hold_after_flip;
+      const bool lifted = out.body_clearance_valid &&
+          in.body_clearance_m >= config_.lift_clearance_m &&
+          (std::abs(flip_start_pitch_rad_) - std::abs(in.pitch_rad) >= config_.lift_progress_rad ||
+           std::abs(in.pitch_rad) <= config_.pitch_target_tol_rad) &&
+          in.pitch_rad * in.pitch_rate_rad_s <= 0.0F;
+      lift_clear_s_ = lifted ? lift_clear_s_ + dt : 0.0F;
+      // Overlap deliberately does not wait for pitch zero or a stationary
+      // body. Missing clearance never falls back to a timed blind launch.
+      const bool ready = overlap ? (lifted && lift_clear_s_ >= config_.lift_confirm_s)
+                                 : (pitch_settle_s_ >= config_.pitch_settle_s);
+      if (ready) {
+        phase_ = config_.hold_after_flip ? Phase::Flipped : Phase::Catching;
+        catch_overlap_ = overlap;
+        catch_entry_rate_ = dt > 0.0F ? (hip_cmd_ - previous_hip) / dt : 0.0F;
+        catch_start_hip_rad_ = hip_cmd_;
+        elapsed_s_ = pitch_settle_s_ = 0.0F;
+        wheel_velocity_m_s_ = std::clamp(in.ground_speed_m_s,
+            -config_.catch_wheel_max_rad_s * in.wheel_radius_m,
+            config_.catch_wheel_max_rad_s * in.wheel_radius_m);
+      }
+    } else if (phase_ == Phase::Catching) {
+      // If body leveling cancels hip progress while CoM remains outside the
+      // capture region, temporarily prioritize capture. This progress test
+      // uses measured motion, not a simulator contact or a scripted sweep.
+      if (std::abs(in.capture_lean_rad) < 0.08F) catch_leveling_ = true;
+      const bool stalled = std::abs(in.capture_lean_rad) > 0.12F &&
+          std::abs(in.capture_rate_rad_s) < 0.15F && std::abs(hip_rate_cmd_) < 0.25F;
+      catch_stall_s_ = stalled ? catch_stall_s_ + dt : 0.0F;
+      if (catch_stall_s_ > 0.15F) catch_leveling_ = false;
+      const float feedback_rate = std::clamp(
+          -(config_.catch_hip_gain * in.capture_lean_rad +
+            config_.catch_hip_damping_s * in.capture_rate_rad_s) / in.hip_jacobian +
+          (catch_leveling_ ? config_.catch_body_gain * in.pitch_rad : 0.0F) +
+          config_.catch_body_damping_s * in.pitch_rate_rad_s,
+          -config_.catch_hip_rate_max_rad_s, config_.catch_hip_rate_max_rad_s);
+      const float blend = catchBlend();
+      // Continue the ongoing lift velocity while capture progressively takes
+      // over. The acceleration bound brakes an inherited fast flip velocity;
+      // the steady catch speed cap applies to the feedback target.
+      const float rate = (1.0F - blend) * catch_entry_rate_ + blend * feedback_rate;
+      hip_rate_cmd_ += std::clamp(rate - hip_rate_cmd_,
+          -config_.catch_hip_accel_rad_s2 * dt, config_.catch_hip_accel_rad_s2 * dt);
+      // Intersect travel and tracking bounds; never wind up against a stall
+      // or silently extend the allowed travel when encoder tracking is lost.
+      const float lower = std::max(catch_start_hip_rad_ - config_.catch_hip_travel_rad,
+          in.hip_measured_rad - config_.catch_hip_tracking_max_rad);
+      const float upper = std::min(catch_start_hip_rad_ + config_.catch_hip_travel_rad,
+          in.hip_measured_rad + config_.catch_hip_tracking_max_rad);
+      if (lower > upper) {
+        phase_ = Phase::Failed;
+        return output(out);
+      }
+      hip_cmd_ = std::clamp(hip_cmd_ + hip_rate_cmd_ * dt, lower, upper);
+      const bool captured = blend >= 1.0F &&
+          std::abs(in.capture_lean_rad) <= config_.catch_lean_tol_rad &&
+          std::abs(out.capture_point_rad) <= config_.catch_capture_tol_rad &&
+          std::abs(in.capture_rate_rad_s) <= config_.catch_rate_tol_rad_s &&
+          std::abs(in.pitch_rad) <= config_.catch_body_tol_rad &&
+          std::abs(in.ground_speed_m_s) <= config_.catch_speed_tol_m_s &&
+          std::abs(hip_cmd_ - in.hip_measured_rad) < 0.06F;
+      pitch_settle_s_ = captured ? pitch_settle_s_ + dt : 0.0F;
+      if (pitch_settle_s_ >= config_.catch_settle_s) phase_ = Phase::Support;
     }
-    if (phase_ == Phase::Level) {
-      lean_target_ = std::clamp(-(config_.level_kp * in.pitch_rad + config_.level_kd * in.pitch_rate_rad_s),
-                                -config_.level_lean_max_rad, 0.1F);
-      const float step = config_.level_rate_rad_s * in.dt_s;
-      hip_cmd_ += std::clamp(in.hip_goal_rad - hip_cmd_, -step, step);
-      wheel = config_.wheel_free ? in.wheel_rate_rad_s : 0.0F;
-      if (in.lean_rad < -config_.fall_lean_rad) phase_ = Phase::Failed;
-      const bool done = std::abs(in.pitch_rad) < config_.level_done_pitch_rad &&
-          std::abs(in.lean_rad) < config_.catch_lean_rad && std::abs(in.lean_rate_rad_s) < config_.catch_rate_rad_s;
-      caught_s_ = done ? caught_s_ + in.dt_s : 0.0F;
-      if (caught_s_ >= config_.catch_hold_s) phase_ = Phase::Caught;
+    if (dt > 0.0F) hip_rate_cmd_ = (hip_cmd_ - previous_hip) / dt;
+    if (phase_ == Phase::Catching) {
+      const float blend = catchBlend();
+      out.catch_blend = blend;
+      const float accel = std::clamp(config_.catch_accel_gain * in.capture_lean_rad +
+          config_.catch_accel_damping * in.capture_rate_rad_s +
+          config_.catch_speed_gain * in.ground_speed_m_s,
+          -config_.catch_accel_max, config_.catch_accel_max);
+      const float vmax = config_.catch_wheel_max_rad_s * in.wheel_radius_m;
+      // Bounds remain ordered even if the robot is rolling faster than vmax.
+      wheel_velocity_m_s_ = std::clamp(wheel_velocity_m_s_ + blend * accel * dt,
+          std::max(-vmax, std::min(in.ground_speed_m_s, 0.0F) - config_.catch_tracking_margin_m_s),
+          std::min(vmax, std::max(in.ground_speed_m_s, 0.0F) + config_.catch_tracking_margin_m_s));
+      out.wheel_rad_s = blend * std::clamp(
+          (wheel_velocity_m_s_ + accel * config_.catch_wheel_lead_s) / in.wheel_radius_m -
+              in.carrier_rate_rad_s,
+          -config_.catch_wheel_max_rad_s, config_.catch_wheel_max_rad_s);
     }
-    out.phase = phase_;
-    out.hip_target_rad = hip_cmd_;
-    out.knee_target_rad = knee_cmd_;
-    out.wheels_on = !(config_.wheels_off && (phase_ == Phase::Hold || phase_ == Phase::Rise || phase_ == Phase::Level));
-    out.wheel_rad_s = (phase_ == Phase::Rise || phase_ == Phase::Level) ? wheel : config_.wheel_free ? in.wheel_rate_rad_s : 0.0F;
-    return out;
+    return output(out);
   }
 
   [[nodiscard]] Phase phase() const noexcept { return phase_; }
-  // The lean the hip goal must give: 0 while rising, level_lean while leveling.
-  [[nodiscard]] float leanTarget() const noexcept { return phase_ == Phase::Level ? lean_target_ : 0.0F; }
-  [[nodiscard]] float time() const noexcept { return t_; }
+  [[nodiscard]] float time() const noexcept { return elapsed_s_; }
   [[nodiscard]] Config& config() noexcept { return config_; }
   [[nodiscard]] const Config& config() const noexcept { return config_; }
-  static const char* name(Phase p) noexcept {
-    switch (p) {
+  static const char* name(Phase phase) noexcept {
+    switch (phase) {
       case Phase::Idle: return "Idle";
-      case Phase::Hold: return "Hold";
-      case Phase::Rise: return "Rise";
-      case Phase::Level: return "Level";
-      case Phase::Caught: return "Caught";
+      case Phase::Folding: return "Folding";
+      case Phase::Kneeling: return "Kneeling";
+      case Phase::Pitching: return "Pitching";
+      case Phase::Flipped: return "Flipped";
+      case Phase::Catching: return "Catching";
+      case Phase::Support: return "Support";
       case Phase::Failed: return "Failed";
     }
     return "?";
   }
 
  private:
+  float catchBlend() const noexcept {
+    if (!catch_overlap_ || config_.catch_blend_s <= 0.0F) return 1.0F;
+    const float t = std::clamp(elapsed_s_ / config_.catch_blend_s, 0.0F, 1.0F);
+    return t * t * (3.0F - 2.0F * t);
+  }
+
+  bool valid(const Input& in) const noexcept {
+    if (!in.sensors_ok || !std::isfinite(in.dt_s) || in.dt_s < 0.0F ||
+        !std::isfinite(in.pitch_rad) || !std::isfinite(in.pitch_rate_rad_s) ||
+        !std::isfinite(in.capture_lean_rad) || !std::isfinite(in.capture_rate_rad_s) ||
+        !std::isfinite(in.hip_jacobian) || !std::isfinite(in.hip_measured_rad) ||
+        !std::isfinite(in.carrier_rate_rad_s) || !std::isfinite(in.ground_speed_m_s) ||
+        !std::isfinite(in.wheel_radius_m) || in.wheel_radius_m <= 0.0F ||
+        !std::isfinite(in.capture_omega_rad_s) || in.capture_omega_rad_s <= 0.0F ||
+        (phase_ == Phase::Catching && std::abs(in.hip_jacobian) < 0.1F)) return false;
+    for (float v : {config_.fold_rate_rad_s, config_.fold_travel_rad, config_.fold_pitch_limit_rad,
+         config_.kneel_hold_s, config_.flip_pitch_kp_rad_s_per_rad, config_.flip_pitch_kd,
+         config_.flip_hip_rate_max_rad_s, config_.flip_travel_max_rad, config_.pitch_target_tol_rad,
+         config_.pitch_rate_tol_rad_s, config_.pitch_settle_s,
+         config_.lift_clearance_m, config_.lift_progress_rad, config_.lift_confirm_s,
+         config_.catch_blend_s, config_.catch_hip_gain,
+         config_.catch_hip_damping_s, config_.catch_body_gain, config_.catch_body_damping_s,
+         config_.catch_wheel_peak_s, config_.catch_hip_rate_max_rad_s,
+         config_.catch_hip_accel_rad_s2, config_.catch_hip_travel_rad, config_.catch_hip_tracking_max_rad,
+         config_.catch_accel_gain, config_.catch_accel_damping, config_.catch_speed_gain,
+         config_.catch_accel_max, config_.catch_wheel_lead_s, config_.catch_wheel_max_rad_s,
+         config_.catch_tracking_margin_m_s, config_.catch_lean_tol_rad, config_.catch_capture_tol_rad,
+         config_.catch_body_tol_rad, config_.catch_rate_tol_rad_s, config_.catch_speed_tol_m_s,
+         config_.catch_settle_s, config_.pitch_limit_rad, config_.timeout_s}) {
+      if (!std::isfinite(v) || v < 0.0F) return false;
+    }
+    // Software ceiling on one recovery request, not a motor thermal rating.
+    return std::isfinite(config_.fold_direction) && config_.catch_wheel_peak_s <= 1.0F;
+  }
+
+  Output output(Output out) const noexcept {
+    out.phase = phase_;
+    out.hip_target_rad = hip_cmd_;
+    out.knee_target_rad = knee_cmd_;
+    out.wheels_on = phase_ != Phase::Failed && phase_ != Phase::Idle;
+    out.hip_rate_rad_s = hip_rate_cmd_;
+    out.phase_elapsed_s = elapsed_s_;
+    out.wheel_peak_requested = phase_ == Phase::Catching && elapsed_s_ < config_.catch_wheel_peak_s;
+    return out;
+  }
+
+  bool catch_leveling_ = true;
+  bool flip_pitch_initialized_ = false, catch_overlap_ = false;
+  float flip_start_pitch_rad_ = 0.0F, lift_clear_s_ = 0.0F, catch_entry_rate_ = 0.0F;
+  float catch_stall_s_ = 0.0F;
   Config config_{};
   Phase phase_ = Phase::Idle;
-  float t_ = 0.0F;
-  float rise_t_ = 0.0F;
-  float caught_s_ = 0.0F;
-  float lean_target_ = 0.0F;
-  float hip_cmd_ = 0.0F;
-  float knee_cmd_ = 0.0F;
+  float elapsed_s_ = 0.0F, pitch_settle_s_ = 0.0F;
+  float hip_start_rad_ = 0.0F, flip_start_hip_rad_ = 0.0F, catch_start_hip_rad_ = 0.0F;
+  float hip_cmd_ = 0.0F, knee_cmd_ = 0.0F, hip_rate_cmd_ = 0.0F, wheel_velocity_m_s_ = 0.0F;
 };
 
 }  // namespace tap_fw::v3

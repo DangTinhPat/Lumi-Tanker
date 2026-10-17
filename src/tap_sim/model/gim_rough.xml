@@ -86,7 +86,7 @@
     <geom name="terrain" type="hfield" hfield="rough_terrain" pos="5.2500 0 -0.038691" material="terrain_mat" contype="1" conaffinity="1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.00509108 0.00012802 0.01378601" mass="2.4" fullinertia="0.00850153 0.00430976 0.00930032 -0.0000167390 -0.000150363 0.0000044670"/>
+      <inertial pos="0.00488392 0.00012802 0.01378601" mass="2.4" fullinertia="0.008501529 0.004314721 0.009305282 -0.0000136742 0.0001729831 0.0000044670"/>
       <geom name="cad_07_0" type="mesh" mesh="cad_07_0" material="gim_structure" pos="2.64662958e-13 0.10245 0.00827948982" contype="1" conaffinity="1"/>
       <geom name="cad_08_0" type="mesh" mesh="cad_08_0" material="gim_structure" pos="-0.00723794046 0.1122 0.0109132013" contype="1" conaffinity="1"/>
       <geom name="cad_13_0" type="mesh" mesh="cad_13_0" material="gim_structure" pos="-5.45696821e-15 0.0237 0.00827948981" contype="0" conaffinity="0"/>
@@ -111,7 +111,7 @@
       <geom name="cad_46_0" type="mesh" mesh="cad_46_0" material="gim_structure" pos="-5.91171556e-15 0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_47_0" type="mesh" mesh="cad_47_0" material="gim_structure" pos="0 -0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_48_0" type="mesh" mesh="cad_48_0" material="gim_electronics" pos="0 -3.41060513e-16 0.0560794898" contype="0" conaffinity="0"/>
-      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="-0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
+      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
       <geom name="cad_50_0" type="mesh" mesh="cad_50_0" material="gim_structure" pos="0 -3.41060513e-16 0.00677948981" contype="1" conaffinity="1"/>
       <geom name="cad_51_0" type="mesh" mesh="cad_51_0" material="gim_hardware" pos="-0.036 0.095 0.00697948981" contype="0" conaffinity="0"/>
       <geom name="cad_52_0" type="mesh" mesh="cad_52_0" material="gim_hardware" pos="0.036 -0.095 0.00697948981" contype="0" conaffinity="0"/>
@@ -124,7 +124,7 @@
       <geom name="cad_59_0" type="mesh" mesh="cad_59_0" material="gim_hardware" pos="-0.071 0.07 0.0588794898" contype="0" conaffinity="0"/>
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
-        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
       <geom name="cad_09_0" type="mesh" mesh="cad_09_0" material="gim_spring" pos="-0.0534809567 0.01 -0.0107805682" contype="1" conaffinity="1"/>
       <geom name="cad_10_0" type="mesh" mesh="cad_10_0" material="gim_spring" pos="-0.0392454865 0.01 -0.00911584016" contype="1" conaffinity="1"/>
@@ -149,7 +149,7 @@
         </body>
       </body>
       <body name="right_thigh" pos="0 -0.1025 0.00828">
-        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
       <geom name="cad_33_0" type="mesh" mesh="cad_33_0" material="gim_spring" pos="-0.0534809567 -0.01 -0.0107805682" contype="1" conaffinity="1"/>
       <geom name="cad_34_0" type="mesh" mesh="cad_34_0" material="gim_spring" pos="-0.0392454865 -0.01 -0.00911584016" contype="1" conaffinity="1"/>

@@ -33,6 +33,8 @@ parts = {}
 for name, num, pos in geoms:
     num = int(num); pos = np.array([float(x) for x in pos.split()])
     V, cen, Ic = props(load(M/meshfile[name]))
+    # Battery placement comes from the model geom. The front-slot variant
+    # already moves cad_49_0 there, so do not apply its translation twice.
     parts[num] = (V, pos+cen, Ic)
 cat = {}
 for n in (13,14,35,36): cat[n] = 'motor'
@@ -69,4 +71,4 @@ if __name__ == '__main__':
         m, c, I = build(set(fs))
         print(k, 'frame parts', sorted(fs)); print(' mass', round(m,4), 'com', np.round(c,8)); print(' I', np.round(I,9).tolist())
         for n in fs: cat.pop(n, None)
-    print('lab: com -0.00509198 0.00012916 0.01377824  I diag 0.008962725 0.004829976 0.009367159')
+    print('battery placement follows cad_49_0 in gim_dynamic.xml')

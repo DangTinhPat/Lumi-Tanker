@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -40,6 +41,9 @@ struct Options {
   double run_for_s = 0.0;
   double wheel_delay_s = 0.050;
   double wheel_lag_s = 0.075;
+  double sensor_noise = 0.0;  // scale of documented synthetic sensor standard deviations
+  unsigned noise_seed = 1;
+  bool allow_model_mismatch = false;  // explicit plant-only robustness experiments
   bool realtime = false;
   bool lqr_prediction = true;
   bool gyro_hip_lead = true;
@@ -49,7 +53,8 @@ struct Options {
   double drive_max = 4.1888, plan_vmax = 0.0, ground_vmax = 0.0, track_margin = -1.0;
   double motor_reserve = -1.0, lateral_accel = -1.0;
   std::string start_key = "spawn_extended";   // --start-key NAME: the MJCF keyframe the robot starts in ("home" = the lying pose)
-  double wheel_torque = 0.13;   // --wheel-torque: the wheel driver's torque ceiling [N.m] (to find how little a maneuver needs)
+  double wheel_torque = 0.13;   // regular/rated cap; --wheel-torque overrides every phase [N.m]
+  bool wheel_torque_override = false;
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -77,6 +82,14 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--sensor-rate") out.sensor_hz = number(next(), "--sensor-rate");
     else if (arg == "--wheel-delay") out.wheel_delay_s = number(next(), "--wheel-delay");
     else if (arg == "--wheel-lag") out.wheel_lag_s = number(next(), "--wheel-lag");
+    else if (arg == "--sensor-noise") out.sensor_noise = number(next(), "--sensor-noise");
+    else if (arg == "--allow-model-mismatch") out.allow_model_mismatch = true;
+    else if (arg == "--noise-seed") {
+      const double value = number(next(), "--noise-seed");
+      if (value < 0 || value > 4294967295.0 || value != std::floor(value))
+        throw std::invalid_argument("invalid --noise-seed");
+      out.noise_seed = static_cast<unsigned>(value);
+    }
     else if (arg == "--command-port") {
       const auto port = std::stoul(next());
       if (port > 65535U) throw std::invalid_argument("invalid --command-port");
@@ -92,7 +105,10 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--ground-vmax") out.ground_vmax = number(next(), "--ground-vmax");
     else if (arg == "--track-margin") out.track_margin = number(next(), "--track-margin");
     else if (arg == "--start-key") out.start_key = next();
-    else if (arg == "--wheel-torque") out.wheel_torque = number(next(), "--wheel-torque");
+    else if (arg == "--wheel-torque") {
+      out.wheel_torque = number(next(), "--wheel-torque");
+      out.wheel_torque_override = true;
+    }
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
     else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
@@ -106,15 +122,20 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--help") {
       std::cout << "tap_mujoco_gim_v3 --model FILE [--rate HZ] [--sensor-rate HZ] "
                    "[--command-port PORT] [--wheel-delay SEC] [--wheel-lag SEC] "
+                   "[--wheel-torque 0..0.20] [--standup key=val,...] "
+                   "[--sensor-noise SCALE] [--noise-seed UINT] [--allow-model-mismatch] "
                    "[--no-lqr-prediction] [--virtual-hip-lead] [--jump key=val,...] [--at SEC:CMD] "
                    "[--realtime] [--run-for SEC]\n";
       std::exit(0);
     } else throw std::invalid_argument("unknown option: " + arg);
   }
   if (out.model.empty()) throw std::invalid_argument("--model is required");
+  if (out.sensor_noise < 0 || out.sensor_noise > 10)
+    throw std::invalid_argument("invalid --sensor-noise");
   if (out.physics_hz < 1000.0 || out.physics_hz > 4000.0 ||
       out.sensor_hz <= 0.0 || out.sensor_hz > out.physics_hz || out.run_for_s < 0.0 ||
-      out.wheel_delay_s < 0 || out.wheel_delay_s > .1 || out.wheel_lag_s < 0 || out.wheel_lag_s > .12)
+      out.wheel_delay_s < 0 || out.wheel_delay_s > .1 || out.wheel_lag_s < 0 || out.wheel_lag_s > .12 ||
+      out.wheel_torque <= 0.0 || out.wheel_torque > 0.20)
     throw std::invalid_argument("invalid simulation rate or duration");
   return out;
 }
@@ -123,13 +144,15 @@ class GimV3Runner {
  public:
   explicit GimV3Runner(Options options)
       : options_(std::move(options)), controller_(simulationControllerConfig(options_)) {
+    noise_rng_.seed(options_.noise_seed);
     char error[1024]{};
     model_ = mj_loadXML(options_.model.c_str(), nullptr, error, sizeof(error));
     if (!model_) throw std::runtime_error(std::string("MuJoCo load failed: ") + error);
     model_->opt.timestep = 1.0 / options_.physics_hz;
     data_ = mj_makeData(model_);
     if (!data_) throw std::runtime_error("MuJoCo data allocation failed");
-    // (the MJCF actuator range, 0.13 N.m, still caps it from above)
+    // Base cap 0.13 N.m; recovery can request a bounded 0.20 N.m window.
+    // --wheel-torque explicitly overrides both base and recovery phases.
     for (std::size_t side = 0; side < wheels_.size(); ++side) {
       wheels_[side] = robot_control::SimBl4012Wheel({static_cast<std::uint8_t>(side + 1), static_cast<float>(options_.wheel_torque)});
     }
@@ -142,7 +165,11 @@ class GimV3Runner {
     std::cout << "READY|backend=mujoco_gim_v3|model=GIM6010-8|controller=V3Controller"
               << "|leg_actuator=current_delta_i|physics_hz=" << options_.physics_hz
               << "|control_hz=" << options_.sensor_hz
-              << "|ground_truth_to_controller=0|mass_kg=" << geometry::total_mass_kg
+              << "|ground_truth_to_controller=0|wheel_regular_limit_nm=" << options_.wheel_torque
+              << "|wheel_peak_limit_nm=" << (options_.wheel_torque_override ? options_.wheel_torque : 0.20)
+              << "|mass_kg=" << geometry::total_mass_kg
+              << "|plant_mass_kg=" << mj_getTotalmass(model_)
+              << "|sensor_noise=" << options_.sensor_noise << "|noise_seed=" << options_.noise_seed
               << std::endl;
   }
 
@@ -173,9 +200,26 @@ class GimV3Runner {
     int actuator = -1;
   };
 
-  // Simulation-only: the v3.5 jump is always enabled here; --jump overrides.
+  // Simulation-only: enable autonomous recovery; --standup overrides.
   static void applyStandUpSpec(tap_fw::v3::StandUp::Config& su, const std::string& spec) {
     su.enabled = true;
+    su.hold_at_kneel = false;
+    su.hold_after_flip = false;
+    su.overlap_after_lift = true;
+    su.fold_rate_rad_s = 0.80F;
+    su.flip_hip_rate_max_rad_s = 3.00F;
+    su.flip_pitch_kp_rad_s_per_rad = 10.0F;
+    su.fold_pitch_limit_rad = 0.80F;
+    su.catch_body_gain = 4.0F;
+    su.catch_body_damping_s = 0.5F;
+    su.catch_hip_rate_max_rad_s = 2.0F;
+    su.catch_wheel_max_rad_s = 16.0F;
+    su.catch_accel_max = 3.0F;
+    su.catch_speed_gain = 0.0F;  // LQR brakes translation after the capture gate
+    su.catch_blend_s = 0.08F;
+    su.catch_settle_s = 0.02F;
+    su.catch_speed_tol_m_s = 0.7F;
+    su.catch_wheel_peak_s = 0.6F;
     std::stringstream list(spec);
     std::string item;
     while (std::getline(list, item, ',')) {
@@ -183,34 +227,43 @@ class GimV3Runner {
       if (eq == std::string::npos) continue;
       const std::string key = item.substr(0, eq);
       const float v = std::stof(item.substr(eq + 1));
-      if (key == "hold") su.hold_s = v;
-      else if (key == "goal") su.hip_goal_offset_rad = v;
-      else if (key == "knee") su.knee_end_rad = v;
-      else if (key == "krate") su.knee_rate_rad_s = v;
-      else if (key == "kdelay") su.knee_delay_s = v;
-      else if (key == "rate1") su.hip_rate1_rad_s = v;
-      else if (key == "mid") su.hip_mid_rad = v;
-      else if (key == "rate2") su.hip_rate2_rad_s = v;
-      else if (key == "woff") su.wheels_off = v > 0.5F;
-      else if (key == "wfree") su.wheel_free = v > 0.5F;
-      else if (key == "push") su.wheel_push_rad_s = v;
-      else if (key == "wdelay") su.wheel_delay_s = v;
-      else if (key == "wramp") su.wheel_ramp_s = v;
-      else if (key == "wgain") su.wheel_lean_gain = v;
-      else if (key == "wmax") su.wheel_max_rad_s = v;
-      else if (key == "catch_lean") su.catch_lean_rad = v;
-      else if (key == "catch_rate") su.catch_rate_rad_s = v;
-      else if (key == "catch_hip") su.catch_hip_tol_rad = v;
-      else if (key == "catch_hold") su.catch_hold_s = v;
-      else if (key == "lvl_kp") su.level_kp = v;
-      else if (key == "lvl_kd") su.level_kd = v;
-      else if (key == "lvl_max") su.level_lean_max_rad = v;
-      else if (key == "lvl_rate") su.level_rate_rad_s = v;
-      else if (key == "lvl_pitch") su.level_done_pitch_rad = v;
-      else if (key == "fall") su.fall_lean_rad = v;
+      if (key == "fold_rate") su.fold_rate_rad_s = v;
+      else if (key == "fold_travel") su.fold_travel_rad = v;
+      else if (key == "fold_direction") su.fold_direction = v;
+      else if (key == "fold_pitch_limit") su.fold_pitch_limit_rad = v;
+      else if (key == "hold_at_kneel") su.hold_at_kneel = v >= 0.5F;
+      else if (key == "hold_after_flip") su.hold_after_flip = v >= 0.5F;
+      else if (key == "overlap_after_lift") su.overlap_after_lift = v >= 0.5F;
+      else if (key == "lift_clearance") su.lift_clearance_m = v;
+      else if (key == "lift_progress") su.lift_progress_rad = v;
+      else if (key == "lift_confirm") su.lift_confirm_s = v;
+      else if (key == "catch_blend") su.catch_blend_s = v;
+      else if (key == "flip_kp") su.flip_pitch_kp_rad_s_per_rad = v;
+      else if (key == "flip_kd") su.flip_pitch_kd = v;
+      else if (key == "flip_rate") su.flip_hip_rate_max_rad_s = v;
+      else if (key == "flip_travel") su.flip_travel_max_rad = v;
+      else if (key == "pitch_tol") su.pitch_target_tol_rad = v;
+      else if (key == "pitch_limit") su.pitch_limit_rad = v;
+      else if (key == "catch_accel_gain") su.catch_accel_gain = v;
+      else if (key == "catch_accel_damping") su.catch_accel_damping = v;
+      else if (key == "catch_speed_gain") su.catch_speed_gain = v;
+      else if (key == "catch_accel_max") su.catch_accel_max = v;
+      else if (key == "catch_lead") su.catch_wheel_lead_s = v;
+      else if (key == "catch_hip_gain") su.catch_hip_gain = v;
+      else if (key == "catch_hip_damping") su.catch_hip_damping_s = v;
+      else if (key == "catch_body_gain") su.catch_body_gain = v;
+      else if (key == "catch_body_damping") su.catch_body_damping_s = v;
+      else if (key == "catch_peak") su.catch_wheel_peak_s = v;
+      else if (key == "kneel_hold") su.kneel_hold_s = v;
+      else if (key == "catch_hip_accel") su.catch_hip_accel_rad_s2 = v;
+      else if (key == "catch_capture_tol") su.catch_capture_tol_rad = v;
+      else if (key == "catch_speed_tol") su.catch_speed_tol_m_s = v;
+      else if (key == "catch_settle") su.catch_settle_s = v;
+      else if (key == "catch_rate_max") su.catch_hip_rate_max_rad_s = v;
+      else if (key == "catch_travel") su.catch_hip_travel_rad = v;
+      else if (key == "catch_wheel_max") su.catch_wheel_max_rad_s = v;
+      else if (key == "catch_lean_tol") su.catch_lean_tol_rad = v;
       else if (key == "timeout") su.timeout_s = v;
-      else if (key == "grace") su.grace_s = v;
-      else if (key == "grace_fall") su.grace_fall_pitch_rad = v;
       else throw std::invalid_argument("unknown --standup key: " + key);
     }
   }
@@ -333,6 +386,8 @@ class GimV3Runner {
     config.com_height_m = tap_fw::v3::LegHeight::forKnee(config.initial_knee_rad).com_above_axle_m;
     config.lqr_inertia_length = true;
     config.lqr.max_pendulum_length_m = 0.24F;
+    // Keep normal balance authority at the 0.13 N.m rated/base cap; only the
+    // short rocking phases below are allowed the separately confirmed peak.
     config.lqr.max_ground_accel_m_s2 = std::min(config.lqr.wheel_ground_mu * 9.81F,
         2.0F * 0.13F / (geometry::wheel_radius_m * geometry::total_mass_kg));
     config.lqr_prediction = {options.lqr_prediction, static_cast<float>(options.wheel_delay_s),
@@ -354,6 +409,9 @@ class GimV3Runner {
     config.tier.sus_adaptive = true;
     config.trim_acc = false;
     applyJumpSpec(config.jump, options.jump_spec);
+    // Use the same calibrated actuator lag as the balance predictor; an
+    // explicit catch_lead override permits model-mismatch experiments.
+    config.standup.catch_wheel_lead_s = static_cast<float>(options.wheel_lag_s);
     applyStandUpSpec(config.standup, options.standup_spec);
     if (options.plan_vmax > 0.0) config.tier.plan_vmax_m_s = static_cast<float>(options.plan_vmax);
     // motor_reserve < 0 keeps the default; 0 still caps at the no-load speed; >= 1.5 turns the envelope off.
@@ -419,7 +477,8 @@ class GimV3Runner {
         throw std::runtime_error("GIM IMU must measure acceleration/gyro at its site");
     }
     if (model_->nq != 13 || model_->nv != 12 || model_->nu != 6 ||
-        model_->nbody != 8 || std::abs(mj_getTotalmass(model_) - 3.02) > 1.0e-5)
+        model_->nbody != 8 || (!options_.allow_model_mismatch &&
+          std::abs(mj_getTotalmass(model_) - 3.02) > 1.0e-5))
       throw std::runtime_error("GIM MJCF joint or mass contract mismatch");
   }
 
@@ -511,10 +570,20 @@ class GimV3Runner {
     else if (op == "STOP") command_.forward_m_s = command_.yaw_rad_s = 0.0F;
     else if (op == "GO") go_pending_ = true;
     else if (op == "STANDUP") {          // the rocking stand-up from the lying pose (start with --start-key home)
-      if (!estop_ && !enable_request_) standup_pending_ = true;
+      if (!estop_ && !enable_request_) {
+        standup_pending_ = true;
+        // Body/root height above the floor, matching the GUI HEIGHT command.
+        // The rocking phase keeps its own leg targets; this request takes
+        // effect after hand-over to balance instead of extending to the stop.
+        constexpr float kStandUpBodyHeightM = 0.130F;
+        command_.height_m = std::clamp(
+            kStandUpBodyHeightM - geometry::wheel_radius_m + geometry::origins[0].z,
+            tap_fw::v3::LegHeight::minHeight(), controller_.supportedMaxHeight());
+      }
       stood_up_ = !estop_;
       enable_request_ = true;
     }
+    else if (op == "FLIP") standup_advance_pending_ = true;
     else if (op == "JUMP") {
       float distance = 0.0F;      // "JUMP" = the default hop, "JUMP 0" = vertical, "JUMP 0.05" = hop 5 cm
       jump_forward_m_ = (stream >> distance && std::isfinite(distance)) ? distance
@@ -603,7 +672,7 @@ class GimV3Runner {
     wheel_enable_elapsed_s_ = 0;
     wheel_target_rad_s_.fill(0);
     wheel_speed_reference_rad_s_.fill(0);
-    start_pending_ = go_pending_ = jump_pending_ = standup_pending_ = stood_up_ = false;
+    start_pending_ = go_pending_ = jump_pending_ = standup_pending_ = standup_advance_pending_ = stood_up_ = false;
     command_ = {};
     command_.height_m = spawn_pose.axle_below_hip_m;
     output_ = {};
@@ -619,6 +688,11 @@ class GimV3Runner {
     imu_seeded_ = false;
   }
 
+  float sensorNoise(float sigma) {
+    if (options_.sensor_noise == 0.0 || !physics_started_) return 0.0F;
+    return static_cast<float>(options_.sensor_noise) * sigma * noise_normal_(noise_rng_);
+  }
+
   void updateController() {
     const float dt = static_cast<float>(1.0 / options_.sensor_hz);
     const std::uint64_t now_us = static_cast<std::uint64_t>(sim_time_s_ * 1.0e6);
@@ -629,8 +703,8 @@ class GimV3Runner {
       accel[2] = 9.80665F;
     } else {
       for (int i = 0; i < 3; ++i) {
-        accel[static_cast<std::size_t>(i)] = static_cast<float>(sensor(accel_sensor_, i));
-        gyro[static_cast<std::size_t>(i)] = static_cast<float>(sensor(gyro_sensor_, i));
+        accel[static_cast<std::size_t>(i)] = static_cast<float>(sensor(accel_sensor_, i)) + sensorNoise(.03F);
+        gyro[static_cast<std::size_t>(i)] = static_cast<float>(sensor(gyro_sensor_, i)) + sensorNoise(.005F);
       }
     }
     const auto velocity = controller_.imuVelocity();
@@ -656,12 +730,12 @@ class GimV3Runner {
       const std::size_t hip = 3 * side;
       const std::size_t knee = hip + 1;
       const std::size_t wheel = hip + 2;
-      in.hip_rad[side] = static_cast<float>(sensor(joints_[hip].position_sensor));
-      in.knee_rad[side] = static_cast<float>(sensor(joints_[knee].position_sensor));
-      in.hip_rate_rad_s[side] = static_cast<float>(sensor(joints_[hip].velocity_sensor));
-      in.knee_rate_rad_s[side] = static_cast<float>(sensor(joints_[knee].velocity_sensor));
-      in.wheel_rad_s[side] = static_cast<float>(sensor(joints_[wheel].velocity_sensor));
-      in.wheel_pos_rad[side] = static_cast<float>(sensor(joints_[wheel].position_sensor));
+      in.hip_rad[side] = static_cast<float>(sensor(joints_[hip].position_sensor)) + sensorNoise(.0005F);
+      in.knee_rad[side] = static_cast<float>(sensor(joints_[knee].position_sensor)) + sensorNoise(.0005F);
+      in.hip_rate_rad_s[side] = static_cast<float>(sensor(joints_[hip].velocity_sensor)) + sensorNoise(.01F);
+      in.knee_rate_rad_s[side] = static_cast<float>(sensor(joints_[knee].velocity_sensor)) + sensorNoise(.01F);
+      in.wheel_rad_s[side] = static_cast<float>(sensor(joints_[wheel].velocity_sensor)) + sensorNoise(.03F);
+      in.wheel_pos_rad[side] = static_cast<float>(sensor(joints_[wheel].position_sensor)) + sensorNoise(.0005F);
       in.leg_chain_rad += 0.5F * (in.hip_rad[side] + in.knee_rad[side]);
       in.knee_current_a[side] = leg_measured_current_[2 * side + 1];
     }
@@ -677,6 +751,8 @@ class GimV3Runner {
     if (cmd.start) start_pending_ = false;
     cmd.standup = standup_pending_ && in.sensors_ok;
     if (cmd.standup) standup_pending_ = false;
+    cmd.standup_advance = standup_advance_pending_;
+    standup_advance_pending_ = false;
     cmd.go = go_pending_;
     go_pending_ = false;
     cmd.jump = jump_pending_ && output_.state == V3Controller::State::Balancing;
@@ -686,7 +762,18 @@ class GimV3Runner {
     cmd.forward_m_s = enable_request_ && !cmd.disable ? command_.forward_m_s : 0.0F;
     cmd.yaw_rad_s = enable_request_ && !cmd.disable ? command_.yaw_rad_s : 0.0F;
     cmd.height_m = command_.height_m;
+    const auto previous_state = output_.state;
     output_ = controller_.update(in, cmd);
+    if (previous_state == V3Controller::State::StandUp &&
+        output_.state == V3Controller::State::Balancing) {
+      // Emit at the actual control tick: 50 Hz STATE samples are too sparse
+      // to check velocity continuity while the robot is accelerating.
+      std::cout << "RECOVERY_HANDOFF|t=" << sim_time_s_
+                << "|ground_velocity=" << controller_.groundVelocity()
+                << "|plan_v=" << controller_.planSpeed()
+                << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s
+                << std::endl;
+    }
     if (output_.jump_phase == 4 && last_jump_phase_ == 3) {
       const auto& f = controller_.jump().flightPlan();
       std::cout << "JUMP_FLIGHT|ok=" << f.ok << "|reason=" << f.reason << "|v_m_s=" << f.vertical_speed_m_s
@@ -790,6 +877,10 @@ class GimV3Runner {
     // Each measured Iq channel follows its own simulated actuator state.
     for (std::size_t side = 0; side < 2; ++side) {
       auto& wheel = wheels_[side];
+      const bool recovery_peak = output_.state == V3Controller::State::StandUp &&
+          controller_.standupState().wheel_peak_requested && !options_.wheel_torque_override;
+      const float torque_cap = recovery_peak ? 0.20F : static_cast<float>(options_.wheel_torque);
+      wheel.setMaxTorqueNm(torque_cap);
       // Reported wheel lag is speed-response lag, not motor-current lag.
       const double alpha = options_.wheel_lag_s > 0 ? dt / (options_.wheel_lag_s + dt) : 1;
       if (active && output_.wheels_enabled) {
@@ -872,7 +963,15 @@ class GimV3Runner {
               << "|leg_iq_lh=" << leg_measured_current_[0]
               << "|leg_iq_lk=" << leg_measured_current_[1]
               << "|jump_phase=" << output_.jump_phase
-              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|wheel_tq_l=" << data_->ctrl[joints_[2].actuator] << "|wheel_tq_r=" << data_->ctrl[joints_[5].actuator] << "|su_phase=" << static_cast<int>(controller_.standupState().phase) << "|su_lean=" << controller_.standupLean() << "|su_hip=" << controller_.standupState().hip_target_rad << "|su_wheel=" << controller_.standupState().wheel_rad_s << "|sus_dz=" << controller_.suspensionOffset() << "|sus_db=" << controller_.suspensionDeadband() << "|roll_est=" << controller_.rollEstimate() << "|roll_ref=" << controller_.rollReference() << "|roll_dh=" << controller_.rollSideHeight() << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
+              << "|td_off=" << controller_.jumpTouchdownOffset() << "|td_target=" << controller_.jumpTouchdownTarget() << "|td_pred=" << controller_.jumpTouchdownPredicted() << "|lqr_cmd_v=" << controller_.lqrDebug().commanded_ground_velocity_m_s << "|lqr_accel=" << controller_.lqrDebug().optimal_command_m_s << "|lqr_vref=" << controller_.lqrDebug().lqr_velocity_reference_m_s << "|lqr_v_seen=" << controller_.lqrSpeedSeen() << "|hop_drive=" << controller_.jumpDriveSpeed() << "|plan_v=" << controller_.planSpeed() << "|aac_air=" << (controller_.airborneState().contact == tap_fw::v3::AirborneEstimator::Contact::Air ? 1 : 0) << "|aac_left=" << controller_.airborneState().time_left_s << "|aac_l=" << controller_.airborneState().angular_momentum << "|aac_vx=" << controller_.airborneState().horizontal_speed_m_s << "|to_lean=" << controller_.takeoffState().lean_rad << "|wheel_tq_l=" << data_->ctrl[joints_[2].actuator] << "|wheel_tq_r=" << data_->ctrl[joints_[5].actuator] << "|su_phase=" << static_cast<int>(controller_.standupState().phase) << "|su_phase_name=" << tap_fw::v3::StandUp::name(controller_.standupState().phase) << "|su_lean=" << controller_.standupLean() << "|su_hip=" << controller_.standupState().hip_target_rad << "|su_wheel=" << controller_.standupState().wheel_rad_s
+              << "|su_capture=" << controller_.standupState().capture_point_rad
+              << "|su_rate=" << controller_.standupState().capture_rate_rad_s
+              << "|su_hip_rate=" << controller_.standupState().hip_rate_rad_s
+              << "|su_clearance=" << controller_.standupState().body_clearance_m
+              << "|su_clearance_valid=" << controller_.standupState().body_clearance_valid
+              << "|su_blend=" << controller_.standupState().catch_blend
+              << "|su_peak=" << controller_.standupState().wheel_peak_requested
+              << "|su_elapsed=" << controller_.standupState().phase_elapsed_s << "|sus_dz=" << controller_.suspensionOffset() << "|sus_db=" << controller_.suspensionDeadband() << "|roll_est=" << controller_.rollEstimate() << "|roll_ref=" << controller_.rollReference() << "|roll_dh=" << controller_.rollSideHeight() << "|to_err=" << controller_.takeoffState().predicted_error_rad << "|l_est=" << controller_.jumpMomentum().angular_momentum << "|jump_vz=" << controller_.jumpVz() << "|jump_az=" << controller_.jumpAz()
               << "|cmd_hip=" << output_.leg_hip_offset_rad << "|cmd_knee=" << output_.leg_knee_offset_rad
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)
@@ -918,6 +1017,8 @@ class GimV3Runner {
   mjModel* model_ = nullptr;
   mjData* data_ = nullptr;
   V3Controller controller_;
+  std::mt19937 noise_rng_;
+  std::normal_distribution<float> noise_normal_{0.0F, 1.0F};
   V3Controller::Command command_{};
   V3Controller::Output output_{};
   robot_control::ImuStateEstimator estimator_;
@@ -942,7 +1043,8 @@ class GimV3Runner {
   bool enable_request_ = false, disable_request_ = false, estop_ = false;
   std::size_t next_scheduled_ = 0;
   int last_jump_phase_ = 0;
-  bool start_pending_ = false, go_pending_ = false, jump_pending_ = false, standup_pending_ = false, imu_seeded_ = false;
+  bool start_pending_ = false, go_pending_ = false, jump_pending_ = false;
+  bool standup_pending_ = false, standup_advance_pending_ = false, imu_seeded_ = false;
   bool stood_up_ = false;   // a lying start: STANDUP was given (ENABLE is refused until then)
   float jump_forward_m_ = std::numeric_limits<float>::quiet_NaN();
   bool physics_started_ = false;

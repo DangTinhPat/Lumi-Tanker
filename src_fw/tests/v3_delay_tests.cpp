@@ -19,6 +19,11 @@ int main() {
     (void)a.predict(quiet, cfg, .002F, .1F, 0, 2);
     a.record(.2F);
   }
+  Predictor recovery;
+  for (int i = 0; i < 25; ++i) recovery.record(.2F, cfg, .002F);
+  // A new owner must see commands issued during recovery, not an empty queue.
+  assert(recovery.predict(quiet, cfg, .002F, .1F, 0, 2) ==
+         a.predict(quiet, cfg, .002F, .1F, 0, 2));
   const auto accelerating = a.predict(quiet, cfg, .002F, .1F, 0, 2);
   assert(accelerating[0] > 0 && accelerating[2] > 0);
   assert(accelerating[1] < 0 && accelerating[3] < 0);

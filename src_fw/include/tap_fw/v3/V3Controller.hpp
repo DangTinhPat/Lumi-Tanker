@@ -28,7 +28,7 @@ namespace tap_fw::v3 {
 // (ARMED) -> it engages after Engage::armed_go_s or at the first tip (or on GO).
 class V3Controller {
  public:
-  // StandUp: the rocking stand-up from the lying pose (Command::standup, StandUp.hpp); it hands over to Balancing.
+  // StandUp: fold, level the body, then hand off to V3 balance for COM capture.
   enum class State { Idle, Locking, Ready, Balancing, Fault, StandUp };
 
   // Lqr (SET algo 0) with the tiers is the shipped balancer. Pid (SET algo 1) is the
@@ -683,6 +683,7 @@ class V3Controller {
     bool disable = false;     // level: stop everything
     bool jump = false;        // edge: start the v3.5 jump (Config::jump.enabled)
     bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
+    bool standup_advance = false;  // edge: begin the pitch-to-level phase from Kneeling
     float jump_forward_m = 0.0F;  // with jump: horizontal distance of the hop (NaN = the default hop, 0 = vertical, < 0 refused)
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
@@ -956,7 +957,6 @@ class V3Controller {
   LegPose pose_{};
   JumpSequence jump_{};
   StandUp standup_{};
-  std::uint64_t standup_grace_until_us_ = 0U;   // wider fall limits until then (after a stand-up hand-over)
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
   AirborneEstimator aac_est_{};
@@ -1202,7 +1202,7 @@ class V3Controller {
   bool still_quiet_ = false;
   float armed_pitch_ = 0.0F;
 
-  void engageBalance(const Input& in, float seed);
+  void engageBalance(const Input& in, float seed, bool preserve_wheel_history = false);
   void heldRezero(const Input& in);
   [[nodiscard]] float releaseBalance(const Input& in) const;
   void applyJump(const Input& raw, const Input& in, const Command& cmd, Output& out);

@@ -81,6 +81,7 @@ class NativeDashboard:
         self._posture_send_period_ms = 120
         self._posture_quiet_since = None
         self._show_waiting = False
+        self._standup_active = False
         self._status_window = None
         self._log_window = None
         self.telemetry = tk.StringVar(value="No telemetry")
@@ -726,8 +727,7 @@ class NativeDashboard:
             self.show_started_s = None
 
     def start_standup(self):
-        """STANDUP: from the lying pose (sim started with TAP_SIM_START=home) the legs fold and extend, the wheels
-        roll free, the CoM comes over the axle and the V3 balancer takes over, then the body rises to full height."""
+        """One command starts the core's fold, pause, flip and balance capture."""
         if not self.backend.running or self.estop:
             self.jump_status.set("Cần Start SIM (mở bằng TAP_SIM_START=home) trước")
             return
@@ -736,7 +736,8 @@ class NativeDashboard:
         self._cancel_pending_posture()
         self.backend.command_standup()
         self.enabled = True
-        self.jump_status.set("Đã gửi STANDUP (gập hông, bánh lăn tự do, bàn giao cân bằng, duỗi chân)")
+        self._standup_active = True
+        self.jump_status.set("Đang gập hip vào tư thế quỳ; sẽ nghỉ 1 giây rồi tự lật thân theo IMU")
 
     def start_jump(self, forward_m=0.0):
         """JUMP [m]: the controller plans the dip, thrust, tuck and landing from its own FK/IK;
@@ -754,6 +755,7 @@ class NativeDashboard:
             self.jump_status.set("Đã gửi JUMP (tự nhún, nhảy, co/duỗi chân, tiếp đất)")
 
     def stop_skill(self):
+        self._standup_active = False
         if self.vision_process.running:
             self.stop_vision("Vision: dừng do lệnh operator")
         if self.dance_active:
@@ -794,6 +796,26 @@ class NativeDashboard:
         self.backend.drain()
         self._tick_vision()
         fields = self.backend.telemetry
+        if not self.backend.running or self.estop:
+            self._standup_active = False
+        elif self._standup_active:
+            phase = fields.get("su_phase_name", "")
+            if fields.get("mode") == "Fault" or phase == "Failed":
+                self.jump_status.set("Đứng dậy đã dừng: " + fields.get("fault_reason", "lỗi điều khiển"))
+                self._standup_active = False
+            elif fields.get("mode") == "Balancing":
+                self.jump_status.set("Đã bắt tâm — đang cân bằng và nâng lên độ cao yêu cầu")
+                self._standup_active = False
+            else:
+                status = {
+                    "Folding": "Bước 1: gập hip vào tư thế quỳ",
+                    "Kneeling": "Bước 2: giữ quỳ 1 giây",
+                    "Pitching": "Bước 3: ngẩng nhẹ để thân rời sàn",
+                    "Flipped": "Đã ngẩng thân — đang giữ theo cấu hình chẩn đoán",
+                    "Catching": "Bước 3 + 4: tiếp nối ngẩng thân, phối hợp hip và bánh bắt tâm",
+                }.get(phase)
+                if status:
+                    self.jump_status.set(status)
         if (self._posture_last_sent_height is not None and
                 (fields.get("height_rejected") == "1" or
                  (fields.get("height_request") == "0" and

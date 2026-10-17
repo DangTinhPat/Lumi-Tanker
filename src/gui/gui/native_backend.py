@@ -266,8 +266,12 @@ class NativeBackend:
         return bool(os.environ.get("TAP_SIM_START"))
 
     def command_standup(self) -> None:
-        """Rocking stand-up from the lying pose (start the sim with TAP_SIM_START=home)."""
+        """Start autonomous fold/pause/flip/capture from TAP_SIM_START=home."""
         self.send("STANDUP")
+
+    def command_standup_flip(self) -> None:
+        """Start the pitch-to-level phase from the held kneeling pose."""
+        self.send("FLIP")
 
     def command_jump(self, forward_m: float = 0.0) -> None:
         """v3.5 jump: vertical, or forward over forward_m metres (run-up, jump, land, stop)."""

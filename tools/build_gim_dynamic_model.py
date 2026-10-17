@@ -11,6 +11,9 @@ MODEL_DIR = ROOT / "src/tap_sim/model"
 MANIFEST = MODEL_DIR / "gim_components.json"
 ASSETS = MODEL_DIR / "gim_components"
 OUTPUT = MODEL_DIR / "gim_dynamic.xml"
+# The STEP assembly places its only battery in the rear slot. The matching
+# front slot is 114 mm ahead; this variant transfers the same 210 g there.
+BATTERY_FRONT_OFFSET_M = 0.114
 
 BODY = {7, 8, 13, 14, 15, 17, 18, 19, 20, 21, 22, 24,
         31, 32, 35, 36, 37, 39, 40, 44, 45, 46, 47,
@@ -51,7 +54,9 @@ def main():
     meshes, geoms = [], {name: [] for name in GROUPS}
     for number in sorted(parts):
         part = parts[number]
-        center = part["center_m"]
+        center = list(part["center_m"])
+        if number == 49:
+            center[0] += BATTERY_FRONT_OFFSET_M
         category = part["category"]
         stem = part["mesh_stem"]
         files = sorted(ASSETS.glob(stem + "_*.stl"))
@@ -81,7 +86,9 @@ def main():
     for name, items in geoms.items():
         fixed = []
         for number, line in items:
-            center = parts[number]["center_m"]
+            center = list(parts[number]["center_m"])
+            if number == 49:
+                center[0] += BATTERY_FRONT_OFFSET_M
             local = [center[i] - origins[name][i] for i in range(3)]
             fixed.append(line.replace(f'pos="{vec(center)}"', f'pos="{vec(local)}"'))
         geoms[name] = fixed
@@ -130,11 +137,11 @@ def main():
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.00509108 0.00012802 0.01378601" mass="2.4" fullinertia="0.00850153 0.00430976 0.00930032 -0.0000167390 -0.000150363 0.0000044670"/>
+      <inertial pos="0.00488392 0.00012802 0.01378601" mass="2.4" fullinertia="0.008501529 0.004314721 0.009305282 -0.0000136742 0.0001729831 0.0000044670"/>
 {body_geom}
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
-        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
 {left_thigh}
         <body name="left_shin" pos="-0.09816 0.0105 -0.01908">
@@ -150,7 +157,7 @@ def main():
         </body>
       </body>
       <body name="right_thigh" pos="0 -0.1025 0.00828">
-        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
+        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
 {right_thigh}
         <body name="right_shin" pos="-0.09816 -0.0105 -0.01908">
@@ -178,8 +185,8 @@ def main():
     <motor name="left_knee_torque" joint="knee_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_hip_torque" joint="hip_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_knee_torque" joint="knee_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
-    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.13 0.13"/>
-    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.20 0.20"/>
+    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.20 0.20"/>
   </actuator>
   <sensor>
     <accelerometer name="mpu6500_accel" site="imu_site"/>

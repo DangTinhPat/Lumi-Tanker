@@ -1,6 +1,8 @@
 // Derived from ROBOT (GIM6010-8).STEP and the adopted mass assignments.
-// Body inertial aggregates the assigned masses at their CAD module locations;
-// mass-distribution assumptions are recorded in PHYSICS.md.
+// Body inertial aggregates the assigned masses with the 210 g battery moved
+// from the rear STEP slot to the symmetric front slot; this proposed physical
+// placement must be matched on hardware before deploying this geometry.
+// Mass-distribution assumptions are recorded in PHYSICS.md.
 #pragma once
 #include <array>
 namespace robot_control::geometry {
@@ -8,7 +10,7 @@ struct Part { float mass, x, z, iyy; };
 struct Origin { float x, y, z; };
 // Order: body, left thigh/shin/wheel, right thigh/shin/wheel.
 inline constexpr std::array<Part, 7> parts{{
-    {2.40F, -0.00509108F, 0.01378601F, 0.00430976F},
+    {2.40F,  0.00488392F, 0.01378601F, 0.004314721F},
     {0.05F, -0.04908F, -0.00954F, 0.0000417F},
     {0.24F,  0.08998F, -0.01749F, 0.0002200F},
     {0.02F,  0.00000F,  0.00000F, 0.0000160F},

@@ -1,94 +1,270 @@
 #!/usr/bin/env python3
-"""Rocking stand-up on the GIM model: from the lying `home` pose to balanced at full height, then driving.
-
-The runner starts in the `home` keyframe (--start-key home, physics on from the first tick), STANDUP makes
-V3Controller fold the hips with the wheels rolling free, hand over to its balancer when the CoM is over the axle,
-and raise the body to full height. Wheel torque is the real 0.13 N.m. Simulation evidence only (the GIM
-geometry is not yet verified against the STEP).
-"""
+"""Sensor-only recovery; ground-truth contact/CoM checks are offline scoring."""
 import argparse
-import subprocess
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import math
+import random
 from pathlib import Path
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 
+import mujoco
 from native_runner_contract_test import fields
 
-BALANCE_BY_S = 6.0          # the hand-over happens at ~3.5 s
-FULL_KNEE_RAD = 1.6         # standing at full height (the knee is 1.69 there)
-FINAL_PITCH_RAD = 0.05
-DRIVE_MIN_M = 0.5           # 0.3 m/s for 4 s from rest
-FINAL_SPEED_M_S = 0.05
-RUN_S = 30.0
-STAND_CHECK_S = 19.0        # low-wheel-torque cases are scored here (standing, before any drive command)
+
+def run(args, name, extra, duration=24.0, start=.2, model=None):
+    command = [str(args.runner), "--model", str(model or args.model), "--rate", "3000",
+               "--run-for", str(duration), "--start-key", "home", "--roll", "1",
+               "--at", f"{start}:STANDUP", *extra]
+    result = subprocess.run(command, input="", capture_output=True, text=True,
+                            timeout=180, check=False)
+    (args.evidence / f"{name}.log").write_text(result.stdout)
+    assert result.returncode == 0, f"{name}: runner exited {result.returncode}: {result.stderr}"
+    states = [fields(line) for line in result.stdout.splitlines() if line.startswith("STATE|")]
+    views = [fields(line) for line in result.stdout.splitlines() if line.startswith("VIEW|")]
+    assert states and views, f"{name}: missing telemetry"
+    assert all(s["ground_truth_to_controller"] == "0" for s in states)
+    if any(s["mode"] == "Balancing" for s in states):
+        events = [fields(line) for line in result.stdout.splitlines()
+                  if line.startswith("RECOVERY_HANDOFF|")]
+        assert len(events) == 1, f"{name}: missing handoff tick"
+        event = events[0]
+        for key in ("plan_v", "lqr_vref"):
+            assert abs(float(event[key]) - float(event["ground_velocity"])) < .001, \
+                f"{name}: {key} lost rolling handoff velocity"
+    return name, states, views, command
 
 
-def W(delay, lag):
-    return ["--wheel-delay", str(delay), "--wheel-lag", str(lag)]
+def score(model, result):
+    name, states, views, command = result
+    assert not any(s["mode"] == "Fault" for s in states), f"{name}: Fault"
+    first = {}
+    for s in states:
+        first.setdefault(s["su_phase_name"], s)
+    assert {"Folding", "Kneeling", "Pitching", "Catching", "Support"} <= first.keys(), name
+    pause = float(first["Pitching"]["t"]) - float(first["Kneeling"]["t"])
+    assert .99 <= pause <= 1.04, f"{name}: kneeling pause {pause}"
+    balance = [s for s in states if s["mode"] == "Balancing"]
+    assert balance and float(balance[0]["t"]) < 9, f"{name}: failed to capture promptly"
+    handoff = float(balance[0]["t"])
+    catch_start = float(first["Catching"]["t"])
+    assert handoff - catch_start < 2.0, f"{name}: capture took too long"
+    assert all(s["mode"] == "Balancing" for s in states if float(s["t"]) >= handoff)
+    assert abs(float(first["Support"]["su_capture"])) <= .061, f"{name}: divergent handoff"
+    tail = [s for s in states if float(s["t"]) >= 22]
+    assert tail and max(abs(float(s["pitch"])) for s in tail) < .05, f"{name}: body not level"
+    assert max(abs(float(s["ground_velocity"])) for s in tail) < .08, f"{name}: did not stop"
+    assert max(abs(float(s[k])) for s in states for k in ("wheel_tq_l", "wheel_tq_r")) <= .20001
+    # Telemetry is emitted before the next physics step, so allow one 20 ms
+    # sample at cap transitions. The controller's exact expiry is host-tested.
+    base_only = [s for s in states if float(s["t"]) < catch_start-.02 or
+                 float(s["t"]) > min(catch_start+.6, handoff)+.04]
+    assert max(abs(float(s[k])) for s in base_only for k in ("wheel_tq_l", "wheel_tq_r")) <= .13001
+    peak = [s for s in states if s.get("su_peak") == "1"]
+    assert peak and all(s["su_phase_name"] == "Catching" for s in peak)
+    peak_window = float(peak[-1]["t"])-float(peak[0]["t"])+.02
+    assert peak_window <= .621, f"{name}: peak window did not expire"
+    catch = [s for s in states if s["su_phase_name"] == "Catching"]
+    hip_rates = [float(s["su_hip_rate"]) for s in catch]
+    assert max(hip_rates) > .1, f"{name}: no hip lift"
+    # Successful fast capture need not reverse the hip; both signs remain
+    # covered by the feedback unit contract, without demanding oscillation.
+    assert max(abs(float(s["su_wheel"])) for s in catch) <= 16.001
+    assert first["Catching"]["su_clearance_valid"] == "1"
+    assert float(first["Catching"]["su_clearance"]) >= .003
+    # Replay only after the runner exits. No exact pose/contact goes back to it.
+    data = mujoco.MjData(model)
+    ground = model.geom("ground").id
+    wheels = {model.geom("left_wheel_collision").id, model.geom("right_wheel_collision").id}
+    body = model.body("gim_body").id
+    left = model.body("left_wheel").id
+    right = model.body("right_wheel").id
+    shell = {g for g in range(model.ngeom) if model.geom_bodyid[g] == body and model.geom_contype[g]}
+    com_error = 0.0
+    angles = []
+    replay = [v for v in views if float(v["t"]) >= catch_start]
+    for v in replay:
+        data.qpos[:] = [float(v[k]) for k in ("x", "y", "z", "qw", "qx", "qy", "qz",
+                                               "lh", "lk", "lw", "rh", "rk", "rw")]
+        mujoco.mj_forward(model, data)
+        supports = set()
+        for contact in data.contact:
+            if contact.geom1 == ground:
+                supports.add(contact.geom2)
+            elif contact.geom2 == ground:
+                supports.add(contact.geom1)
+        assert not supports & shell, f"{name}: shell returned to floor at t={v['t']}"
+        if float(v["t"]) >= handoff:
+            assert supports == wheels, f"{name}: non-wheel support at t={v['t']}: {supports}"
+        w, x, y, z = (float(v[k]) for k in ("qw", "qx", "qy", "qz"))
+        angle = math.asin(max(-1, min(1, 2*(w*y-z*x))))
+        angles.append((float(v["t"]), angle))
+        if float(v["t"]) >= 22:
+            axle_x = .5 * (data.xpos[left, 0] + data.xpos[right, 0])
+            com_error = max(com_error, abs(float(data.subtree_com[body, 0]) - axle_x))
+            assert .12 < float(v["z"]) < .14, f"{name}: did not rise to requested 130 mm"
+    assert com_error < .006, f"{name}: true CoM remains {com_error} m from axle"
+    back = max(0, -min(a for _, a in angles))
+    assert back <= .4, f"{name}: backward pitch {back:.4f} rad exceeds 0.4"
+    # Any backward excursion past 0.1 rad must return to |pitch|<=0.1 for
+    # a continuous 0.5 s, with return beginning within 1.5 s of that excursion.
+    recovery = 0.0; excursion = None; level_since = None
+    for t, angle in angles:
+        if excursion is None and angle < -.1:
+            excursion = t
+        if excursion is not None:
+            level_since = (t if level_since is None else level_since) if abs(angle) <= .1 else None
+            if level_since is not None and t-level_since >= .5:
+                recovery = max(recovery, level_since-excursion)
+                excursion = level_since = None
+    assert excursion is None, f"{name}: backward excursion did not recover"
+    assert recovery <= 1.5, f"{name}: backward recovery {recovery:.3f} s"
+    return dict(case=name, pause_s=round(pause, 3), handoff_s=handoff,
+                catch_s=round(handoff-catch_start, 3),
+                back_max_rad=back, recovery_s=recovery, peak_window_s=peak_window,
+                shell_contacts_after_catch=0,
+                tail_pitch_max_rad=max(abs(float(s["pitch"])) for s in tail),
+                tail_speed_max_m_s=max(abs(float(s["ground_velocity"])) for s in tail),
+                true_com_axle_error_max_m=com_error, command=command)
 
 
-# (label, STANDUP time s, runner args, drive afterwards). The wheels carry no torque while rocking (wheels_off); after the
-# hand-over the stand-up and the 0.3 m/s drive are checked down to 0.11 N.m (the operator's accepted floor; the motor
-# peak is 0.13 N.m). With the module-decomposed body (Iyy 0.0043) 0.11 N.m no longer carries the hand-over.
-CASES = [("nominal", 0.2, [], True), ("late command", 0.7, [], True), ("command off the control tick", 0.23, [], True),
-         ("wheel 30/50 ms", 0.2, W(0.03, 0.05), True), ("wheel 35/70 ms", 0.2, W(0.035, 0.07), True),
-         ("wheel 70/110 ms", 0.2, W(0.07, 0.11), True), ("wheel 20/30 ms", 0.2, W(0.02, 0.03), True),
-         ("roll balance on", 0.2, ["--roll", "1"], True),
-         ("wheel torque 0.11 N.m", 0.2, ["--wheel-torque", "0.11"], True),
-         ("wheel torque 0.11 N.m, wheel 70/110 ms, stand only", 0.2, ["--wheel-torque", "0.11", *W(0.07, 0.11)], False),
-         ("wheel torque 0.11 N.m, roll on, stand only", 0.2, ["--wheel-torque", "0.11", "--roll", "1"], False)]
-
-
-def run(job):
-    runner, model, (label, at, args, drive) = job
-    cmd = [str(runner), "--model", str(model), "--rate", "3000", "--run-for", str(RUN_S), "--start-key", "home",
-           "--at", f"{at}:STANDUP", *(["--at", "22:DRIVE 0.3 0", "--at", "26:DRIVE 0 0"] if drive else []), *args]
-    out = subprocess.run(cmd, input="", capture_output=True, text=True, timeout=600).stdout.splitlines()
-    states = [fields(line) for line in out if line.startswith("STATE|")]
-    views = [fields(line) for line in out if line.startswith("VIEW|")]
-    assert states and views, f"{label}: no telemetry"
-    return label, states, views, drive
-
-
-def check_one(result):
-    label, states, views, drive = result
-    assert all(s["ground_truth_to_controller"] == "0" for s in states), label
-    fault = next((s["fault_reason"] for s in states if s["mode"] == "Fault"), None)
-    assert fault is None, f"{label}: fault {fault}"
-    rocking = [s for s in states if s["mode"] == "StandUp" and float(s["t"]) > 0.25]
-    assert rocking, f"{label}: no rocking phase"
-    peak = max(max(abs(float(s["wheel_tq_l"])), abs(float(s["wheel_tq_r"]))) for s in rocking)
-    assert peak < 1e-6, f"{label}: the wheels carried {peak:.3f} N.m while rocking (torque must be off)"
-    if not drive:
-        states = [s for s in states if float(s["t"]) <= STAND_CHECK_S]
-    balancing = next((float(s["t"]) for s in states if s["mode"] == "Balancing"), None)
-    assert balancing is not None and balancing < BALANCE_BY_S, f"{label}: balanced at {balancing}"
-    end = states[-1]
-    assert float(end["joint_lk"]) > FULL_KNEE_RAD, f"{label}: did not reach full height (knee {end['joint_lk']})"
-    assert abs(float(end["pitch"])) < FINAL_PITCH_RAD, f"{label}: pitch {end['pitch']}"
-    assert abs(float(end["ground_velocity"])) < FINAL_SPEED_M_S, f"{label}: still moving {end['ground_velocity']}"
-    drove = 0.0
-    if drive:
-        at_22 = next(v for v in views if float(v["t"]) >= 22.0)
-        drove = float(views[-1]["x"]) - float(at_22["x"])
-        assert drove > DRIVE_MIN_M, f"{label}: drove only {drove:.2f} m"
-    print({"case": label, "balancing_s": round(balancing, 2), "knee": round(float(end["joint_lk"]), 2),
-           "drove_m": round(drove, 2)}, flush=True)
+def model_variant(args, name, com_dx=0, mass_scale=1, friction=None, hip_delta=0):
+    """Perturb the plant only. Controller geometry remains the nominal model."""
+    tree = ET.parse(args.model)
+    for mesh in tree.findall('./asset/mesh'):
+        mesh.set('file', str((args.model.parent / mesh.get('file')).resolve()))
+    body = tree.find('./worldbody/body[@name="gim_body"]/inertial')
+    pos = list(map(float, body.get('pos').split())); pos[0] += com_dx
+    body.set('pos', ' '.join(map(str, pos)))
+    body.set('mass', str(float(body.get('mass')) * mass_scale))
+    inertia = 'fullinertia' if body.get('fullinertia') else 'diaginertia'
+    body.set(inertia, ' '.join(str(float(x)*mass_scale) for x in body.get(inertia).split()))
+    if friction is not None:
+        for pair in tree.findall('./contact/pair'):
+            values = pair.get('friction').split(); values[:2] = [str(friction)]*2
+            pair.set('friction', ' '.join(values))
+    if hip_delta:
+        key = tree.find('./keyframe/key[@name="home"]')
+        q = list(map(float, key.get('qpos').split())); q[7] += hip_delta; q[10] += hip_delta
+        # Lift the reset pose enough to avoid initial shell/wheel penetration;
+        # it settles freely before STANDUP, without a fixture.
+        q[2] += .003
+        key.set('qpos', ' '.join(map(str, q)))
+    folder = args.evidence / 'models'; folder.mkdir(exist_ok=True)
+    path = folder / f'{name}.xml'; tree.write(path)
+    return path
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--cases", default="all")
+    parser.add_argument("--extended", action="store_true", help="include plant mismatch and sensor noise cases")
+    parser.add_argument("--standup", default="", help="explicit tuning override, recorded in commands")
+    parser.add_argument("--random-cases", type=int, default=0, help="fixed-seed combined perturbation cases")
     args = parser.parse_args()
-    with Pool(len(CASES)) as pool:
-        results = pool.map(run, [(args.runner, args.model, c) for c in CASES])
-    errors = []
-    for r in results:
+    args.runner = args.runner.resolve(); args.model = args.model.resolve()
+    args.evidence = args.evidence or Path(tempfile.mkdtemp(prefix="tap-standup-"))
+    args.evidence.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[3]
+    sources = [Path(__file__), args.runner, args.model,
+               root / "src_fw/include/tap_fw/v3/StandUp.hpp",
+               root / "src_fw/src/v3/V3Controller.cpp",
+               root / "src/tap_sim/native/gim_v3_runner.cpp",
+               root / "src/tap_control/core/include/robot_control/GeneratedGeometry.hpp",
+               root / "src/tap_control/core/include/robot_control/GeneratedBodyEnvelope.hpp"]
+    (args.evidence / "fingerprints.json").write_text(json.dumps(
+        {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}, indent=2))
+    cases = [
+        ("nominal", [], .2),
+        ("start_later", [], .7),
+        ("wheel_20_35", ["--wheel-delay", ".02", "--wheel-lag", ".035"], .2),
+        ("wheel_35_50", ["--wheel-delay", ".035", "--wheel-lag", ".05"], .2),
+        ("wheel_60_90", ["--wheel-delay", ".06", "--wheel-lag", ".09"], .2),
+        ("push_forward", ["--at", "4.35:PUSH 1.0 0.08"], .2),
+        ("push_back", ["--at", "4.35:PUSH -1.0 0.08"], .2),
+    ]
+    variants = {}
+    if args.extended:
+        cases += [("start_early", [], .1), ("start_035", [], .35), ("start_12", [], 1.2)]
+        for seed in (1, 7, 23, 101):
+            cases.append((f"noise_{seed}", ["--sensor-noise", "1", "--noise-seed", str(seed)], .2))
+        changes = dict(com_front=dict(com_dx=.002), com_back=dict(com_dx=-.002),
+                       mass_light=dict(mass_scale=.95), mass_heavy=dict(mass_scale=1.05),
+                       friction_low=dict(friction=.6), friction_high=dict(friction=1),
+                       hip_plus=dict(hip_delta=.02), hip_minus=dict(hip_delta=-.02))
+        for name, change in changes.items():
+            variants[name] = model_variant(args, name, **change)
+            cases.append((name, ["--allow-model-mismatch"], .7 if name.startswith('hip_') else .2))
+    assert 0 <= args.random_cases <= 100, "random case count must be 0..100"
+    rng = random.Random(3504)
+    mixed = []
+    for index in range(args.random_cases):
+        name = f"mixed_{index:02d}"
+        change = dict(com_dx=rng.uniform(-.002, .002), mass_scale=rng.uniform(.95, 1.05),
+                      friction=rng.uniform(.6, 1.0), hip_delta=rng.uniform(-.02, .02))
+        delay = rng.uniform(.02, .06); lag = rng.uniform(.035, .09)
+        start = rng.uniform(.3, 1.2); noise_seed = rng.randrange(1, 1000000)
+        variants[name] = model_variant(args, name, **change)
+        extra = ["--allow-model-mismatch", "--wheel-delay", str(delay), "--wheel-lag", str(lag),
+                 "--sensor-noise", "1", "--noise-seed", str(noise_seed)]
+        cases.append((name, extra, start))
+        mixed.append(dict(case=name, **change, delay_s=delay, lag_s=lag, start_s=start, noise_seed=noise_seed))
+    if mixed:
+        (args.evidence / 'perturbations.json').write_text(json.dumps(mixed, indent=2))
+    if args.cases != "all":
+        selected = set(args.cases.split(","))
+        cases = [c for c in cases if c[0] in selected]
+        assert len(cases) == len(selected), "unknown case"
+    model = mujoco.MjModel.from_xml_path(str(args.model))
+    results = []; failures = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = [(name, pool.submit(run, args, name,
+                    extra + (["--standup", args.standup] if args.standup else []),
+                    24, start, variants.get(name)))
+                   for name, extra, start in cases]
+        for name, future in pending:
+            try:
+                actual_model = mujoco.MjModel.from_xml_path(str(variants[name])) if name in variants else model
+                result = score(actual_model, future.result())
+                results.append(result)
+                print(json.dumps(result), flush=True)
+            except Exception as error:
+                failures.append(dict(case=name, error=str(error)))
+                print(json.dumps(failures[-1]), flush=True)
+    # Save recovery evidence even if a subsequent control fails. Run controls
+    # with the same candidate tuning, plus the explicit diagnostic override.
+    controls = []
+    def save_summary():
+        (args.evidence / "summary.json").write_text(json.dumps(
+            dict(passed=results, failed=failures, controls=controls), indent=2))
+    save_summary()
+    for name in ("hold_control", "estop"):
         try:
-            check_one(r)
-        except AssertionError as e:
-            errors.append(str(e))
-    assert not errors, "\n".join(errors)
+            if name == "hold_control":
+                spec = ",".join(filter(None, (args.standup, "hold_after_flip=1")))
+                _, held, _, _ = run(args, name, ["--standup", spec], 7)
+                assert any(s["su_phase_name"] == "Flipped" for s in held)
+                assert not any(s["mode"] == "Balancing" for s in held)
+            else:
+                extra = ["--standup", args.standup] if args.standup else []
+                _, stopped, views, _ = run(args, name, ["--at", "4.35:ESTOP", *extra], 6)
+                assert any(s.get("su_peak") == "1" for s in stopped), "ESTOP control never exercised peak capture"
+                after = [s for s in stopped if float(s["t"]) >= 4.37]
+                assert after and all(s["mode"] == "Idle" and s["wheel_cmd_l"] == "0"
+                                    and s["wheel_cmd_r"] == "0" and s.get("su_peak") == "0" for s in after)
+                assert float(views[-1]["physics_t"]) > 5.5, "ESTOP suspended physics"
+            controls.append(dict(case=name, passed=True))
+        except Exception as error:
+            failures.append(dict(case=name, error=str(error)))
+        save_summary()
+    assert not failures, failures
+    print(f"{len(results)} recovery scenarios + hold/ESTOP controls passed; evidence: {args.evidence}")
 
 
 if __name__ == "__main__":

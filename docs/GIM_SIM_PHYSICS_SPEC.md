@@ -152,7 +152,8 @@ Contact mềm có `solref=[0.006,1]`,
 phải độ cứng cao su, hệ số đàn hồi hay số đo vật liệu. Chưa có mô hình biến dạng
 lốp, chassis, backlash hoặc độ đàn hồi khớp.
 
-Mỗi khớp đùi/gối dùng `frictionloss=0.1 N·m`, viscous damping=0.
+Khớp đùi dùng `frictionloss=0.05 N·m`, khớp gối dùng `0.1 N·m`,
+viscous damping=0.
 Mô-men ma sát khô chống chuyển động; khi đứng yên, solver có thể cân bằng
 mô-men trong giới hạn đó. Nó không phải hệ số nhân với tốc độ. Xem
 [MuJoCo: friction loss](https://mujoco.readthedocs.io/en/stable/computation/index.html#friction-loss).
@@ -185,8 +186,12 @@ nhiễu Iq hoặc trễ CAN trong runner này. `SimGds68Joint` MIT cũ không ph
 actuator chân của GIM V3 runner.
 
 **Hai bánh:** V3 đưa lệnh tốc độ cho `SimBl4012Wheel`; chưa có bù ΔI cho bánh.
-Thông số hiện hành: torque cap=0,13 N·m; speed-servo gain=3 N·m/(rad/s);
-torque lag nội bộ=1 ms; torque-enable settle=20 ms; ma sát viscous nội bộ=0,001
+Mô hình rated/base torque cap=0,13 N·m; các pha Flinging/Pivot/Wheelie của
+GIM V3 stand-up có thể dùng peak cap=0,20 N·m theo xác nhận của người vận hành
+ngày 16/10/2026. Chưa có nguồn datasheet hoặc giới hạn thời gian/nhiệt cho peak
+này, nên đây là giới hạn mô phỏng tạm thời, không phải mức liên tục đã xác
+nhận. `--wheel-torque` ghi đè cap cho mọi pha.
+Speed-servo gain=3 N·m/(rad/s); torque lag nội bộ=1 ms; torque-enable settle=20 ms; ma sát viscous nội bộ=0,001
 N·m·s/rad; Coulomb nội bộ=0,006 N·m. Tham số đáp ứng/ma sát này còn ước lượng.
 MuJoCo bổ sung wheel-bearing damping=0,002 N·m·s/rad.
 Runner bổ sung **command dead time 50 ms + speed-reference lag 75 ms**;
@@ -201,14 +206,14 @@ lượng**. Nó tham gia ma trận quán tính khớp, không cộng vào tổng
 hoặc bảng quán tính vật rắn/COM ở mục 3. Stiffness thụ động bằng 0.
 
 Trọng lượng tổng ở g=9,81 là 30,6072 N. Nếu thân không chạm sàn và chia tải
-đều: mỗi bánh có N≈15,3036 N, giới hạn bám μN≈12,2429 N. Torque cap bánh
+đều: mỗi bánh có N≈15,3036 N, giới hạn bám μN≈12,2429 N. Rated cap bánh
 0,13 N·m tương ứng lực 3,25 N/bánh; tổng lực danh nghĩa tối đa 6,50 N và
 gia tốc tịnh tiến lý tưởng khoảng 2,0833 m/s², trước quán tính bánh và ma sát.
 Profile GIM đã thay giới hạn LQR 8 m/s² kế thừa bằng **2,0833 m/s²**,
 lấy min giữa lực bám và torque cap trên. Motor bánh là giới hạn chính trong
 ước tính này. LQR dùng chiều dài hiệu dụng `I_axle/(m × COM_distance)`;
 khoảng bảng gain là 0,035–0,240 m, không clamp tư thế duỗi ở 0,200 m nữa.
-Torque cap bánh (0,13 N·m) nay đã khớp với thông số rated torque trong
+Rated cap bánh (0,13 N·m) nay đã khớp với thông số rated torque trong
 datasheet chính hãng Kpower BL4012 (động cơ bánh hiện tại, thay cho CJC
 BL4820M12, 2026-10-12) — xem docs/MOTOR_SELECTION.md.
 

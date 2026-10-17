@@ -50,9 +50,10 @@ estimates below, recorded in `gim_mass_properties.yaml`.
 
 Wheel-ground sliding friction is user-specified `mu = 0.8`, applied directly
 to both explicit contact pairs (both tangential directions). Each hip/knee
-has user-specified Coulomb friction torque `0.1 N m` (`frictionloss`). Their
-additional viscous damping is zero; the previous `0.08 N m s/rad` guess is
-removed. Wheel hinges use user-specified Coulomb friction torque `0.01 N m`
+hips use user-specified Coulomb friction torque `0.05 N m`; knees remain at
+`0.1 N m` (`frictionloss`). Their additional viscous damping is zero; the
+previous `0.08 N m s/rad` guess is removed. Wheel hinges use user-specified
+Coulomb friction torque `0.01 N m`
 (`frictionloss`) plus estimated viscous damping `0.002 N m s/rad`. Contact
 softness remains an estimate.
 
@@ -89,6 +90,16 @@ welded modules. The group density assumptions remain provisional;
 the thigh, shin and wheel inertias are still geometric approximations. No
 physical identification has validated these values. No force, current, contact,
 or pose telemetry from MuJoCo is a controller sensor.
+
+The proposed front-slot variant translates the existing 0.210 kg battery from
+the STEP assembly's rear-slot centre `x = -0.057 m` to the symmetric front-slot
+centre `x = +0.057 m` in the body frame (+X forward). Its visual mesh and its
+mass move together; the old battery mass is removed from the aggregate before
+the new body COM and inertia are computed. Total robot mass stays 3.02 kg.
+The body COM shifts from `x = -0.00509108 m` to `+0.00488392 m`; the whole-robot
+CAD-neutral COM shifts 7.93 mm forward relative to the wheel axle. The second
+slot is visible in the supplied STEP shell, but physical installation and
+actual battery mass placement remain unverified.
 
 ## Forward and inverse kinematics
 

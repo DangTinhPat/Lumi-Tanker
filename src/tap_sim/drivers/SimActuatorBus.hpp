@@ -217,6 +217,9 @@ class SimBl4012Wheel {
   float targetSpeedRadS() const { return target_speed_rad_s_; }
   bool settling() const { return settle_remaining_s_ > 0.0F; }
   std::uint8_t motorId() const { return cfg_.motor_id; }
+  void setMaxTorqueNm(float value) noexcept {
+    cfg_.max_torque_nm = std::clamp(value, 0.0F, 0.20F);
+  }
 
  private:
   float servoTorqueNm() const {
