@@ -11,6 +11,29 @@ int main() {
   const auto defaults = tap_fw::v3::defaultV3Config();
   assert(!defaults.lqr_prediction.enabled);
   assert(!defaults.tier.reflex_inertial_gate);
+  assert(!defaults.tier.drive_governor.enabled);
+  {
+    using tap_fw::v3::DriveGovernor;
+    DriveGovernor::Config c{};
+    auto budget = [&](float v, float yaw, float direction) {
+      return DriveGovernor::accelerationLimit(c, v, yaw, direction,
+          .04F, .2654F, 3.02F, 41.8879F, 104.7198F);
+    };
+    const float low = budget(0, 0, 1), fast = budget(3, 0, 1);
+    assert(low > 1.18F && low < 1.19F);
+    assert(fast > .55F && fast < .57F && fast < low);
+    assert(budget(3, .8F, 1) < fast); // outer wheel sets the turn budget
+    assert(budget(3, 0, -1) == low); // braking retains its torque
+    assert(budget(-3, 0, -1) == fast);
+    assert(budget(-3, 0, 1) == low);
+    assert(budget(5, 0, 1) == 0); // no motoring authority above no-load
+    c.balance_reserve = 1;
+    assert(budget(0, 0, 1) == 0);
+    c.balance_reserve = .45F;
+    c.wheel_torque_nm = 0;
+    assert(budget(0, 0, 1) == 0);
+    std::puts("drive governor: default off; speed, turn, braking, reverse and zero-authority budgets passed");
+  }
   Predictor a, b;
   Predictor::Config cfg{true, .05F, .075F};
   Predictor::State quiet{};

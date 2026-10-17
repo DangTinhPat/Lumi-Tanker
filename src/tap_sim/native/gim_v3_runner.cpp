@@ -37,6 +37,7 @@ struct Options {
   std::string model;
   double physics_hz = 3000.0;
   double sensor_hz = 500.0;
+  double state_hz = 50.0;  // diagnostics only; VIEW remains 50 Hz
   std::uint16_t command_port = 0;
   double run_for_s = 0.0;
   double wheel_delay_s = 0.050;
@@ -49,6 +50,7 @@ struct Options {
   bool gyro_hip_lead = true;
   std::string jump_spec;  // v3.5 jump parameters: key=value,key=value
   std::string standup_spec;  // stand-up parameters: key=value,key=value (--standup)
+  std::string control_spec;  // explicit simulation-only A/B tuning overrides
   // Speed ceilings [m/s], 0 = the controller defaults: DRIVE clamp, planned speed cap, LQR ground speed cap.
   double drive_max = 4.1888, plan_vmax = 0.0, ground_vmax = 0.0, track_margin = -1.0;
   double motor_reserve = -1.0, lateral_accel = -1.0;
@@ -80,6 +82,7 @@ Options parseOptions(int argc, char** argv) {
     if (arg == "--model") out.model = next();
     else if (arg == "--rate") out.physics_hz = number(next(), "--rate");
     else if (arg == "--sensor-rate") out.sensor_hz = number(next(), "--sensor-rate");
+    else if (arg == "--state-hz") out.state_hz = number(next(), "--state-hz");
     else if (arg == "--wheel-delay") out.wheel_delay_s = number(next(), "--wheel-delay");
     else if (arg == "--wheel-lag") out.wheel_lag_s = number(next(), "--wheel-lag");
     else if (arg == "--sensor-noise") out.sensor_noise = number(next(), "--sensor-noise");
@@ -100,6 +103,7 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--virtual-hip-lead") out.gyro_hip_lead = false;
     else if (arg == "--jump") out.jump_spec = next();
     else if (arg == "--standup") out.standup_spec = next();
+    else if (arg == "--control") out.control_spec = next();
     else if (arg == "--drive-max") out.drive_max = number(next(), "--drive-max");
     else if (arg == "--plan-vmax") out.plan_vmax = number(next(), "--plan-vmax");
     else if (arg == "--ground-vmax") out.ground_vmax = number(next(), "--ground-vmax");
@@ -124,6 +128,7 @@ Options parseOptions(int argc, char** argv) {
                    "[--command-port PORT] [--wheel-delay SEC] [--wheel-lag SEC] "
                    "[--wheel-torque 0..0.20] [--standup key=val,...] "
                    "[--sensor-noise SCALE] [--noise-seed UINT] [--allow-model-mismatch] "
+                   "[--state-hz HZ] [--control key=val,...] "
                    "[--no-lqr-prediction] [--virtual-hip-lead] [--jump key=val,...] [--at SEC:CMD] "
                    "[--realtime] [--run-for SEC]\n";
       std::exit(0);
@@ -134,6 +139,7 @@ Options parseOptions(int argc, char** argv) {
     throw std::invalid_argument("invalid --sensor-noise");
   if (out.physics_hz < 1000.0 || out.physics_hz > 4000.0 ||
       out.sensor_hz <= 0.0 || out.sensor_hz > out.physics_hz || out.run_for_s < 0.0 ||
+      out.state_hz <= 0.0 || out.state_hz > out.sensor_hz ||
       out.wheel_delay_s < 0 || out.wheel_delay_s > .1 || out.wheel_lag_s < 0 || out.wheel_lag_s > .12 ||
       out.wheel_torque <= 0.0 || out.wheel_torque > 0.20)
     throw std::invalid_argument("invalid simulation rate or duration");
@@ -398,7 +404,13 @@ class GimV3Runner {
     config.tier.reflex_inertial_gate = true;
     // Virtual-rate lead feeds the commanded hip motion back into that same hip.
     config.tier.lead_gyro_only = options.gyro_hip_lead;
-    config.tier.plan_accel_m_s2 = .6F;
+    // The current-controlled hip plant rings at ~31 Hz with 60 ms gyro lead.
+    // Keep planned-lean preview and filtered body damping intact. Direct gyro
+    // lead excites the fast loaded joint loop; its old 60 ms position-servo
+    // tuning does not transfer to this current/impedance actuator model.
+    config.tier.lead_s = 0.0F;
+    config.tier.drive_governor.enabled = true;
+    config.tier.plan_accel_m_s2 = .9F;
     config.tier.plan_jerk_m_s3 = 10.0F;
     config.tier.hip_advance_s = config.tier.preview_s;
     config.tier.height_exp = .15F;
@@ -424,6 +436,31 @@ class GimV3Runner {
     config.height.accel_m_s2 = .05F;
     config.height.jerk_m_s3 = .20F;
     config.tier.joint_rate_gain_low = 1.0F;
+    std::stringstream tuning(options.control_spec);
+    std::string item;
+    while (std::getline(tuning, item, ',')) {
+      const auto eq = item.find('=');
+      if (eq == std::string::npos) throw std::invalid_argument("--control expects key=value");
+      const std::string key = item.substr(0, eq);
+      const double v = number(item.substr(eq+1).c_str(), "--control");
+      if (v < 0) throw std::invalid_argument("negative --control value");
+      if (key == "trunk") config.tier.trunk = v >= .5;
+      else if (key == "body_damping") config.tier.body_damping_s = v;
+      else if (key == "body_lpf") config.tier.body_damp_lpf_hz = v;
+      else if (key == "hip_lead") config.tier.lead_s = v;
+      else if (key == "hip_lead_lpf") config.tier.lead_lpf_hz = v;
+      else if (key == "knee_lpf") config.tier.knee_follow_hz = v;
+      else if (key == "plan_accel") config.tier.plan_accel_m_s2 = v;
+      else if (key == "plan_jerk") config.tier.plan_jerk_m_s3 = v;
+      else if (key == "governor") config.tier.drive_governor.enabled = v >= .5;
+      else if (key == "balance_reserve") config.tier.drive_governor.balance_reserve = v;
+      else if (key == "governor_torque") config.tier.drive_governor.wheel_torque_nm = v;
+      else if (key == "preview") config.tier.preview = v >= .5;
+      else if (key == "carrier") config.tier.wheel_carrier_gain = v;
+      else if (key == "wheel_lead") config.lqr_lead_s = v;
+      else if (key == "trim_gain") config.lqr_trim_gain = v;
+      else throw std::invalid_argument("unknown --control key: " + key);
+    }
     return config;
   }
 
@@ -907,7 +944,7 @@ class GimV3Runner {
   void emitTelemetry(const V3Controller::Input& in,
                      const robot_control::ImuStateEstimator::Output& estimate) {
     if (sim_time_s_ < next_state_s_) return;
-    next_state_s_ += 0.02;
+    next_state_s_ += 1.0 / options_.state_hz;
     const char* mode = tap_fw::v3::toString(output_.state);
     const auto wheel_l = static_cast<float>(sensor(joints_[2].velocity_sensor));
     const auto wheel_r = static_cast<float>(sensor(joints_[5].velocity_sensor));
@@ -919,6 +956,8 @@ class GimV3Runner {
               << "|reflex_gate=" << controller_.reflexGate()
               << "|lqr_prediction=" << controller_.config().lqr_prediction.enabled
               << "|plan_acceleration=" << controller_.plannedAcceleration()
+              << "|plan_accel_limit=" << controller_.plannedAccelerationLimit()
+              << "|drive_governor=" << controller_.config().tier.drive_governor.enabled
               << "|hip_trunk_request=" << controller_.trunkSwingRequest()
               << "|hip_trunk_command=" << controller_.trunkHip()
               << "|hip_level=" << controller_.levelHip()

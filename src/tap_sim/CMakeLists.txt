@@ -128,6 +128,12 @@ if(BUILD_TESTING)
       --runner $<TARGET_FILE:tap_mujoco_gim_v3>
       --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml)
   set_tests_properties(gim_high_speed PROPERTIES TIMEOUT 300)
+  add_test(NAME gim_dynamic_balance
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_dynamic_balance_test.py
+      --runner $<TARGET_FILE:tap_mujoco_gim_v3>
+      --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml
+      --evidence ${CMAKE_BINARY_DIR}/gim_physics_evidence/dynamic_balance_regression)
+  set_tests_properties(gim_dynamic_balance PROPERTIES TIMEOUT 300)
   add_test(NAME gim_standup
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_standup_test.py
       --runner $<TARGET_FILE:tap_mujoco_gim_v3>

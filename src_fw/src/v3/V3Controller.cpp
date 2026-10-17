@@ -2490,7 +2490,7 @@ void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   const bool hop_active = config_.jump.enabled && jump_drive_;
   const bool hop_brake = hop_active && std::abs(target_v) < std::abs(plan_v_);
   const bool hop_dip = hop_active;
-  const float amax = hop_brake ? config_.jump.hop_decel_m_s2
+  float amax = hop_brake ? config_.jump.hop_decel_m_s2
       : hop_dip ? config_.jump.hop_accel_m_s2 + config_.jump.hop_accel_per_m_s * jump_.hopSpeed()
       : envelopeOn() && wholeBody()
       ? std::max(9.80665F * std::tan(std::clamp(t.env_lean_rad, 0.0F, 0.3F)), 0.05F)
@@ -2506,6 +2506,18 @@ void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   // overshoot.
   const float v_stop = plan_v_ + plan_a_ * std::abs(plan_a_) / (2.0F * jmax);
   const float err = target_v - v_stop;
+  if (t.drive_governor.enabled && !hop_active) {
+    // Evaluate both measured rolling speed and the leading plan: the plan
+    // must not spend torque that disappears before the wheels reach it.
+    auto limit = [&](float v) {
+      return DriveGovernor::accelerationLimit(t.drive_governor, v, yaw_cmd_,
+          err, config_.wheel_radius_m, config_.roll.track_m,
+          robot_control::geometry::total_mass_kg,
+          t.wheel_rated_rad_s, t.wheel_noload_rad_s);
+    };
+    amax = std::min(amax, std::min(limit(ground_v_), limit(plan_v_)));
+  }
+  plan_accel_limit_ = amax;
   const float a_des = std::abs(err) < 1.0e-4F ? 0.0F : std::copysign(amax, err);
   const float da = std::clamp(a_des - plan_a_, -jmax * dt, jmax * dt);
   plan_a_ += da;

@@ -86,6 +86,9 @@ Chi tiết cơ chế, log beta và giới hạn xác minh của port v3.5:
   `legacy 0|1` (đưa tầng 2 về như `b4b6d4a`), `tlsrc 0|1` (lead lấy gyro), `tgate|tglo|tghi|tgllo|tglhi|tgrel` (cổng sự kiện phản xạ),
   `tginertia 0|1` (khi tgate bật: mở theo gyro/gia tốc, không mở riêng vì lean tĩnh; mặc định tắt),
   `tdb` (vùng chết), `tsatm`, `tprev|tpacc|tpjerk|tpvmax|tpt` (preview), `tlvl|tlevel|tltau|tlvmax` (vòng level), `tplanfull`,
+  `tgov 0|1` (mặc định 0: chừa mô-men cân bằng trong kế hoạch gia tốc), `tgreserve` (phần mô-men khả dụng chừa lại, mặc định 0.45),
+  `tgtorque <Nm>` (mô-men liên tục mỗi bánh, mặc định 0.13; không dùng peak đứng dậy). Bản SIM bật `tgov`, lead hông 0 s,
+  kế hoạch 0.9 m/s², jerk 10 m/s³; đây là tuning cho mô hình mô-men hiện tại, chưa phải tuning xác nhận trên robot. Xem `docs/DYNAMIC_BALANCE.md`.
   `tenv|tenvlean`, `khold|wbkhold`, `kfhz|kfrate` (gối bù độ cao của IK qua lọc Hz + giới hạn rad/s, boot 1.0/0.6, `kfhz 0` = tức thì), `cdx <mm>` (lệch CoM thân), `timu`.
 - **Chiều cao/gối:** `height <mm>`, `hrate <mm/s>`, `haccel <mm/s²>`, `hjerk <mm/s³>`, `hff`, `tsus 0|1`, `tsusad 0|1`, `tsusk`,
   `tsusdelay`, `tsusg`, `tsusmax <mm>`.

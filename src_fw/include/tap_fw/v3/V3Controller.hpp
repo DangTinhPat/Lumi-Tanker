@@ -9,6 +9,7 @@
 #include "robot_control/LqrActuationPredictor.hpp"
 #include "tap_fw/v3/JumpSequence.hpp"
 #include "tap_fw/v3/StandUp.hpp"
+#include "tap_fw/v3/DriveGovernor.hpp"
 #include "tap_fw/v3/aac/FlightAttitude.hpp"
 #include "tap_fw/v3/aac/TakeoffMomentum.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
@@ -367,6 +368,7 @@ class V3Controller {
     float preview_s = 0.12F;
     float plan_accel_m_s2 = 0.3F;
     float plan_jerk_m_s3 = 1.0F;
+    DriveGovernor::Config drive_governor{};
     // Planned speed cap (was 0.55 m/s = the BLE full stick). Cruising within
     // 0.05 m/s of the 0.8 m/s wheel cap leaves no headroom to stand the lean back
     // up; 0.55 held every plant variant (v3_tier_tests V15).
@@ -842,6 +844,7 @@ class V3Controller {
   [[nodiscard]] float trunkHip() const noexcept { return dhip_ + axle_hip_correction_; }
   [[nodiscard]] float trunkSwingRequest() const noexcept { return dhip_; }
   [[nodiscard]] float trunkAuthority() const noexcept { return trunk_alpha_; }
+  [[nodiscard]] float plannedAccelerationLimit() const noexcept { return plan_accel_limit_; }
   // Knee suspension (Tier::suspension): height offset [m], vertical speed.
   [[nodiscard]] float suspensionOffset() const noexcept { return sus_dz_; }
   [[nodiscard]] float bodyVerticalSpeed() const noexcept { return sus_vz_; }
@@ -1098,6 +1101,7 @@ class V3Controller {
   bool ga_init_ = false;
   float reflex_w_ = 0.0F, gate_rate_lp_ = 0.0F; // reflex gate weight, |gyro| low-pass
   float plan_v_ = 0.0F, plan_a_ = 0.0F, plan_j_ = 0.0F, plan_dt_ = 0.002F;
+  float plan_accel_limit_ = 0.0F;
   bool plan_init_ = false;
   std::array<PlanSample, 128> plan_buf_{};
   std::size_t plan_head_ = 0U, plan_n_ = 0U;

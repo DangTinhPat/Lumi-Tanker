@@ -617,6 +617,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     // Maneuver preview (needs vpitch): planned, previewed speed changes.
     else if (!std::strcmp(key, "tprev")) ctrl_.config().tier.preview = v >= 0.5F;
     else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 1.0F);
+    else if (!std::strcmp(key, "tgov")) ctrl_.config().tier.drive_governor.enabled = v >= 0.5F;
+    else if (!std::strcmp(key, "tgreserve")) ctrl_.config().tier.drive_governor.balance_reserve = std::clamp(v, 0.0F, 0.9F);
+    else if (!std::strcmp(key, "tgtorque")) ctrl_.config().tier.drive_governor.wheel_torque_nm = std::clamp(v, 0.0F, 0.13F);
     else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
     else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 0.8F);
     else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
@@ -822,6 +825,9 @@ void AppV3::printTunables() noexcept {
   out_.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
                 "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
                 tier.plan_vmax_m_s, tier.preview_s);
+  out_.printf("V3 TUNE drive governor: tgov=%d tgtorque=%.3f Nm tgreserve=%.2f (model budget, not measured torque)\n",
+              tier.drive_governor.enabled ? 1 : 0, tier.drive_governor.wheel_torque_nm,
+              tier.drive_governor.balance_reserve);
   out_.printf("V3 TUNE suspension: tsus=%d (needs vpitch) tsusg=%.1f tsusmax=%.0f mm\n",
                 tier.suspension ? 1 : 0, tier.sus_gain, tier.sus_max_m * 1000.0F);
   out_.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "

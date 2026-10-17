@@ -587,6 +587,7 @@ Result simulate(const Case& c) {
   if (const char* v = std::getenv("TR_WSATM")) cfg.tier.wheel_sat_margin = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_SATM")) cfg.tier.sat_margin = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_TLEAD")) cfg.tier.lead_s = static_cast<float>(std::atof(v));
+  if (const char* v = std::getenv("TR_GOVERNOR")) cfg.tier.drive_governor.enabled = std::atoi(v) != 0;
   if (const char* v = std::getenv("TR_DSHARE")) cfg.tier.disturbance_share = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_BODYDAMP")) cfg.tier.body_damping_s = static_cast<float>(std::atof(v));
   if (const char* v = std::getenv("TR_CARRIER")) cfg.tier.wheel_carrier_compensation = std::atoi(v) != 0;
