@@ -1,0 +1,628 @@
+// v3 balance on a physical plant: planar wheeled pendulum (Lagrange, CAD mass
+// estimates), velocity-servo wheels with lag/torque cap/command delay, and the
+// accelerometer specific force at the IMU point fed through the real
+// ImuStateEstimator exactly as AppV3 does. Guards the finding that the shipped
+// estimator config goes blind on the floor (falls) and that the balancing
+// config + PID with a position integrator stands and finds the balance angle.
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <deque>
+#include <random>
+
+#include "robot_control/ImuStateEstimator.hpp"
+#include "tap_fw/v3/LegHeight.hpp"
+#include "tap_fw/v3/V3Controller.hpp"
+
+namespace {
+
+using robot_control::ImuStateEstimator;
+using tap_fw::v3::V3Controller;
+
+struct Case {
+  // height request during balancing (0 = none): lower to height_low_m
+  // at 5 s, back to the hang height at height_up_s. The true balance angle
+  // shifts by eq_delta_scale x the CAD model's prediction (model error).
+  double height_low_m = 0.0;
+  double height_up_s = 25.0;
+  double eq_delta_scale = 1.0;
+  double deadband = 0.0;  // wheel stiction: no motion below |target| [rad/s]
+  // Plant uncertainty around the CAD estimates, and the wheel command delay.
+  double mass_scale = 1.0, inertia_scale = 1.0, l_scale = 1.0;
+  std::size_t delay_ticks = 2;  // 2 ms control ticks
+  std::size_t meas_delay_ticks = 0;  // age of the wheel speed/position reading
+  double eq = 0.10;          // body pitch with the COM over the axle
+  double seed_error = 0.035; // pitch held at engage minus eq
+  double tau_s = 0.08;       // wheel speed servo lag
+  double slope = 0.0;        // floor slope, + = uphill forward
+  double push_n = 0.0;       // horizontal push at 0.25 m, 10..40 s
+  double bias_error = 0.0;   // gyro bias change after the estimator seeded
+  bool balancing_estimator = true;
+  V3Controller::Algo algo = V3Controller::Algo::Pid;  // v3.2
+  // Operator flow: balance loop engaged on the stand (body held at
+  // stand_pitch, wheels in the air) for held_s, then held on the floor at the
+  // release pitch for 1 s, then let go.
+  double held_s = 0.0;
+  // Operator drive: forward command drive_m_s from drive_start_s to drive_end_s.
+  double drive_m_s = 0.0, drive_start_s = 5.0, drive_end_s = 9.0;
+  double hff = -99.0;  // balance_ff_scale override (-99 = firmware default)
+  // Tuning overrides for sweeps (negative = firmware default).
+  double lqr_input_cost = -1.0, lead_s = -1.0, dbc = -1.0;
+  double lqr_rate_cost = -1.0, lqr_vel_cost = -1.0, lqr_pitch_cost = -1.0;
+  double lqr_trim = -1.0;
+  int vel_from_meas = -1;
+  double stand_pitch = -0.02;
+  double duration_s = 40.0;
+};
+
+struct Result {
+  bool fell = false;
+  double x_end = 0.0, max_x = 0.0, th_rms = 0.0, theta_b = 0.0, theta_b_15s = 0.0;
+  int held_resets = 0;  // a free robot must never look held
+  double max_tilt = 0.0;        // max |pitch - true balance angle| while balancing
+  double max_x_height = 0.0;    // max |x| from the start of the height change
+  double max_wheel_cmd_rad_s = 0.0;  // guards runaway command windup (2026-09-29 LQR lead bug)
+  double max_speed_m_s = 0.0;     // max |axle speed|
+  double x_stop_travel = 0.0;     // travel from drive_end_s + 3 s to the end (should be ~0)
+  double drive_rate_rms = 0.0;    // pitch-rate rms while driving ("pecking" wobble)
+};
+
+Result simulate(const Case& c) {
+  const double g = 9.80665, m = 4.181 * c.mass_scale, l0 = 0.191 * c.l_scale,
+               J0 = 0.178 * c.mass_scale * c.inertia_scale * c.l_scale * c.l_scale,
+               Mw = 0.44, Iw = 0.00029,
+               R = 0.04, h_imu = 0.224, tau_max = 0.6, gyro_bias = -0.05;
+  const double Mp = Mw + Iw / (R * R) + m;
+  const double dt_c = 0.002;
+  const int sub = 4;
+  const double dt = dt_c / sub;
+  double x = 0, xd = 0, th = c.eq + c.seed_error, thd = 0, phid = 0, phi = 0, xdd = 0, thdd = 0;
+  std::mt19937 rng(11);
+  std::normal_distribution<double> n_acc(0, 0.05), n_gyr(0, 0.005), n_w(0, 0.3);
+
+  const ImuStateEstimator::Config base{};
+  ImuStateEstimator est(base);
+  ImuStateEstimator::Output imu{};
+  std::array<float, 3> last_accel{0.0F, 0.0F, 9.80665F};
+  bool seeded = false;
+  float t_s = 0.0F;
+  auto feed = [&](double ax, double az, double gy) {
+    const std::array<float, 3> a{static_cast<float>(ax + n_acc(rng)), 0.0F,
+                                 static_cast<float>(az + n_acc(rng))};
+    const std::array<float, 3> w{0.0F, static_cast<float>(gy + gyro_bias +
+                                     (seeded ? c.bias_error : 0.0) + n_gyr(rng)), 0.0F};
+    float as = 0, ws = 0;
+    for (int i = 0; i < 3; ++i) { as += a[i] * a[i]; ws += w[i] * w[i]; }
+    const bool quiet = std::abs(std::sqrt(as) - 9.80665F) < 0.35F && std::sqrt(ws) < 0.12F;
+    last_accel = a;
+    t_s += static_cast<float>(dt_c);
+    const auto out = est.update(a, w, static_cast<float>(dt_c), t_s, 0.0F, false, quiet, {});
+    if (out.valid) imu = out;
+  };
+  // Held still at the standing point (Ready): the estimator settles.
+  for (int i = 0; i < 1500; ++i) feed(-g * std::sin(th), g * std::cos(th), 0.0);
+  seeded = true;
+
+  auto cfg = tap_fw::v3::defaultV3Config();
+  cfg.algo = c.algo;
+  if (c.hff > -50.0) cfg.height.balance_ff_scale = static_cast<float>(c.hff);
+  if (c.lqr_input_cost > 0.0) {
+    cfg.lqr.input_cost_scale = cfg.lqr.station_input_cost_scale =
+        static_cast<float>(c.lqr_input_cost);
+  }
+  if (c.lead_s >= 0.0) {
+    cfg.pid.lead_s = static_cast<float>(c.lead_s);
+    cfg.lqr_lead_s = static_cast<float>(c.lead_s);
+  }
+  if (c.lqr_trim >= 0.0) cfg.lqr_trim_gain = static_cast<float>(c.lqr_trim);
+  if (c.lqr_rate_cost > 0.0) {
+    cfg.lqr.pitch_rate_cost_scale = cfg.lqr.station_pitch_rate_cost_scale =
+        static_cast<float>(c.lqr_rate_cost);
+  }
+  if (c.lqr_vel_cost > 0.0) {
+    cfg.lqr.velocity_cost_scale = cfg.lqr.station_velocity_cost_scale =
+        static_cast<float>(c.lqr_vel_cost);
+  }
+  if (c.lqr_pitch_cost > 0.0) {
+    cfg.lqr.pitch_cost_scale = cfg.lqr.station_pitch_cost_scale =
+        static_cast<float>(c.lqr_pitch_cost);
+  }
+  if (c.dbc >= 0.0) {
+    cfg.pid.deadband_comp_rad_s = static_cast<float>(c.dbc);
+    cfg.lqr_deadband_comp_rad_s = static_cast<float>(c.dbc);
+  }
+  if (c.vel_from_meas >= 0) cfg.lqr.wheel_velocity_reference_from_measured = c.vel_from_meas != 0;
+  V3Controller ctrl(cfg);
+  V3Controller::Input in{};
+  V3Controller::Command cmd{};
+  in.legs_ready = true;
+  if (c.held_s > 0.0) {
+    // Re-seed the estimator at the stand pitch.
+    for (int i = 0; i < 1500; ++i) {
+      feed(-g * std::sin(c.stand_pitch), g * std::cos(c.stand_pitch), 0.0);
+    }
+  }
+  in.pitch_rad = imu.pitch_rad;
+  cmd.start = true;
+  (void)ctrl.update(in, cmd);
+  cmd.start = false;
+  in.now_us = 1'300'000U;
+  (void)ctrl.update(in, cmd);  // -> Ready
+  assert(ctrl.state() == V3Controller::State::Ready);
+  cmd.go = true;               // released at the held pitch
+  if (c.balancing_estimator) est.setConfig(tap_fw::v3::balancingEstimatorConfig(base));
+  std::uint64_t t_us = 1'302'000U;
+  if (c.held_s > 0.0) {
+    // Body held (stand, then hands on the floor): wheels spin freely.
+    double wheel = 0.0, pos = 0.0;
+    const int n_held = static_cast<int>((c.held_s + 1.0) / dt_c);
+    for (int k = 0; k < n_held; ++k, t_us += 2000U) {
+      // Carried from the stand pitch to the floor pitch over 0.5 s (the gyro
+      // sees the rotation), then held still.
+      const double tk = k * dt_c, ramp = 0.5;
+      const double a = std::clamp((tk - (c.held_s - ramp)) / ramp, 0.0, 1.0);
+      const double held_pitch = c.stand_pitch + a * (th - c.stand_pitch);
+      const double held_rate = (a > 0.0 && a < 1.0) ? (th - c.stand_pitch) / ramp : 0.0;
+      feed(-g * std::sin(held_pitch), g * std::cos(held_pitch), held_rate);
+      in.now_us = t_us;
+      in.pitch_rad = imu.pitch_rad;
+      in.pitch_rate_rad_s = imu.pitch_rate_rad_s;
+      in.accel_x_m_s2 = last_accel[0];
+      in.accel_z_m_s2 = last_accel[2];
+      in.wheel_rad_s = {static_cast<float>(wheel), static_cast<float>(wheel)};
+      in.wheel_pos_rad = {static_cast<float>(pos), static_cast<float>(pos)};
+      const auto out = ctrl.update(in, cmd);
+      cmd.go = false;
+      if (out.state == V3Controller::State::Fault) {
+        std::printf("  held-phase fault at %.2f s: %s\n", k * dt_c, ctrl.lastFault());
+        Result r; r.fell = true; return r;
+      }
+      const double target = 0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]);
+      wheel += (target - wheel) * dt_c / c.tau_s;
+      pos += wheel * dt_c;
+    }
+    phi = pos;
+  }
+
+  std::deque<double> queue;
+  std::deque<std::pair<double, double>> readings;  // (speed, position)
+  double applied = 0.0, sum_th2 = 0.0, x_at_stop = 0.0, drive_rate_sq = 0.0;
+  int drive_rate_n = 0;
+  int n_rms = 0;
+  Result r;
+  const double com0 = tap_fw::v3::LegHeight::forKnee(0.0F).com_above_axle_m;
+  double l = l0, J = J0, eq = c.eq, chain_prev = 0.0;
+  for (int k = 0; k < static_cast<int>(c.duration_s / dt_c); ++k) {
+    const double t = k * dt_c;
+    cmd.forward_m_s = static_cast<float>(
+        (t >= c.drive_start_s && t < c.drive_end_s) ? c.drive_m_s : 0.0);
+    if (c.height_low_m > 0.0) {
+      cmd.height_m = static_cast<float>(t < 5.0 ? 0.0
+          : t < c.height_up_s ? c.height_low_m : tap_fw::v3::LegHeight::maxHeight());
+    }
+    // Legs follow the commanded pose: pendulum length, inertia and the true
+    // balance angle move with it (quasi-static leg motion, axle under hip).
+    const auto& pose = ctrl.legPose();
+    const double ratio = pose.ok ? pose.com_above_axle_m / com0 : 1.0;
+    l = l0 * ratio;
+    J = J0 * ratio * ratio;
+    eq = c.eq + c.eq_delta_scale * (pose.ok ? pose.balance_pitch_delta_rad : 0.0);
+    const double chain = pose.ok ? pose.hip_offset_rad + pose.knee_offset_rad : 0.0;
+    const double chain_rate = (chain - chain_prev) / dt_c;
+    chain_prev = chain;
+    in.leg_chain_rad = static_cast<float>(chain);
+    in.now_us = t_us + static_cast<std::uint64_t>(k) * 2000U;
+    in.pitch_rad = imu.pitch_rad;
+    in.pitch_rate_rad_s = imu.pitch_rate_rad_s;
+    in.accel_x_m_s2 = last_accel[0];
+    in.accel_z_m_s2 = last_accel[2];
+    // Wheel encoders turn with the shin: body-relative wheel minus the chain.
+    readings.emplace_back(phid - chain_rate + n_w(rng), phi - chain);
+    if (readings.size() > c.meas_delay_ticks + 1) readings.pop_front();
+    const double wm = readings.front().first, wp = readings.front().second;
+    in.wheel_rad_s = {static_cast<float>(wm), static_cast<float>(wm)};
+    in.wheel_pos_rad = {static_cast<float>(wp), static_cast<float>(wp)};
+    const auto out = ctrl.update(in, cmd);
+    cmd.go = false;
+    if (out.state == V3Controller::State::Fault) { r.fell = true; break; }
+    r.max_wheel_cmd_rad_s = std::max({r.max_wheel_cmd_rad_s,
+        std::abs(static_cast<double>(out.wheel_cmd_rad_s[0])),
+        std::abs(static_cast<double>(out.wheel_cmd_rad_s[1]))});
+    queue.push_back(0.5 * (out.wheel_cmd_rad_s[0] + out.wheel_cmd_rad_s[1]));
+    if (queue.size() > c.delay_ticks) { applied = queue.front(); queue.pop_front(); }
+
+    for (int s = 0; s < sub; ++s) {
+      const double psi = th - eq - c.slope, cs = std::cos(th - eq), sn = std::sin(th - eq);
+      const double fx = (t >= 10.0 && t < 40.0) ? c.push_n : 0.0;
+      const double gx = -g * std::sin(c.slope);
+      auto solve = [&](double tau) {
+        const double a11 = Mp, a12 = m * l * cs;
+        const double b1 = tau / R + m * l * sn * thd * thd + fx + (m + Mw) * gx;
+        const double a21 = m * l * cs, a22 = J;
+        const double b2 = m * g * l * std::sin(psi) - tau + fx * 0.25 * std::cos(th);
+        const double det = a11 * a22 - a12 * a21;
+        xdd = (b1 * a22 - a12 * b2) / det;
+        thdd = (a11 * b2 - a21 * b1) / det;
+      };
+      // Driver speed is whole rpm; the wheel sticks below the deadband.
+      double target = std::round(applied * 60.0 / (2.0 * M_PI)) * 2.0 * M_PI / 60.0;
+      if (std::abs(target) < c.deadband) target = 0.0;
+      double phidd = (target - phid) / c.tau_s;
+      solve(0.0);
+      const double x0 = xdd, t0 = thdd;
+      solve(1.0);
+      const double dx = xdd - x0, dth = thdd - t0;
+      const double tau = std::clamp((phidd - (x0 / R - t0)) / (dx / R - dth), -tau_max, tau_max);
+      solve(tau);
+      phidd = xdd / R - thdd;
+      xd += xdd * dt; x += xd * dt; thd += thdd * dt; th += thd * dt;
+      phid += phidd * dt; phi += phid * dt;
+    }
+    const double cth = std::cos(th), sth = std::sin(th);
+    const double axw = xdd + h_imu * (cth * thdd - sth * thd * thd);
+    const double azw = -h_imu * (sth * thdd + cth * thd * thd);
+    const double fxw = axw + g * std::sin(c.slope), fzw = azw + g * std::cos(c.slope);
+    feed(fxw * cth - fzw * sth, fxw * sth + fzw * cth, thd);
+
+    if (std::abs(th - eq) > 0.6) { r.fell = true; break; }
+    if (t > c.duration_s - 10.0) { sum_th2 += (th - eq) * (th - eq); ++n_rms; }
+    if (t > 3.0) r.max_tilt = std::max(r.max_tilt, std::abs(th - eq));
+    if (c.drive_m_s != 0.0 && t >= c.drive_start_s && t < c.drive_end_s + 1.0) {
+      drive_rate_sq += thd * thd;
+      ++drive_rate_n;
+    }
+    if (t >= 5.0) r.max_x_height = std::max(r.max_x_height, std::abs(x));
+    if (k == static_cast<int>(15.0 / dt_c)) r.theta_b_15s = ctrl.balanceRef();
+    r.max_x = std::max(r.max_x, std::abs(x));
+    r.max_speed_m_s = std::max(r.max_speed_m_s, std::abs(xd));
+    if (k == static_cast<int>((c.drive_end_s + 3.0) / dt_c)) x_at_stop = x;
+  }
+  r.x_end = x;
+  r.x_stop_travel = x - x_at_stop;
+  r.drive_rate_rms = drive_rate_n > 0 ? std::sqrt(drive_rate_sq / drive_rate_n) : 0.0;
+  r.th_rms = n_rms > 0 ? std::sqrt(sum_th2 / n_rms) : -1.0;
+  r.theta_b = ctrl.balanceRef();
+  r.held_resets = ctrl.heldResets();
+  return r;
+}
+
+void report(const char* name, const Case& c, const Result& r) {
+  std::printf("%-28s eq %+.3f tau %.2f: fell=%d x_end=%+.3f max|x|=%.2f th_rms=%.4f "
+              "theta_b=%+.4f (15 s %+.4f) held=%d\n", name, c.eq, c.tau_s, r.fell, r.x_end,
+              r.max_x, r.th_rms, r.theta_b, r.theta_b_15s, r.held_resets);
+}
+
+}  // namespace
+
+int main() {
+  // T1: the shipped estimator config on the floor goes blind and falls.
+  {
+    Case c;
+    c.balancing_estimator = false;
+    c.duration_s = 10.0;
+    const auto r = simulate(c);
+    report("T1 shipped estimator", c, r);
+    assert(r.fell);
+  }
+  // T2: balance angles +0.1/0/-0.1, held 2 deg off, wheel lag 80/120 ms.
+  for (double tau : {0.08, 0.12}) {
+    for (double eq : {0.10, 0.0, -0.10}) {
+      for (double err : {0.035, -0.035}) {
+        Case c;
+        c.eq = eq;
+        c.seed_error = err;
+        c.tau_s = tau;
+        const auto r = simulate(c);
+        report("T2 balance", c, r);
+        assert(!r.fell);
+        assert(std::abs(r.x_end) < 0.02);
+        assert(r.th_rms < 0.002);
+        assert(std::abs(r.theta_b - eq) < 0.0087);
+        assert(r.held_resets == 0);
+      }
+    }
+  }
+  // T3: held 4.6 deg off the balance angle.
+  for (double err : {0.08, -0.08}) {
+    Case c;
+    c.seed_error = err;
+    const auto r = simulate(c);
+    report("T3 large seed error", c, r);
+    assert(!r.fell && r.max_x < 1.5);
+  }
+  // T4: gyro bias drifts 0.01 rad/s after release.
+  {
+    Case c;
+    c.bias_error = 0.01;
+    const auto r = simulate(c);
+    report("T4 gyro bias drift", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+  }
+  // T5: 1 N push for 30 s, 20 s to recover.
+  {
+    Case c;
+    c.push_n = 1.0;
+    c.duration_s = 60.0;
+    const auto r = simulate(c);
+    report("T5 push 1 N", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.05);
+  }
+  // T6: 0.03 rad floor slope.
+  {
+    Case c;
+    c.slope = 0.03;
+    const auto r = simulate(c);
+    report("T6 slope", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+  }
+  // T7: robustness of the default gains to the unknowns: mass +-30 %,
+  // inertia -30/+40 %, COM height +-20 %, wheel lag 0.1/0.15 s, command
+  // delay 4/20 ms, held 3 deg off. Every plant must stand without ringing.
+  {
+    int n = 0;
+    for (double ms : {0.7, 1.3}) for (double is : {0.7, 1.4}) for (double ls : {0.8, 1.2})
+    for (double tau : {0.10, 0.15}) for (std::size_t dly : {std::size_t{2}, std::size_t{10}}) {
+      Case c;
+      c.mass_scale = ms; c.inertia_scale = is; c.l_scale = ls;
+      c.tau_s = tau; c.delay_ticks = dly; c.seed_error = 0.05; c.duration_s = 20.0;
+      const auto r = simulate(c);
+      if (r.fell || r.th_rms >= 0.01 || r.held_resets) {
+        std::printf("m%.1f J%.1f l%.1f dly%zu ", ms, is, ls, dly);
+        report("T7 FAIL", c, r);
+      }
+      assert(!r.fell && r.th_rms < 0.01);
+      assert(r.held_resets == 0);
+      assert(r.max_wheel_cmd_rad_s < 25.0);
+      ++n;
+    }
+    std::printf("T7 robustness: %d/%d plants stand\n", n, n);
+  }
+  // T8: the operator flow. Engaged on the stand (held 3 s at -0.02 rad,
+  // wheels in the air), carried and held on the floor 1 s, let go.
+  for (double eq : {0.10, 0.0}) {
+    for (double err : {0.02, -0.02}) {
+      Case c;
+      c.eq = eq;
+      c.seed_error = err;
+      c.held_s = 3.0;
+      c.tau_s = 0.12;
+      const auto r = simulate(c);
+      report("T8 stand -> floor", c, r);
+      assert(!r.fell && std::abs(r.x_end) < 0.2 && r.th_rms < 0.003);
+    }
+  }
+  // T9: wheel deadband 1 rad/s (fits the 2026-09-27 floor log: 0.19 deg,
+  // 1.6 cm sway at 0.46 Hz without compensation). With the default
+  // compensation the sway must stay small.
+  {
+    Case c;
+    c.eq = -0.021;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    const auto r = simulate(c);
+    report("T9 wheel deadband", c, r);
+    assert(!r.fell && r.th_rms < 0.0015);
+  }
+  // T10: balancing at the hang height, lower to 150 mm at 5 s, back
+  // up at 25 s, CAD balance feed-forward off (default). The true balance
+  // angle shift is -0.5 x the CAD prediction (2026-09-27 robot: -0.025 rad
+  // at 110 mm vs CAD +0.054), plus 0 and +0.5 for margin; wheel deadband
+  // and lag as on the robot.
+  for (double model_error : {-0.5, 0.0, 0.5}) {
+    Case c;
+    c.eq = 0.03;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    c.height_low_m = 0.150;
+    c.eq_delta_scale = model_error;
+    c.duration_s = 45.0;
+    const auto r = simulate(c);
+    std::printf("T10 height 188->150->188 mm model x%.1f: fell=%d max_tilt=%.4f "
+                "max|x|=%.3f x_end=%+.3f th_rms_end=%.4f held=%d\n", model_error, r.fell,
+                r.max_tilt, r.max_x_height, r.x_end, r.th_rms, r.held_resets);
+    assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
+    assert(r.held_resets == 0);
+  }
+  // LQR path. T11: same balance-angle/seed-error/wheel-lag grid as T2,
+  // now on algo=Lqr with position_anchor_hold - must hold position and find
+  // the balance angle exactly like the proven PID path.
+  for (double tau : {0.08, 0.12}) {
+    for (double eq : {0.10, 0.0, -0.10}) {
+      for (double err : {0.035, -0.035}) {
+        Case c;
+        c.algo = V3Controller::Algo::Lqr;
+        c.eq = eq;
+        c.seed_error = err;
+        c.tau_s = tau;
+        const auto r = simulate(c);
+        report("T11 LQR balance", c, r);
+        assert(!r.fell);
+        assert(std::abs(r.x_end) < 0.02);
+        assert(r.th_rms < 0.002);
+        assert(std::abs(r.theta_b - eq) < 0.0087);
+        assert(r.held_resets == 0);
+        assert(r.max_wheel_cmd_rad_s < 25.0);  // never a runaway command (2026-09-29 lead-clamp bug)
+      }
+    }
+  }
+  // T12 (LQR): the operator flow - engaged on the stand, wheels in the air,
+  // carried and held on the floor, let go. Must not run away while held.
+  for (double eq : {0.10, 0.0}) {
+    for (double err : {0.02, -0.02}) {
+      Case c;
+      c.algo = V3Controller::Algo::Lqr;
+      c.eq = eq;
+      c.seed_error = err;
+      c.held_s = 3.0;
+      c.tau_s = 0.12;
+      const auto r = simulate(c);
+      report("T12 LQR stand -> floor", c, r);
+      assert(!r.fell && std::abs(r.x_end) < 0.2 && r.th_rms < 0.003);
+      assert(r.max_wheel_cmd_rad_s < 25.0);
+    }
+  }
+  // T13 (LQR): height change while balancing, mirrors T10.
+  for (double model_error : {-0.5, 0.0, 0.5}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.eq = 0.03;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    c.height_low_m = 0.150;
+    c.eq_delta_scale = model_error;
+    c.duration_s = 45.0;
+    const auto r = simulate(c);
+    std::printf("T13 LQR height 188->150->188 mm model x%.1f: fell=%d max_tilt=%.4f "
+                "max|x|=%.3f x_end=%+.3f th_rms_end=%.4f held=%d\n", model_error, r.fell,
+                r.max_tilt, r.max_x_height, r.x_end, r.th_rms, r.held_resets);
+    assert(!r.fell && r.max_tilt < 0.05 && r.max_x_height < 0.3 && std::abs(r.x_end) < 0.05);
+    assert(r.held_resets == 0);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T14 (LQR): robustness sweep, mirrors T7 (a reduced grid: mass and COM
+  // height are what the pendulum-length gain table is sensitive to). Wheel
+  // lag 0.06/0.12 around the measured 0.035 s + 55 ms reading age
+  // (2026-10-01; this plant reads fresh): with lqr_lead_s 0.03 the 0.15 s
+  // corner (m0.7 l1.2) rings (th_rms 0.05).
+  {
+    int n = 0;
+    for (double ms : {0.7, 1.3}) for (double ls : {0.8, 1.2})
+    for (double tau : {0.06, 0.12}) {
+      Case c;
+      c.algo = V3Controller::Algo::Lqr;
+      c.mass_scale = ms; c.l_scale = ls;
+      c.tau_s = tau; c.seed_error = 0.05; c.duration_s = 20.0;
+      const auto r = simulate(c);
+      if (r.fell || r.th_rms >= 0.01 || r.held_resets) {
+        std::printf("m%.1f l%.1f tau%.2f ", ms, ls, tau);
+        report("T14 LQR FAIL", c, r);
+      }
+      assert(!r.fell && r.th_rms < 0.01);
+      assert(r.held_resets == 0);
+      ++n;
+    }
+    std::printf("T14 LQR robustness: %d/%d plants stand\n", n, n);
+  }
+  // T15 (LQR): held 4.6 deg off the balance angle, mirrors T3.
+  for (double err : {0.08, -0.08}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.seed_error = err;
+    const auto r = simulate(c);
+    report("T15 LQR large seed error", c, r);
+    assert(!r.fell && r.max_x < 1.5);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T16 (LQR): gyro bias drifts 0.01 rad/s after release, mirrors T4.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.bias_error = 0.01;
+    const auto r = simulate(c);
+    report("T16 LQR gyro bias drift", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T17 (LQR): 1 N push for 30 s, 20 s to recover, mirrors T5.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.push_n = 1.0;
+    c.duration_s = 60.0;
+    const auto r = simulate(c);
+    report("T17 LQR push 1 N", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.05);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T18 (LQR): 0.03 rad floor slope, mirrors T6.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.slope = 0.03;
+    const auto r = simulate(c);
+    report("T18 LQR slope", c, r);
+    assert(!r.fell && std::abs(r.x_end) < 0.02);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T19 (LQR): wheel deadband 1 rad/s, mirrors T9.
+  {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.eq = -0.021;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    const auto r = simulate(c);
+    report("T19 LQR wheel deadband", c, r);
+    assert(!r.fell && r.th_rms < 0.0015);
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+  }
+  // T20 (LQR): demo driving - BLE full stick 0.55 m/s for 4 s, then release,
+  // wheel lag 0.12 s + deadband as on the robot. Must not fall, must not be
+  // mistaken for held/lifted (runaway guard at 15 rad/s = 0.6 m/s), must come
+  // to rest after the stop instead of creeping, and must keep headroom.
+  for (double v : {0.55, -0.55, 0.30}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.eq = 0.03;
+    c.seed_error = 0.0;
+    c.tau_s = 0.12;
+    c.deadband = 1.0;
+    c.drive_m_s = v;
+    c.duration_s = 25.0;
+    const auto r = simulate(c);
+    std::printf("T20 LQR drive %+.2f m/s: fell=%d held=%d max_speed=%.2f max_tilt=%.3f "
+                "max|wcmd|=%.1f creep_after_stop=%+.3f th_rms_end=%.4f\n", v, r.fell,
+                r.held_resets, r.max_speed_m_s, r.max_tilt, r.max_wheel_cmd_rad_s,
+                r.x_stop_travel, r.th_rms);
+    assert(!r.fell && r.held_resets == 0);
+    assert(r.max_speed_m_s > 0.8 * std::abs(v));   // it actually drove
+    assert(std::abs(r.x_stop_travel) < 0.05);       // at rest after the stop
+    assert(r.max_wheel_cmd_rad_s < 25.0);
+    assert(r.th_rms < 0.003);
+  }
+  // T21 (LQR): the real wheel as measured on the 2026-10-01 logs (25 Hz
+  // response): 20 ms dead time + 0.035 s lag, speed/position reading 55 ms
+  // old (the earlier 50 ms + 0.09 s fit took the reading's age for lag). With
+  // the earlier gains the robot rang at ~4 Hz ("pecking"); standing and
+  // driving must stay calm, and a large seed error must still stand.
+  for (double v : {1e-9, 0.45, -0.45}) {
+    for (double tau : {0.035, 0.06, 0.10}) {
+      Case c;
+      c.algo = V3Controller::Algo::Lqr;
+      c.eq = 0.03;
+      c.seed_error = 0.0;
+      c.tau_s = tau;
+      c.deadband = 1.0;
+      c.delay_ticks = 10;
+      c.meas_delay_ticks = 27;
+      c.drive_m_s = v;
+      c.duration_s = 20.0;
+      const auto r = simulate(c);
+      std::printf("T21 LQR measured wheel tau %.3f drive %+.2f: fell=%d held=%d rate_rms=%.3f "
+                  "th_rms_end=%.4f\n", tau, v, r.fell, r.held_resets, r.drive_rate_rms, r.th_rms);
+      assert(!r.fell && r.held_resets == 0);
+      assert(r.drive_rate_rms < 0.25);
+      // Standing only: after a drive the window holds the braking lean.
+      if (std::abs(v) < 1e-3) assert(r.th_rms < 0.01);
+    }
+  }
+  for (double err : {0.08, -0.08}) {
+    Case c;
+    c.algo = V3Controller::Algo::Lqr;
+    c.seed_error = err;
+    c.tau_s = 0.035;
+    c.delay_ticks = 10;
+    c.meas_delay_ticks = 27;
+    const auto r = simulate(c);
+    report("T21 LQR measured wheel seed", c, r);
+    assert(!r.fell);
+  }
+  std::puts("v3_physics_tests: all checks passed");
+  return 0;
+}

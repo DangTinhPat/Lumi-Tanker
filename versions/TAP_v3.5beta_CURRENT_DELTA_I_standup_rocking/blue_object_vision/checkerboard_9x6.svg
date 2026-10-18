@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="260mm" height="185mm" viewBox="0 0 260 185">
+  <rect width="260" height="185" fill="white"/>
+  <g transform="translate(5 5)" fill="black">
+    <path d="M0 0h25v25H0z M50 0h25v25H50z M100 0h25v25h-25z M150 0h25v25h-25z M200 0h25v25h-25z
+             M25 25h25v25H25z M75 25h25v25H75z M125 25h25v25h-25z M175 25h25v25h-25z M225 25h25v25h-25z
+             M0 50h25v25H0z M50 50h25v25H50z M100 50h25v25h-25z M150 50h25v25h-25z M200 50h25v25h-25z
+             M25 75h25v25H25z M75 75h25v25H75z M125 75h25v25h-25z M175 75h25v25h-25z M225 75h25v25h-25z
+             M0 100h25v25H0z M50 100h25v25H50z M100 100h25v25h-25z M150 100h25v25h-25z M200 100h25v25h-25z
+             M25 125h25v25H25z M75 125h25v25H75z M125 125h25v25h-25z M175 125h25v25h-25z M225 125h25v25h-25z
+             M0 150h25v25H0z M50 150h25v25H50z M100 150h25v25h-25z M150 150h25v25h-25z M200 150h25v25h-25z"/>
+  </g>
+</svg>

@@ -1,0 +1,144 @@
+# User-supplied mass allocation for ROBOT (GIM6010-8).STEP.
+# STEP stores the CAD geometry here; these physical masses live alongside it.
+robot: GIM6010-8
+source_cad: ROBOT (GIM6010-8).STEP
+mass_unit: kg
+
+rigid_groups:
+  body:
+    mass: 2.5
+    includes:
+      - plastic frame
+      - battery
+      - four hip/knee motors
+      - PCB
+      - screws and wiring
+    basis: user-specified aggregate, rounded from approximately 2.4 kg
+  thigh_each:
+    mass: 0.05
+    basis: user-specified
+  shin_tube_each:
+    mass: 0.04
+    basis: user-specified
+  wheel_motor_each:
+    mass: 0.20
+    basis: user-specified
+  wheel_each:
+    mass: 0.02
+    basis: inferred from the previously accepted 0.22 kg wheel-plus-motor lump
+
+derived:
+  total_robot_mass: 3.12
+  wheel_plus_motor_each: 0.22
+
+dissipation:
+  wheel_ground:
+    sliding_friction_coefficient: 0.8
+    basis: user-specified; identical in both tangential directions
+    static_dynamic_split: not supplied; one Coulomb coefficient
+  hip_knee_each:
+    coulomb_friction_torque_nm: 0.1
+    viscous_damping_nm_s_per_rad: 0.0
+    basis: user-specified dry friction; no additional guessed viscous term
+
+joint_motion:
+  cad_frame:
+    origin: center of STEP assembly bounding box
+    source_origin_mm: [1370.7624, 648.5787, 964.1983]
+    length_unit: m
+    side_assignment: left is +Y; right is -Y
+  axis_convention: +Y on both sides
+  thigh_joint:
+    type: continuous_revolute
+    mechanical_range: full_rotation
+    basis: user-specified
+    left_axis_position_m: [0.0, 0.1025, 0.00828]
+    right_axis_position_m: [0.0, -0.1025, 0.00828]
+    axis_direction: [0.0, 1.0, 0.0]
+    axis_evidence: coaxial hip plates, bearings and motor shafts
+  knee_joint:
+    type: revolute
+    relative_link_angle_deg:
+      lower: 22
+      upper: 135
+    reference: lower leg angle relative to the thigh horizontal
+    basis: user-specified
+    left_axis_position_m: [-0.09816, 0.1130, -0.01080]
+    right_axis_position_m: [-0.09816, -0.1130, -0.01080]
+    axis_direction: [0.0, 1.0, 0.0]
+    axis_evidence: mating knee pivot bores; hip-to-knee center distance is 0.1000 m
+    cad_neutral_internal_angle_deg: 22.0
+    joint_coordinate_rad_at_cad_neutral: 0.0
+    joint_coordinate_range_rad: [0.0, 1.97222]
+    positive_rotation_increases_internal_angle: true
+    encoder_zero_mapping: pending
+  wheel_joint:
+    type: continuous_revolute
+    left_axis_position_m: [0.0, 0.1327, -0.02988]
+    right_axis_position_m: [0.0, -0.1327, -0.02988]
+    axis_direction: [0.0, 1.0, 0.0]
+    axis_evidence: wheel and wheel-motor cylindrical surfaces
+  motor_shafts:
+    GIM6010_8:
+      occurrences: 4
+      common_axis_point_m: [0.0, 0.0, 0.00828]
+      axis_direction: [0.0, 1.0, 0.0]
+      note: all four shaft geometries are coaxial in the STEP assembly
+    wheel_motor:
+      occurrences: 2
+      common_axis_point_m: [0.0, 0.0, -0.02988]
+      axis_direction: [0.0, 1.0, 0.0]
+    joint_drive_mapping: not encoded as kinematic mates in this STEP
+
+cad_derived_geometry:
+  wheel_center_spacing_m: 0.2654
+  wheel_radius_m: 0.040
+  link_center_distance_hip_to_knee_m: 0.1000
+  link_center_distance_knee_to_wheel_m: 0.1000
+  status: measured from STEP cylinder axes and wheel geometry
+  contract_note: >-
+    STEP wheel centers are 0.2654 m apart, while the existing project contract
+    states 0.309 m. Keep both recorded; resolve before using track-dependent
+    dynamics or wheel odometry.
+
+inertial_properties:
+  status: provisional rigid-group estimates from CAD envelopes and assigned masses
+  cad_frame: centered at the STEP assembly bounding box; +X forward, +Y left, +Z up
+  body:
+    mass_kg: 2.5
+    com_m: [-0.0048, 0.0, 0.0140]
+    iyy_kg_m2: 0.0070
+    diagonal_inertia_about_com_kg_m2: [0.020, 0.007, 0.020]
+    note: >-
+      COM uses the user mass split (1.6 kg in four hip/knee motors, 0.278 kg
+      plastic, 0.210 kg battery, and remaining PCB/wiring/fasteners) and CAD
+      component locations. Iyy is a coarse group estimate, not a solid-mesh result.
+  thigh_each:
+    mass_kg: 0.05
+    com_from_hip_m: [-0.04908, 0.0, -0.00954]
+    iyy_about_com_kg_m2: 0.0000417
+    diagonal_inertia_about_com_kg_m2: [0.000420, 0.0000417, 0.000420]
+    basis: uniform slender link along the 100 mm hip-to-knee CAD vector
+  shin_and_wheel_motor_each:
+    mass_kg: 0.24
+    com_from_knee_m: [0.08998, 0.0, -0.01749]
+    iyy_about_com_kg_m2: 0.000220
+    diagonal_inertia_about_com_kg_m2: [0.001, 0.000220, 0.001]
+    basis: 40 g tube midpoint plus 200 g motor at wheel-axis center
+  wheel_each:
+    mass_kg: 0.02
+    com_from_wheel_axis_m: [0.0, 0.0, 0.0]
+    iyy_about_com_kg_m2: 0.000016
+    diagonal_inertia_about_com_kg_m2: [0.000008, 0.000016, 0.000008]
+    basis: uniform solid disc, 40 mm radius, rotating about +Y
+  cautions:
+    - STEP does not contain rigid-body inertial properties or joint mates.
+    - Wheel-motor stator is grouped with the shin; only the 20 g wheel rotates.
+    - Wheel-center spacing from STEP is 0.2654 m; the old 0.309 m contract is unresolved.
+    - Do not treat these estimated inertias or the simulator as hardware calibration.
+  cad_neutral_whole_robot:
+    com_relative_to_wheel_axle_m: [-0.00668, 0.0, 0.03632]
+    com_height_above_ground_m: 0.07632
+    pitch_inertia_about_axle_kg_m2: 0.01278
+    effective_pendulum_length_m: 0.11094
+    basis: rigid-group estimates above, symmetric two-leg CAD-zero pose
