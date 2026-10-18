@@ -57,6 +57,10 @@ struct Options {
   std::string start_key = "spawn_extended";   // --start-key NAME: the MJCF keyframe the robot starts in ("home" = the lying pose)
   double wheel_torque = 0.13;   // regular/rated cap; --wheel-torque overrides every phase [N.m]
   bool wheel_torque_override = false;
+  // --leg-actuator pos|delta_i: how the four leg joints are driven. pos (default, v3.5.2) models the GDS68
+  // position loop the firmware commands with Set_Input_Pos (no Kt, no Iq feedback, no gravity model in the
+  // controller); delta_i models the older current-compensated torque path.
+  bool leg_pos = true;
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -113,6 +117,11 @@ Options parseOptions(int argc, char** argv) {
       out.wheel_torque = number(next(), "--wheel-torque");
       out.wheel_torque_override = true;
     }
+    else if (arg == "--leg-actuator") {
+      const std::string kind = next();
+      if (kind != "pos" && kind != "delta_i") throw std::invalid_argument("--leg-actuator must be pos or delta_i");
+      out.leg_pos = kind == "pos";
+    }
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
     else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
@@ -126,7 +135,7 @@ Options parseOptions(int argc, char** argv) {
     else if (arg == "--help") {
       std::cout << "tap_mujoco_gim_v3 --model FILE [--rate HZ] [--sensor-rate HZ] "
                    "[--command-port PORT] [--wheel-delay SEC] [--wheel-lag SEC] "
-                   "[--wheel-torque 0..0.20] [--standup key=val,...] "
+                   "[--wheel-torque 0..0.20] [--leg-actuator pos|delta_i] [--standup key=val,...] "
                    "[--sensor-noise SCALE] [--noise-seed UINT] [--allow-model-mismatch] "
                    "[--state-hz HZ] [--control key=val,...] "
                    "[--no-lqr-prediction] [--virtual-hip-lead] [--jump key=val,...] [--at SEC:CMD] "
@@ -169,7 +178,7 @@ class GimV3Runner {
     setNonBlockingStdin();
     openCommandSocket();
     std::cout << "READY|backend=mujoco_gim_v3|model=GIM6010-8|controller=V3Controller"
-              << "|leg_actuator=current_delta_i|physics_hz=" << options_.physics_hz
+              << "|leg_actuator=" << (options_.leg_pos ? "driver_pos" : "current_delta_i") << "|physics_hz=" << options_.physics_hz
               << "|control_hz=" << options_.sensor_hz
               << "|ground_truth_to_controller=0|wheel_regular_limit_nm=" << options_.wheel_torque
               << "|wheel_peak_limit_nm=" << (options_.wheel_torque_override ? options_.wheel_torque : 0.20)
@@ -720,6 +729,7 @@ class GimV3Runner {
     leg_target_current_.fill(0.0F);
     leg_applied_current_.fill(0.0F);
     leg_measured_current_.fill(0.0F);
+    leg_pos_integrator_nm_.fill(0.0F);
     for (std::size_t side = 0; side < 2; ++side)
       wheels_[side].onTorqueEnable(false);
     imu_seeded_ = false;
@@ -774,9 +784,9 @@ class GimV3Runner {
       in.wheel_rad_s[side] = static_cast<float>(sensor(joints_[wheel].velocity_sensor)) + sensorNoise(.03F);
       in.wheel_pos_rad[side] = static_cast<float>(sensor(joints_[wheel].position_sensor)) + sensorNoise(.0005F);
       in.leg_chain_rad += 0.5F * (in.hip_rad[side] + in.knee_rad[side]);
-      in.knee_current_a[side] = leg_measured_current_[2 * side + 1];
+      in.knee_current_a[side] = options_.leg_pos ? 0.0F : leg_measured_current_[2 * side + 1];
     }
-    in.leg_current_valid = true;
+    in.leg_current_valid = !options_.leg_pos;  // the POS firmware does not stream or use Iq
     for (std::size_t i = 0; i < previous_leg_target_.size(); ++i) {
       const std::size_t joint = (i / 2) * 3 + (i % 2);
       const float q = static_cast<float>(sensor(joints_[joint].position_sensor));
@@ -837,6 +847,20 @@ class GimV3Runner {
         output_.leg_knee_offset_rad + output_.leg_roll_knee_rad[1]};
     const auto target = output_.state == V3Controller::State::Fault
         ? previous_leg_target_ : commanded_target;
+    {
+      // Same filter as AppV3 (20 ms low-pass of the clamped common path rate), used only in stand-up.
+      const float alpha = static_cast<float>(dt / (0.02 + dt));
+      const std::array<float, 2> common{output_.leg_hip_offset_rad, output_.leg_knee_offset_rad};
+      for (std::size_t k = 0; k < 2; ++k) {
+        if (output_.state == V3Controller::State::StandUp) {
+          const float raw = std::clamp((common[k] - standup_ff_prev_[k]) / static_cast<float>(dt), -6.0F, 6.0F);
+          standup_ff_rate_[k] += alpha * (raw - standup_ff_rate_[k]);
+        } else {
+          standup_ff_rate_[k] = 0.0F;
+        }
+        standup_ff_prev_[k] = common[k];
+      }
+    }
     for (std::size_t i = 0; i < target.size(); ++i) {
       leg_target_rate_[i] = (target[i] - previous_leg_target_[i]) / dt;
       previous_leg_target_[i] = target[i];
@@ -844,21 +868,51 @@ class GimV3Runner {
       const std::size_t joint = side * 3 + (i % 2);
       const float q = static_cast<float>(sensor(joints_[joint].position_sensor));
       const float qd = static_cast<float>(sensor(joints_[joint].velocity_sensor));
-      const float hip = in.hip_rad[side], knee = in.knee_rad[side];
-      const auto leg_gravity = robot_control::WholeBodyModel::legGravityTorque(hip, knee);
-      const auto body_gravity = robot_control::WholeBodyModel::bodySupportTorque(hip, knee);
-      const float gravity = i % 2 == 0
-          ? leg_gravity.hip_nm + body_gravity.hip_nm
-          : leg_gravity.knee_nm + body_gravity.knee_nm;
-      const float requested = output_.legs_locked
-          ? gravity + kJointKp * (i % 2 == 0 ? output_.leg_hip_kp_scale : output_.leg_kp_scale) *
-                  (target[i] - q) +
-              kJointKd * (i % 2 == 0 ? output_.leg_hip_kd_scale : output_.leg_kd_scale) *
-                  (leg_target_rate_[i] - qd) : 0.0F;
-      const auto iq = tap_fw::v3::currentTorqueCommand(requested,
-          leg_measured_current_[i], output_.legs_locked,
-          kKtNmPerA, kCurrentLimitA, kCurrentCompGain);
-      leg_target_current_[i] = iq.torque_nm / kKtNmPerA;
+      if (options_.leg_pos) {
+        // GDS68 position + passthrough: cascaded position -> velocity -> torque loop inside the driver.
+        // The controller sends only the target (plus the roll velocity feed-forward); the driver has no gravity
+        // model, so the integrator removes the static error. Gains are PROVISIONAL (the real driver
+        // pos_gain / vel_gain / vel_integrator_gain are set on the driver, not in this repository): they
+        // reproduce the stiffness and damping of the delta-I path (kJointKp, kJointKd).
+        float tau = 0.0F;
+        if (output_.legs_locked) {
+          // Like LegLock::velFfTurns: the roll rate reference plus, in stand-up only, the path rate.
+          // The firmware also feeds forward the filtered stand-up path rate (AppV3 ff_*_rate_).
+          const float standup_ff = output_.state == V3Controller::State::StandUp ? standup_ff_rate_[i % 2] : 0.0F;
+          const float vel_ff = standup_ff +
+              (i % 2 == 0 ? output_.leg_roll_hip_rate[side] : output_.leg_roll_knee_rate[side]);
+          const float vel_cmd = std::clamp(kPosGainPerS * (target[i] - q) + vel_ff,
+                                           -kDriverVelLimitRadS, kDriverVelLimitRadS);
+          const float vel_err = vel_cmd - qd;
+          const float unsat = kVelGainNmSPerRad * vel_err + leg_pos_integrator_nm_[i];
+          tau = std::clamp(unsat, -kTorqueLimitNm, kTorqueLimitNm);
+          // Anti-windup: integrate only while the torque is not saturated against the error.
+          if (tau == unsat) {
+            leg_pos_integrator_nm_[i] = std::clamp(
+                leg_pos_integrator_nm_[i] + kVelIntegratorGain * vel_err * static_cast<float>(dt),
+                -kTorqueLimitNm, kTorqueLimitNm);
+          }
+        } else {
+          leg_pos_integrator_nm_[i] = 0.0F;
+        }
+        leg_target_current_[i] = tau / kKtNmPerA;
+      } else {
+        const float hip = in.hip_rad[side], knee = in.knee_rad[side];
+        const auto leg_gravity = robot_control::WholeBodyModel::legGravityTorque(hip, knee);
+        const auto body_gravity = robot_control::WholeBodyModel::bodySupportTorque(hip, knee);
+        const float gravity = i % 2 == 0
+            ? leg_gravity.hip_nm + body_gravity.hip_nm
+            : leg_gravity.knee_nm + body_gravity.knee_nm;
+        const float requested = output_.legs_locked
+            ? gravity + kJointKp * (i % 2 == 0 ? output_.leg_hip_kp_scale : output_.leg_kp_scale) *
+                    (target[i] - q) +
+                kJointKd * (i % 2 == 0 ? output_.leg_hip_kd_scale : output_.leg_kd_scale) *
+                    (leg_target_rate_[i] - qd) : 0.0F;
+        const auto iq = tap_fw::v3::currentTorqueCommand(requested,
+            leg_measured_current_[i], output_.legs_locked,
+            kKtNmPerA, kCurrentLimitA, kCurrentCompGain);
+        leg_target_current_[i] = iq.torque_nm / kKtNmPerA;
+      }
       in.legs_ready = in.legs_ready && std::abs(target[i] - q) < 0.08F;
     }
     for (std::size_t side = 0; side < 2; ++side) {
@@ -1073,6 +1127,8 @@ class GimV3Runner {
   std::array<float, 4> leg_target_current_{};
   std::array<float, 4> leg_applied_current_{};
   std::array<float, 4> leg_measured_current_{};
+  std::array<float, 4> leg_pos_integrator_nm_{};
+  std::array<float, 2> standup_ff_rate_{}, standup_ff_prev_{};  // [hip, knee] common path rate (POS stand-up feed-forward)
   int accel_sensor_ = -1, gyro_sensor_ = -1, body_id_ = -1;
   int left_wheel_body_ = -1, right_wheel_body_ = -1;
   std::uint64_t socket_port_ = 0;
@@ -1100,6 +1156,12 @@ class GimV3Runner {
   static constexpr float kJointKp = 12.0F;
   static constexpr float kJointKd = 0.8F;
   static constexpr float kTorqueLimitNm = kKtNmPerA * kCurrentLimitA;
+  // Provisional GDS68 POS-loop model (see updateController): kPosGainPerS * kVelGainNmSPerRad == kJointKp and
+  // kVelGainNmSPerRad == kJointKd. Driver Set_Limits: 20 rotor turns/s over the 8:1 gear.
+  static constexpr float kVelGainNmSPerRad = kJointKd;
+  static constexpr float kPosGainPerS = kJointKp / kJointKd;
+  static constexpr float kVelIntegratorGain = 5.0F;
+  static constexpr float kDriverVelLimitRadS = 20.0F * 6.28318530718F / 8.0F;
 };
 }  // namespace
 

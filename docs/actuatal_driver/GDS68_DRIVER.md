@@ -148,7 +148,17 @@ Frame chuẩn 11-bit ID, 8 byte data, little-endian (trừ MIT_Control, mục 4)
 CAN ID (11 bit) = (node_id << 5) | cmd_id
 ```
 
-### cmd_id đã dùng trong firmware này
+### Profile firmware TAP v3.5.2 POS
+
+Bản `v3.5.2` mặc định dùng `Set_Controller_Mode` (`0x00B`) với `control_mode=3`,
+`input_mode=1` và `Set_Input_Pos` (`0x00C`). Vị trí là vòng rotor; velocity feed-forward
+là 0.001 vòng rotor/s, torque feed-forward bằng 0. Trước closed loop, firmware gửi
+`Set_Limits` (`0x00F`) với 20 vòng rotor/s và 8 A. Vẫn cần stream encoder `0x009`
+và heartbeat `0x001`; `Get_Iq` không còn là điều kiện START hoặc sensor health.
+Gain vị trí/tốc độ nằm trong driver; firmware không cần quy đổi Nm/A.
+Xem [`V3.5.2_POS.md`](../V3.5.2_POS.md).
+
+### cmd_id của profile torque trước v3.5.2
 
 | cmd_id | Tên | Chiều | Vai trò trong `can_motor.c` |
 |---|---|---|---|

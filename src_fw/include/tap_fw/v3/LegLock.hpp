@@ -15,17 +15,21 @@ namespace motor_transport = robot_control::motor_transport;
 // the offsets the controller asks for. The operator arranges the legs before the
 // motor supply is switched on, so "zero" is exactly that pose.
 //
-// All four joints use direct GDS68 torque mode. Local position/velocity
-// impedance creates a requested torque; fresh measured Iq applies delta-I
-// correction before it is sent to the driver.
+// v3.5.2 defaults to GDS68 position + passthrough: the driver closes the
+// position/velocity loops. No firmware Kt or Iq feedback is needed in this mode.
+// The previous current-compensated torque path is an explicit source-only
+// configuration for comparison; there is no live mode switch.
 class LegLock {
  public:
+  enum class Mode { Position, CurrentTorque };
   struct Config {
+    Mode mode = Mode::Position;
     float ramp_s = 1.0F;                   // current pose -> 0
     // 333 Hz, paced on the 500 Hz control clock (alternating 2/4 ms). Four
     // commands per cycle at 500 Hz would use ~88 % of the 500 kbit/s bus before
     // heartbeat/diagnostics (worst-case stuffing).
     std::uint32_t resend_period_us = 3'000U;
+    // Legacy CurrentTorque gains and Kt estimate; unused by POS.
     float joint_kp_nm_per_rad = board::kLegMaxKpNmPerRad;
     float joint_kd_nm_s_per_rad = 0.5F;
     float gear_ratio = 8.0F;               // rotor turns per joint turn
@@ -40,8 +44,10 @@ class LegLock {
   explicit LegLock(Config config) noexcept : config_(config) {}
 
   // Starts the lock from the measured rotor positions (driver turns).
+  // Stand-up passes ramp_to_zero=false: the caller supplies the measured pose as
+  // the offsets and owns the trajectory, so no homing ramp is superimposed.
   bool engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
-              motor_transport::Transport& transport) noexcept;
+              motor_transport::Transport& transport, bool ramp_to_zero = true) noexcept;
   // Sends the (ramped) hold target at the resend period. Call every tick.
   bool update(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
   // All legs to IDLE.
@@ -52,6 +58,13 @@ class LegLock {
   [[nodiscard]] bool atZero(std::uint64_t now_us) const noexcept;
   [[nodiscard]] float targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
+  [[nodiscard]] bool requiresCurrentFeedback() const noexcept {
+    return config_.mode == Mode::CurrentTorque;
+  }
+  [[nodiscard]] const char* modeName() const noexcept {
+    return requiresCurrentFeedback() ? "CURRENT_TORQUE" : "POS";
+  }
+  // Only used by the explicit CurrentTorque path; POS uses driver encoders.
   void setFeedback(const std::array<float, kLegs>& position_rad,
                    const std::array<float, kLegs>& velocity_rad_s,
                    const std::array<float, kLegs>& current_a,
@@ -69,8 +82,8 @@ class LegLock {
   }
   // Roll (V3Controller::Config::Roll): per-side offsets [left, right]
   // added to the common ones above.
-  // Optional rates [core rad/s] form the velocity reference in the joint
-  // impedance controller.
+  // Optional rates [core rad/s] become driver velocity feed-forward in POS
+  // or the velocity reference in CurrentTorque impedance.
   void setSideOffsets(const std::array<float, 2>& hip_core_rad,
                       const std::array<float, 2>& knee_core_rad,
                       const std::array<float, 2>& hip_rate = {},
@@ -81,11 +94,18 @@ class LegLock {
     side_knee_rate_ = knee_rate;
   }
   // Velocity feed-forward this leg's target carries [driver turns/s].
+  // Rate of the common hip/knee offsets [core rad/s]; POS sends it as the driver velocity feed-forward so
+  // a ramped target (stand-up) is tracked without the pos_gain lag. Zero when the path is held.
+  void setCommonRates(float hip_rate, float knee_rate) noexcept {
+    common_hip_rate_ = hip_rate;
+    common_knee_rate_ = knee_rate;
+  }
   [[nodiscard]] float velFfTurns(std::size_t leg) const noexcept;
   void setResendPeriod(std::uint32_t period_us) noexcept {
     config_.resend_period_us = period_us;
     next_send_us_ = last_send_us_ + period_us;
   }
+  // The following gains/scales only affect CurrentTorque, never driver POS gains.
   void setJointGains(float kp, float kd) noexcept {
     config_.joint_kp_nm_per_rad = kp;
     config_.joint_kd_nm_s_per_rad = kd;
@@ -105,6 +125,7 @@ class LegLock {
   float knee_offset_rad_ = 0.0F;
   std::array<float, 2> side_hip_rad_{};
   std::array<float, 2> side_knee_rad_{};
+  float common_hip_rate_ = 0.0F, common_knee_rate_ = 0.0F;
   std::array<float, 2> side_hip_rate_{};
   std::array<float, 2> side_knee_rate_{};
   std::array<float, kLegs> feedback_position_rad_{};
@@ -117,6 +138,7 @@ class LegLock {
 
   Config config_{};
   bool engaged_ = false;
+  bool ramp_to_zero_ = true;
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;
   std::uint64_t next_send_us_ = 0U;

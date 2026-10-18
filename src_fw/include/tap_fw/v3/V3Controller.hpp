@@ -21,7 +21,8 @@ namespace tap_fw::v3 {
 //   Tier 1  wheels: LQR (or PID / whole-body) on the virtual pitch theta_v.
 //   Tier 2  hips: reflex + preview + slow level loop (Config::Tier).
 //   Knees:  height profile (updateHeight), suspension, knee hold, roll IK.
-// LegLock converts the four leg targets into current-difference torque commands;
+// LegLock sends the four leg targets using driver POS (v3.5.2 default) or the
+// explicit legacy current-compensated torque adapter;
 // this class produces their offsets from the power-up pose (Output::leg_*).
 //
 // Start flow (operator): START -> legs lock -> Ready (wheels hold still, no
@@ -105,7 +106,7 @@ class V3Controller {
     float turn_ff = 1.0F;       // lean-in weight (target atan(v w / g))
     float kp = 0.2F;            // proportional part (1 = the whole tilt at once)
     // Joint velocity reference (SET rollvff): the side offsets' rate enters
-    // the GDS68 current/torque impedance so the knee follows a ramp smoothly.
+    // GDS68 POS feed-forward (or legacy torque impedance) to follow a ramp smoothly.
     // The fast gains without the feed-forward are worse, so both switch together.
     // Off: it made the side legs hunt on the robot.
     bool vel_ff = false;

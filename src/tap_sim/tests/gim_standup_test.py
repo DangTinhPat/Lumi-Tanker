@@ -18,7 +18,7 @@ from native_runner_contract_test import fields
 def run(args, name, extra, duration=24.0, start=.2, model=None):
     command = [str(args.runner), "--model", str(model or args.model), "--rate", "3000",
                "--run-for", str(duration), "--start-key", "home", "--roll", "1",
-               "--at", f"{start}:STANDUP", *extra]
+               "--leg-actuator", args.leg_actuator, "--at", f"{start}:STANDUP", *extra]
     result = subprocess.run(command, input="", capture_output=True, text=True,
                             timeout=180, check=False)
     (args.evidence / f"{name}.log").write_text(result.stdout)
@@ -164,6 +164,8 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--cases", default="all")
+    parser.add_argument("--leg-actuator", default="pos", choices=("pos", "delta_i"),
+                        help="leg joint drive model of the runner (pos = GDS68 position loop, the v3.5.2 firmware)")
     parser.add_argument("--extended", action="store_true", help="include plant mismatch and sensor noise cases")
     parser.add_argument("--standup", default="", help="explicit tuning override, recorded in commands")
     parser.add_argument("--random-cases", type=int, default=0, help="fixed-seed combined perturbation cases")

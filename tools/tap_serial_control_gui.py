@@ -195,7 +195,7 @@ class SerialLink:
 class TapSerialControlApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("TAP — điều khiển qua USB")
+        root.title("TAP — v3.5.2 POS · đứng dậy · USB")
         root.geometry("850x800")
         root.minsize(760, 600)
 
@@ -209,6 +209,7 @@ class TapSerialControlApp:
         self.link = SerialLink(self.incoming)
         self.last_vision_diag_log_s = 0.0
         self.port_var = tk.StringVar()
+        self.lying_zero_confirmed = tk.BooleanVar(value=False)
         self.connection_var = tk.StringVar(value="Chưa kết nối")
         self.mode_var = tk.StringVar(value="—")
         self.algorithm_var = tk.StringVar(value="Chưa đọc được")
@@ -326,6 +327,13 @@ class TapSerialControlApp:
                                 sticky="ew")
         ttk.Label(actions, textvariable=self.vision_status_var).grid(
             row=5, column=0, columnspan=5, padx=4, pady=(0, 3), sticky="w")
+        ttk.Checkbutton(actions,
+                        text="Đã bật nguồn motor khi robot ở đúng tư thế nằm HOME (mốc encoder)",
+                        variable=self.lying_zero_confirmed).grid(
+            row=6, column=0, columnspan=5, padx=4, pady=3, sticky="w")
+        ttk.Button(actions, text="ĐỨNG DẬY → 130 mm (v3.5.2 POS)",
+                   command=self.standup).grid(
+            row=7, column=0, columnspan=5, padx=4, pady=3, sticky="ew")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
 
@@ -348,7 +356,7 @@ class TapSerialControlApp:
                 row=0, column=column, padx=4, sticky="ew")
             measure.columnconfigure(column, weight=1)
 
-        console = ttk.LabelFrame(self.root, text="Lệnh console (vd: SET leg_kp 15 · SET leg_kd 0.5 · GET)",
+        console = ttk.LabelFrame(self.root, text="Lệnh console (v3.5.2 POS · vd: SET height 150 · GET)",
                                  padding=10)
         console.pack(fill="x", padx=10, pady=(0, 8))
         self.command_var = tk.StringVar()
@@ -446,6 +454,7 @@ class TapSerialControlApp:
             self.connect()
 
     def connect(self) -> None:
+        self.lying_zero_confirmed.set(False)
         if self.link.connected:
             self._release_all()
             self.disable()
@@ -487,6 +496,24 @@ class TapSerialControlApp:
             return
         self.session_active = True
         self._send("START")
+        self.last_heartbeat = time.monotonic()
+
+    def standup(self) -> None:
+        if not self.link.connected or not self.firmware_ready:
+            self._append_log("Chưa kết nối/chưa có SENS; chưa gửi STANDUP.")
+            return
+        if self.mode_var.get() not in ("Idle", "Fault"):
+            self._append_log("DISABLE trước khi đứng dậy.")
+            return
+        if not self.lying_zero_confirmed.get():
+            self._append_log("Xác nhận nguồn motor đã bật ở tư thế HOME; mốc encoder phải đúng trước khi đứng dậy.")
+            return
+        self._clear_drive_inputs()
+        # v3.5.2 legs are always POS: no legmode command.
+        for command in ("SET lying 1", "SET standup 1", "STANDUP"):
+            if not self._send(command):
+                return
+        self.session_active = True
         self.last_heartbeat = time.monotonic()
 
     def tilt_test(self) -> None:

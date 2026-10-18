@@ -207,7 +207,7 @@ int main() {
     assert(lock.update(1000000, bus) && bus.can.size() == before);
     std::printf("paired CAN pacing: %d batches / 100 ms, no stall burst\n", batches);
   }
-  // Current/torque mode is the only leg mode; targets still ramp from the
+  // POS is the default leg mode; targets still ramp from the
   // measured pose to exactly 0 before the controller moves the legs.
   {
     FakeTransport bus;
@@ -222,10 +222,10 @@ int main() {
       assert(near(limits.current_limit_a, lock.config().current_limit_a));
       assert(cmdOf(bus.can[4 + i]) == kSetControllerModeCmdId);
       const auto mode = unpackSetControllerMode(bus.can[4 + i].data);
-      assert(mode.control_mode == kControlModeTorque &&
+      assert(mode.control_mode == kControlModePosition &&
              mode.input_mode == kInputModePassthrough);
-      assert(cmdOf(bus.can[8 + i]) == kSetInputTorqueCmdId);
-      assert(near(unpackSetInputTorque(bus.can[8 + i].data), 0.0F));
+      assert(cmdOf(bus.can[8 + i]) == kSetInputPosCmdId);
+      assert(near(unpackSetInputPosTurns(bus.can[8 + i].data), start[i]));
       assert(cmdOf(bus.can[12 + i]) == kSetAxisStateCmdId);
       assert(unpackSetAxisState(bus.can[12 + i].data) == kAxisStateClosedLoop);
     }
@@ -239,13 +239,35 @@ int main() {
     assert(lock.atZero(2'000'000U));
     bus.can.clear();
     assert(lock.update(2'100'000U, bus));
-    for (const auto& f : bus.can) assert(near(unpackSetInputTorque(f.data), 0.0F));
+    for (const auto& f : bus.can) assert(near(unpackSetInputPosTurns(f.data), 0.0F));
     bus.can.clear();
     assert(lock.release(bus) && bus.can.size() == 4U);
     for (const auto& f : bus.can) {
       assert(cmdOf(f) == kSetAxisStateCmdId && unpackSetAxisState(f.data) == kAxisStateIdle);
     }
     assert(!lock.engaged());
+  }
+  // Stand-up engage (ramp_to_zero=false): the first Set_Input_Pos equals each joint's own measured
+  // position (asymmetric sides included), afterwards the target is just the caller's offsets - no
+  // homing ramp - and the lock is immediately "at zero" so the controller owns the path.
+  {
+    FakeTransport bus;
+    LegLock lock;
+    const std::array<float, 4> start{0.8F, -0.4F, 0.3F, -0.1F};
+    lock.setOffsets(0.5F, -0.25F);
+    assert(lock.engage(start, 1'000'000U, bus, false));
+    for (int i = 0; i < 4; ++i) {
+      assert(cmdOf(bus.can[8 + i]) == kSetInputPosCmdId);
+      assert(near(unpackSetInputPosTurns(bus.can[8 + i].data), start[i]));
+    }
+    assert(lock.atZero(1'000'000U));
+    const auto legs = tap_fw::board::MotorIds{}.leg_can;
+    for (std::size_t i = 0; i < 4U; ++i) {
+      const bool knee = legs[i].joint_index == 1U || legs[i].joint_index == 4U;
+      const float expect = (knee ? -0.25F : 0.5F) * legs[i].driver_sign * 8.0F / 6.28318530718F;
+      assert(near(lock.targetTurns(i, 1'003'000U), expect));
+      assert(near(lock.targetTurns(i, 1'500'000U), expect));
+    }
   }
 
   // Height core hip/knee offsets become driver turns per leg
@@ -286,6 +308,7 @@ int main() {
   {
     FakeTransport bus;
     LegLock::Config cfg{};
+    cfg.mode = LegLock::Mode::CurrentTorque;
     cfg.ramp_s = 0.0F;
     LegLock lock(cfg);
     lock.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F}, {0.1F, -0.1F}, {0.5F, -0.5F});
@@ -350,6 +373,7 @@ int main() {
   {
     FakeTransport bus;
     LegLock::Config cfg{};
+    cfg.mode = LegLock::Mode::CurrentTorque;
     cfg.ramp_s = 0.0F;
     LegLock lock(cfg);
     const std::array<float, 4> q{0.0F, 0.0F, 0.0F, 0.0F};

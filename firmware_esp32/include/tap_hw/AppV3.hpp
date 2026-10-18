@@ -25,10 +25,10 @@
 
 namespace tap_hw {
 
-// Firmware v3: two-wheel inverted pendulum. The legs are arranged before the
+// Firmware v3.5.2: two-wheel inverted pendulum. The legs are arranged before the
 // motor supply is switched on and controlled around that power-up pose from
-// encoder 0 using current-compensated GDS68 torque mode; only the wheels balance. USB serial only
-// (tools/tap_serial_control_gui.py), no BLE.
+// encoder 0 using GDS68 POS; the wheels run the balance loop.
+// USB serial GUI (tools/tap_serial_control_gui.py) or Dabble BLE gamepad.
 class AppV3 {
  public:
   AppV3() noexcept;
@@ -128,8 +128,18 @@ class AppV3 {
   bool start_pending_ = false;
   bool disable_pending_ = false;
   bool go_pending_ = false;
-  bool jump_pending_ = false;  // v3.5 jump request (SET jump 1 first)
-  float jump_forward_m_ = 0.0F;   // JUMP <m>: hop distance of the next jump (NaN = default hop)
+  // Stand-up POS velocity feed-forward: filtered rate of the commanded hip/knee path [core rad/s].
+  float ff_hip_prev_ = 0.0F, ff_knee_prev_ = 0.0F, ff_hip_rate_ = 0.0F, ff_knee_rate_ = 0.0F;
+  std::uint64_t ff_prev_us_ = 0U;
+  bool standup_pending_ = false;  // STANDUP request (SET standup 1, SET lying 1)
+  // Lying start (SET lying 1): the motor supply was switched on with the robot in the `home` lying
+  // pose, so the driver zero is that pose. The controller works in the CAD frame (hip 1.3055 rad,
+  // knee 0 there): measured joints get this offset added and every leg target has it subtracted.
+  bool lying_start_ = false;
+  static constexpr float kHomeHipRad = 1.30550628F;
+  static constexpr float kHomeKneeRad = 0.0F;
+  [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : 0.0F; }
+  [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : 0.0F; }
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;
