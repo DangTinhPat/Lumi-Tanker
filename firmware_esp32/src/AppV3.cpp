@@ -132,10 +132,25 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
 }  // namespace
 
 namespace {
+// Straight-leg balance (legs locked fully extended, body on the stand or on the floor) is the plain wheel loop:
+// LQR on the IMU pitch. The layered controller (virtual pitch, hip trunk hold, level, suspension, preview,
+// adaptive lead) was built for the folded stand-up pose; plain = those layers off. The stand-up (SET lying 1)
+// needs the full set, and SET vpitch / trunk / tlvl / tsus / tprev / lqradapt still switch each layer.
+void applyBalanceProfile(tap_fw::v3::V3Controller::Config& config, bool plain) noexcept {
+  const auto layered = tap_fw::v3::defaultV3Config();
+  config.tier.virtual_pitch = plain ? false : layered.tier.virtual_pitch;
+  config.tier.trunk = plain ? false : layered.tier.trunk;
+  config.tier.level = plain ? false : layered.tier.level;
+  config.tier.suspension = plain ? false : layered.tier.suspension;
+  config.tier.preview = plain ? false : layered.tier.preview;
+  config.lqr_lead_adaptive = plain ? false : layered.lqr_lead_adaptive;
+}
+
 // Default controller config with the legs starting fully extended (see AppV3::kStraightKneeRad).
 tap_fw::v3::V3Controller::Config straightStartConfig() noexcept {
   auto config = tap_fw::v3::defaultV3Config();
   config.initial_knee_rad = tap_fw::v3::LegHeight::kKneeMaxRad;
+  applyBalanceProfile(config, true);
   return config;
 }
 }  // namespace
@@ -705,6 +720,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       lying_start_ = v >= 0.5F;
       // The lying start keeps the knee at its homing stop (0); the straight start begins fully extended.
       ctrl_.config().initial_knee_rad = lying_start_ ? 0.0F : tap_fw::v3::LegHeight::kKneeMaxRad;
+      applyBalanceProfile(ctrl_.config(), !lying_start_);
       out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n",
                   lying_start_ ? "ON" : "off", homeHip(), homeKnee());
     }

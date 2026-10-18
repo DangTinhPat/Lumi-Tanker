@@ -61,6 +61,9 @@ struct Options {
   // position loop the firmware commands with Set_Input_Pos (no Kt, no Iq feedback, no gravity model in the
   // controller); delta_i models the older current-compensated torque path.
   bool leg_pos = true;
+  // --plain-balance 1: straight-leg balance as the v3.5.2 firmware boots it (LQR on the IMU pitch; no virtual pitch,
+  // hip trunk, level, suspension, preview or adaptive lead). Off keeps the layered controller of the stand-up work.
+  bool plain_balance = false;
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -122,6 +125,7 @@ Options parseOptions(int argc, char** argv) {
       if (kind != "pos" && kind != "delta_i") throw std::invalid_argument("--leg-actuator must be pos or delta_i");
       out.leg_pos = kind == "pos";
     }
+    else if (arg == "--plain-balance") out.plain_balance = number(next(), "--plain-balance") != 0.0;
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--motor-reserve") out.motor_reserve = number(next(), "--motor-reserve");
     else if (arg == "--lateral-accel") out.lateral_accel = number(next(), "--lateral-accel");
@@ -434,6 +438,14 @@ class GimV3Runner {
     // explicit catch_lead override permits model-mismatch experiments.
     config.standup.catch_wheel_lead_s = static_cast<float>(options.wheel_lag_s);
     applyStandUpSpec(config.standup, options.standup_spec);
+    if (options.plain_balance) {
+      config.tier.virtual_pitch = false;
+      config.tier.trunk = false;
+      config.tier.level = false;
+      config.tier.suspension = false;
+      config.tier.preview = false;
+      config.lqr_lead_adaptive = false;
+    }
     if (options.plan_vmax > 0.0) config.tier.plan_vmax_m_s = static_cast<float>(options.plan_vmax);
     // motor_reserve < 0 keeps the default; 0 still caps at the no-load speed; >= 1.5 turns the envelope off.
     if (options.motor_reserve >= 0.0) config.tier.motor_reserve = static_cast<float>(options.motor_reserve);
