@@ -182,16 +182,16 @@ int main() {
     LegLock lock;
     const std::array<float, 4> start{0.8F, -0.4F, 0.2F, 0.0F};
     assert(lock.engage(start, 1'000'000U, bus));
-    assert(bus.can.size() == 12U);
+    assert(bus.can.size() == 16U);
     for (int i = 0; i < 4; ++i) {
-      assert(cmdOf(bus.can[i]) == kSetControllerModeCmdId);
-      const auto mode = unpackSetControllerMode(bus.can[i].data);
+      assert(cmdOf(bus.can[4 + i]) == kSetControllerModeCmdId);
+      const auto mode = unpackSetControllerMode(bus.can[4 + i].data);
       assert(mode.control_mode == kControlModePosition &&
              mode.input_mode == kInputModePassthrough);
-      assert(cmdOf(bus.can[4 + i]) == kSetInputPosCmdId);
-      assert(near(unpackSetInputPosTurns(bus.can[4 + i].data), start[i]));
-      assert(cmdOf(bus.can[8 + i]) == kSetAxisStateCmdId);
-      assert(unpackSetAxisState(bus.can[8 + i].data) == kAxisStateClosedLoop);
+      assert(cmdOf(bus.can[8 + i]) == kSetInputPosCmdId);
+      assert(near(unpackSetInputPosTurns(bus.can[8 + i].data), start[i]));
+      assert(cmdOf(bus.can[12 + i]) == kSetAxisStateCmdId);
+      assert(unpackSetAxisState(bus.can[12 + i].data) == kAxisStateClosedLoop);
     }
     assert(!lock.atZero(1'500'000U));
     const float mid = lock.targetTurns(0, 1'500'000U);
@@ -309,8 +309,8 @@ int main() {
     cfg.ramp_s = 0.0F;
     LegLock lock(cfg);
     assert(lock.engage({0.8F, 0.0F, 0.0F, 0.0F}, 0U, bus));
-    const auto mit = unpackMitCommand(bus.can[4].data);
-    assert(cmdOf(bus.can[4]) == kMitControlCmdId);
+    const auto mit = unpackMitCommand(bus.can[8].data);
+    assert(cmdOf(bus.can[8]) == kMitControlCmdId);
     assert(near(mit.pos_rad, 0.0F, 1.0e-3F));  // ramp 0: straight to zero
     assert(near(mit.kp, 15.0F, 0.2F) && near(mit.kd, 0.5F, 0.01F));
   }

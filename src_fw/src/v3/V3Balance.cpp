@@ -164,13 +164,16 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
 float V3Controller::lqrInertiaLength() noexcept {
   // I_axle / (m l) of the whole robot at the commanded pose (CAD masses and
   // inertia; wheels roll with the axle). Recomputed only when the pose moves.
-  if (std::abs(pose_.knee_offset_rad - lqr_leff_knee_) > 1.0e-3F ||
-      std::abs(pose_.hip_offset_rad - lqr_leff_hip_) > 1.0e-3F) {
-    lqr_leff_knee_ = pose_.knee_offset_rad;
-    lqr_leff_hip_ = pose_.hip_offset_rad;
-    const float hip = LegHeight::hangHipCad() + pose_.hip_offset_rad;
-    const auto b = robot_control::WholeBodyModel{}.compute(hip, pose_.knee_offset_rad, hip,
-                                                           pose_.knee_offset_rad);
+  // A captured recovery pose can have a substantial hip offset from the
+  // nominal height manifold. Use that retained geometry for wheel gains.
+  const float knee = recovery_pose_held_ ? kneeCommand() : pose_.knee_offset_rad;
+  const float hip_offset = recovery_pose_held_ ? hipCommand() : pose_.hip_offset_rad;
+  if (std::abs(knee - lqr_leff_knee_) > 1.0e-3F ||
+      std::abs(hip_offset - lqr_leff_hip_) > 1.0e-3F) {
+    lqr_leff_knee_ = knee;
+    lqr_leff_hip_ = hip_offset;
+    const float hip = LegHeight::hangHipCad() + hip_offset;
+    const auto b = robot_control::WholeBodyModel{}.compute(hip, knee, hip, knee);
     const float l = std::hypot(b.com_offset_x_m, b.com_above_axle_m);
     if (l > 0.01F && b.pitch_inertia_at_axle_kg_m2 > 0.0F) {
       lqr_leff_m_ = b.pitch_inertia_at_axle_kg_m2 /
@@ -229,7 +232,15 @@ void V3Controller::updateGuard(const Input& in, float reference) {
 std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd) {
   const Pid& p = config_.pid;  // shared held/lifted thresholds and deadband comp
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
-  const float vmax = config_.lqr.max_ground_velocity_m_s;
+  // Retaining the recovery pose must not suddenly unlock the driving limits.
+  // The 16:07 log crossed from 16 rad/s in Catching to 69 rad/s afterwards.
+  const bool recovery_bounds = recovery_pose_held_ && config_.standup.coordinated_speed;
+  const float vmax = recovery_bounds
+      ? std::min(config_.lqr.max_ground_velocity_m_s, config_.standup.catch_wheel_max_rad_s * radius)
+      : config_.lqr.max_ground_velocity_m_s;
+  const float saved_vmax = lqr_.config().max_ground_velocity_m_s;
+  const float saved_amax = lqr_.config().max_ground_accel_m_s2;
+  const float recovery_amax = std::min(saved_amax, config_.standup.catch_accel_max);
   // The pendulum length tracks the current leg height every tick; with the gain
   // table built this is a cheap interpolation.
   lqr_.setComHeight(config_.lqr_inertia_length
@@ -406,7 +417,7 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
         predictor, in.dt_s,
         config_.lqr_inertia_length ? lqrInertiaLength() :
             pose_.com_above_axle_m * config_.lqr.pendulum_length_per_com_height,
-        carrier, std::min(config_.lqr.max_ground_accel_m_s2,
+        carrier, std::min(recovery_bounds ? recovery_amax : config_.lqr.max_ground_accel_m_s2,
                           config_.lqr.wheel_ground_mu * 9.81F));
     state.wheel.position_m = future[0];
     state.wheel.velocity_m_s = future[2];
@@ -445,7 +456,16 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
   // integrate=false while held: LqrBalancer decays the commanded speed to zero on
   // its own (~0.1 s) and freezes the balance-trim adaptation.
   const bool integrate = !held_outer_off_;
+  if (recovery_bounds) {
+    lqr_.setMaxGroundVelocity(vmax);
+    lqr_.setMaxGroundAccel(recovery_amax);
+  }
   const auto lqr_out = lqr_.update(state, command, integrate, ffPitch() + lean_ff, true);
+  if (recovery_bounds) {
+    // Preserve normal driving configuration and runtime SET overrides.
+    lqr_.setMaxGroundVelocity(saved_vmax);
+    lqr_.setMaxGroundAccel(saved_amax);
+  }
   // updateHeight's balance-quality gate reads the pitch reference from pid_ref_.
   pid_ref_ = lqr_.debugState().lqr_pitch_ref_rad;
 
@@ -531,9 +551,13 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
           body_rate_ + in.hip_rate_rad_s[side] + in.knee_rate_rad_s[side], -3.0F, 3.0F);
     }
   }
-  const std::array<float, 2> sent{
+  std::array<float, 2> sent{
       comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
       comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
+  if (recovery_bounds) {
+    for (auto& w : sent)
+      w = std::clamp(w, -config_.standup.catch_wheel_max_rad_s, config_.standup.catch_wheel_max_rad_s);
+  }
   {
     const float sent_speed = config_.lqr.left_wheel_sign * radius * .5F * (sent[0]+sent[1]);
     if (config_.guard.mode >= 2) {

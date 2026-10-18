@@ -274,6 +274,19 @@ tap_fw::UartPort Esp32UartPort::port() noexcept {
   return tap_fw::UartPort{this, &Esp32UartPort::send, &Esp32UartPort::receive};
 }
 
+void Esp32UartPort::setSpeedPriority(bool enabled) noexcept {
+  taskENTER_CRITICAL(&mux_);
+  speed_priority_ = enabled;
+  taskEXIT_CRITICAL(&mux_);
+}
+
+bool Esp32UartPort::speedPriority() noexcept {
+  taskENTER_CRITICAL(&mux_);
+  const bool enabled = speed_priority_;
+  taskEXIT_CRITICAL(&mux_);
+  return enabled;
+}
+
 void Esp32UartPort::taskEntry(void* context) noexcept {
   auto* self = static_cast<Esp32UartPort*>(context);
   if (self == nullptr) { vTaskDelete(nullptr); return; }
@@ -350,16 +363,25 @@ bool Esp32UartPort::send(void* context, const frame::DxlFrame& input) noexcept {
   if (!write.ok || write.id != self->motor_id_ ||
       (write.address != frame::kDxlTorqueEnableAddr && write.address != frame::kDxlMovingSpeedAddr)) return false;
   const bool speed = write.address == frame::kDxlMovingSpeedAddr;
+  if (write.data_len != (speed ? 2U : 1U)) return false;
   const auto speed_raw = static_cast<std::int16_t>(write.data[0] | (write.data[1] << 8));
   const std::int64_t now = esp_timer_get_time();
   bool queued = true;
   taskENTER_CRITICAL(&self->mux_);
+  if (!speed && write.data[0] == 0U) {
+    // Stop supersedes all commands not yet on the wire. Never replay an old
+    // torque-enable or speed after a newer torque-disable request.
+    self->diag_.cancelled += self->q_count_;
+    self->q_head_ = self->q_count_ = 0U;
+    ++self->stop_epoch_;
+  }
   const std::size_t tail = (self->q_head_ + self->q_count_ + kQueue - 1U) % kQueue;
   const bool tail_speed = self->q_count_ != 0U && self->queue_[tail].speed;
   if (!speed) {
     self->last_speed_valid_ = false;        // after a torque change the next speed always goes out
   } else if (!tail_speed && self->last_speed_valid_ && speed_raw == self->last_speed_raw_ &&
              now - self->last_speed_tx_us_ < kSpeedKeepaliveUs) {
+    ++self->diag_.unchanged;
     taskEXIT_CRITICAL(&self->mux_);
     return true;                            // unchanged and recently written: nothing to send
   }
@@ -367,8 +389,11 @@ bool Esp32UartPort::send(void* context, const frame::DxlFrame& input) noexcept {
     self->queue_[tail].frame = input;       // latest speed wins; order against torque writes is kept
     self->queue_[tail].speed_raw = speed_raw;
     self->queue_[tail].attempts = 0U;
+    self->queue_[tail].latest_us = now;
+    ++self->diag_.coalesced;
   } else if (self->q_count_ < kQueue) {
-    self->queue_[(self->q_head_ + self->q_count_) % kQueue] = Pending{input, 0U, speed, speed_raw};
+    self->queue_[(self->q_head_ + self->q_count_) % kQueue] =
+        Pending{input, 0U, speed, speed_raw, self->stop_epoch_, now, now};
     ++self->q_count_;
   } else {
     queued = false;
@@ -407,6 +432,13 @@ bool Esp32UartPort::popPending(Pending& out) noexcept {
     const auto write = frame::parseDxlWrite(candidate.frame);
     const bool disable = write.ok && write.address == frame::kDxlTorqueEnableAddr && write.data[0] == 0U;
     if (!synced_ && !disable) { ++diag_.dropped; continue; }
+    // A duplicate can have been queued while the previous write awaited ACK.
+    // Recheck here so it does not cost another complete write/read exchange.
+    if (candidate.speed && last_speed_valid_ && candidate.speed_raw == last_speed_raw_ &&
+        esp_timer_get_time() - last_speed_tx_us_ < kSpeedKeepaliveUs) {
+      ++diag_.unchanged;
+      continue;
+    }
     out = candidate;
     found = true;
     break;
@@ -415,9 +447,32 @@ bool Esp32UartPort::popPending(Pending& out) noexcept {
   return found;
 }
 
-Esp32UartPort::Diagnostics Esp32UartPort::diagnostics() noexcept {
+bool Esp32UartPort::speedPending() noexcept {
+  taskENTER_CRITICAL(&mux_);
+  const bool pending = speed_priority_ && q_count_ != 0U && queue_[q_head_].speed;
+  taskEXIT_CRITICAL(&mux_);
+  return pending;
+}
+
+bool Esp32UartPort::stopPending() noexcept {
+  taskENTER_CRITICAL(&mux_);
+  const bool pending = q_count_ != 0U && !queue_[q_head_].speed &&
+      queue_[q_head_].frame.bytes[5] == frame::kDxlTorqueEnableAddr &&
+      queue_[q_head_].frame.bytes[6] == 0U;
+  taskEXIT_CRITICAL(&mux_);
+  return pending;
+}
+
+Esp32UartPort::Diagnostics Esp32UartPort::diagnostics(bool reset_maxima) noexcept {
   taskENTER_CRITICAL(&mux_);
   Diagnostics snapshot = diag_;
+  snapshot.speed_priority = speed_priority_;
+  snapshot.speed_tx_age_us = last_speed_wire_us_ == 0 ? 999'999U :
+      static_cast<std::uint32_t>(std::min<std::int64_t>(esp_timer_get_time() - last_speed_wire_us_, 999'999));
+  if (reset_maxima) {
+    diag_.rtt_max_us = diag_.gap_max_us = diag_.tx_hold_max_us = 0U;
+    diag_.speed_queue_max_us = diag_.pending_max_us = 0U;
+  }
   taskEXIT_CRITICAL(&mux_);
   const std::int64_t age = (esp_timer_get_time() - last_reply_us_) / 1000;
   snapshot.reply_age_ms = age < 0 ? 0U : static_cast<std::uint32_t>(std::min<std::int64_t>(age, 99'999));
@@ -428,24 +483,37 @@ Esp32UartPort::Diagnostics Esp32UartPort::diagnostics() noexcept {
   return snapshot;
 }
 
-void Esp32UartPort::format(char* buffer, std::size_t size) noexcept {
-  const auto d = diagnostics();
-  std::snprintf(buffer, size,
-                "WBUS %s id=%u sync=%d drvmode=%ld srl=%ld silent=%d age_ms=%lu rx=%lu rto=%lu wto=%lu err=%lu bad=%lu "
-                "modew=%lu probes=%lu drop=%lu rtt_max_us=%lu late=%lu gap_max_us=%lu tx_hold_us=%lu tx_late=%lu",
-                name_, static_cast<unsigned>(motor_id_), d.synced ? 1 : 0, static_cast<long>(d.drv_mode),
-                static_cast<long>(d.status_return), d.silent ? 1 : 0, static_cast<unsigned long>(d.reply_age_ms), static_cast<unsigned long>(d.rx),
-                static_cast<unsigned long>(d.read_timeouts), static_cast<unsigned long>(d.write_timeouts),
-                static_cast<unsigned long>(d.motor_errors), static_cast<unsigned long>(d.bad_frames),
-                static_cast<unsigned long>(d.mode_writes), static_cast<unsigned long>(d.probes),
-                static_cast<unsigned long>(d.dropped), static_cast<unsigned long>(d.rtt_max_us),
-                static_cast<unsigned long>(d.late), static_cast<unsigned long>(d.gap_max_us),
-                static_cast<unsigned long>(d.tx_hold_max_us), static_cast<unsigned long>(d.tx_late));
-  taskENTER_CRITICAL(&mux_);
-  diag_.rtt_max_us = 0U;   // per-report maxima
-  diag_.gap_max_us = 0U;
-  diag_.tx_hold_max_us = 0U;
-  taskEXIT_CRITICAL(&mux_);
+void Esp32UartPort::format(tap_fw::DeferredLine& b) noexcept {
+  const auto d = diagnostics(true);
+  b.str("WBUS ").str(name_)
+      .str(" id=").u32(motor_id_)
+      .str(" sync=").i32(d.synced ? 1 : 0)
+      .str(" drvmode=").i32(d.drv_mode)
+      .str(" srl=").i32(d.status_return)
+      .str(" silent=").i32(d.silent ? 1 : 0)
+      .str(" age_ms=").u32(d.reply_age_ms)
+      .str(" rx=").u32(d.rx)
+      .str(" rto=").u32(d.read_timeouts)
+      .str(" wto=").u32(d.write_timeouts)
+      .str(" err=").u32(d.motor_errors)
+      .str(" bad=").u32(d.bad_frames)
+      .str(" modew=").u32(d.mode_writes)
+      .str(" probes=").u32(d.probes)
+      .str(" drop=").u32(d.dropped)
+      .str(" rtt_max_us=").u32(d.rtt_max_us)
+      .str(" late=").u32(d.late)
+      .str(" gap_max_us=").u32(d.gap_max_us)
+      .str(" tx_hold_us=").u32(d.tx_hold_max_us)
+      .str(" tx_late=").u32(d.tx_late)
+      .str(" prio=").i32(d.speed_priority ? 1 : 0)
+      .str(" speed_tx=").u32(d.speed_tx)
+      .str(" queue_max_us=").u32(d.speed_queue_max_us)
+      .str(" pending_max_us=").u32(d.pending_max_us)
+      .str(" speed_age_us=").u32(d.speed_tx_age_us)
+      .str(" sent_raw=").i32(d.sent_speed_raw)
+      .str(" merged=").u32(d.coalesced)
+      .str(" unchanged=").u32(d.unchanged)
+      .str(" cancelled=").u32(d.cancelled);
 }
 
 bool Esp32UartPort::transmit(const frame::DxlFrame& request) noexcept {
@@ -544,7 +612,13 @@ bool Esp32UartPort::readReply(frame::DxlFrame& output, bool block) noexcept {
 }
 
 bool Esp32UartPort::transact(const frame::DxlFrame& request, frame::DxlParsed* reply,
-                             std::int64_t window_us) noexcept {
+                             std::int64_t window_us, const Pending* pending) noexcept {
+  if (pending != nullptr) {
+    taskENTER_CRITICAL(&mux_);
+    const bool superseded = pending->epoch != stop_epoch_;
+    taskEXIT_CRITICAL(&mux_);
+    if (superseded) return false;
+  }
   // Anything left from an earlier exchange stays in the parser: a late Present Data reply is still a
   // valid sample, and replies to other registers are rejected by the [INS, ADDR] match below.
   echo_len_ = request.len;
@@ -555,6 +629,19 @@ bool Esp32UartPort::transact(const frame::DxlFrame& request, frame::DxlParsed* r
   if (!transmit(request)) { echo_len_ = echo_pos_ = 0U; return false; }
   echo_deadline_us_ = esp_timer_get_time() + 3'000U;
   const std::int64_t released = esp_timer_get_time();
+  if (pending != nullptr && pending->speed) {
+    // Timestamp actual TX completion, not enqueue/ACK completion. This does
+    // not prove the motor applied the speed; it isolates ESP32 queue latency.
+    taskENTER_CRITICAL(&mux_);
+    ++diag_.speed_tx;
+    diag_.sent_speed_raw = pending->speed_raw;
+    last_speed_wire_us_ = released;
+    diag_.speed_queue_max_us = std::max(diag_.speed_queue_max_us,
+        static_cast<std::uint32_t>(std::min<std::int64_t>(released - pending->latest_us, 999'999)));
+    diag_.pending_max_us = std::max(diag_.pending_max_us,
+        static_cast<std::uint32_t>(std::min<std::int64_t>(released - pending->queued_us, 999'999)));
+    taskEXIT_CRITICAL(&mux_);
+  }
   if (!is_read && !ack_writes_) {
     // Status Return Level 1: no acknowledgement is coming. Leave the driver a moment to take the
     // write before the next frame instead of waiting for a reply that never arrives.
@@ -674,8 +761,9 @@ void Esp32UartPort::bootSync(std::int64_t now) noexcept {
 
 void Esp32UartPort::run() noexcept {
   const std::int64_t now = esp_timer_get_time();
+  const bool stop_pending = stopPending();
   if (!synced_) {
-    bootSync(now);
+    if (!stop_pending) bootSync(now);
     Pending pending{};
     if (popPending(pending)) (void)transact(pending.frame, nullptr, kWriteWindowUs);  // torque-off only
     vTaskDelay(1U);
@@ -683,7 +771,7 @@ void Esp32UartPort::run() noexcept {
   }
   const bool silent = now - last_reply_us_ > kSilentUs;
   if (silent) {
-    if (now < next_probe_us_) { vTaskDelay(1U); return; }
+    if (now < next_probe_us_ && !stop_pending) { vTaskDelay(1U); return; }
     next_probe_us_ = now + kProbeUs;
     taskENTER_CRITICAL(&mux_);
     ++diag_.probes;
@@ -693,23 +781,30 @@ void Esp32UartPort::run() noexcept {
   taskENTER_CRITICAL(&mux_);
   poll = poll_pending_;
   taskEXIT_CRITICAL(&mux_);
-  // Alternate a queued write with a read so a speed stream cannot starve the
-  // encoder (and vice versa); when silent do one of each per probe.
-  const bool read_urgent = poll && !silent && now - last_read_ok_us_ > kReadUrgentUs;
-  if ((!(prefer_read_ && poll) && !read_urgent) || silent) {
+  // Normal mode alternates write/read. Priority mode permits at most two
+  // consecutive speed writes, and NEVER overrides the encoder's 6 ms urgency.
+  // No transaction is preempted on the single-wire half-duplex bus.
+  // A failed read must not monopolize the bus until feedback recovers.
+  // After each completed read attempt, allow one queued command before
+  // retrying. Stale feedback still stops the controller at its normal limit.
+  const bool read_urgent = poll && !silent && writes_since_read_ != 0U &&
+      now - last_read_ok_us_ > kReadUrgentUs;
+  const bool speed_priority = writes_since_read_ < 2U && speedPending();
+  if (stop_pending || ((!(prefer_read_ && poll) || speed_priority) && !read_urgent) || silent) {
     Pending pending{};
     if (popPending(pending)) {
-      const bool ok = transact(pending.frame, nullptr, kWriteWindowUs);
+      const bool ok = transact(pending.frame, nullptr, kWriteWindowUs, &pending);
+      if (writes_since_read_ < 2U) ++writes_since_read_;
       if (pending.speed) {
         taskENTER_CRITICAL(&mux_);
-        last_speed_valid_ = ok;
+        last_speed_valid_ = ok && pending.epoch == stop_epoch_;
         last_speed_raw_ = pending.speed_raw;
         last_speed_tx_us_ = esp_timer_get_time();
         taskEXIT_CRITICAL(&mux_);
       }
       if (!ok && !pending.speed && ++pending.attempts < kMaxAttempts) {
         taskENTER_CRITICAL(&mux_);                        // retry lifecycle writes, in order
-        if (q_count_ < kQueue) {
+        if (q_count_ < kQueue && pending.epoch == stop_epoch_) {
           q_head_ = (q_head_ + kQueue - 1U) % kQueue;
           queue_[q_head_] = pending;
           ++q_count_;
@@ -725,6 +820,7 @@ void Esp32UartPort::run() noexcept {
     poll_pending_ = false;
     taskEXIT_CRITICAL(&mux_);
     (void)transact(frame::buildReadPresent(motor_id_), nullptr, kReadWindowUs);
+    writes_since_read_ = 0U;
     prefer_read_ = false;
     return;
   }

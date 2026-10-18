@@ -15,6 +15,10 @@ namespace tap_fw::v3 {
 // Sensor-derived COM/pitch, wheel prediction, and coordinated leg/roll control.
 
 V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
+  for (const auto& entry : com_cache_) {
+    if (entry.valid && entry.hip == hip_offset && entry.knee == knee_offset &&
+        entry.dx == config_.tier.body_com_dx_m) return entry.value;
+  }
   namespace geo = robot_control::geometry;
   const float hip = LegHeight::hangHipCad() + hip_offset;
   const float knee = knee_offset;
@@ -24,9 +28,13 @@ V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset)
       geo::parts[0].mass * config_.tier.body_com_dx_m / geo::total_mass_kg;
   const float cz = std::max(body.com_above_axle_m, 0.01F);
   const float den = cx * cx + cz * cz;
-  return {std::atan2(cx, cz),
+  const ComLine result{std::atan2(cx, cz),
           (cz * jac.d_com_offset_x_d_hip - cx * jac.d_com_above_axle_d_hip) / den,
-          (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den, cz};
+          (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den,
+          cz, body.pitch_inertia_at_axle_kg_m2};
+  com_cache_[com_cache_next_] = {hip_offset, knee_offset, config_.tier.body_com_dx_m, result, true};
+  com_cache_next_ = (com_cache_next_ + 1U) % com_cache_.size();
+  return result;
 }
 
 float V3Controller::legModelError() const noexcept {

@@ -188,8 +188,9 @@ void liftOverlapAndClearance() {
   assert(out.phase==StandUp::Phase::Failed);
 
   const float flat=robot_control::bodyClearance(0,0,{0,0},{0,0},.04F);
-  // Independent CAD-zero axle z=-29.88 mm, shell bottom=-41.721 mm.
-  assert(std::abs(flat-.028158F)<3e-6F);
+  // Independent CAD-zero axle z=-29.88 mm, shell bottom=-41.8205 mm
+  // (STEP-solid envelope of 18/10, 0.1 mm padding included).
+  assert(std::abs(flat-.0280595F)<3e-6F);
   const float l=robot_control::bodyClearance(.2F,.04F,{0,0},{0,0},.04F);
   const float r=robot_control::bodyClearance(.2F,-.04F,{0,0},{0,0},.04F);
   assert(std::isfinite(l) && std::abs(l-r)<1e-5F);

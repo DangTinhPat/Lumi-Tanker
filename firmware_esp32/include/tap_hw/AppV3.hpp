@@ -35,9 +35,10 @@ class AppV3 {
 
  private:
   // FreeRTOS split: a control task (core 1, above the Arduino loop) runs
-  // every 2 ms - commands, BLE, buses, IMU, controller, telemetry text -
+  // every 2 ms - commands, BLE, buses, IMU, controller, telemetry snapshots -
   // and the Arduino loop only moves serial bytes (input lines to a queue,
-  // output from OutSink to the UART). All controller state lives in the
+  // deferred numeric formatting and output from OutSink to the UART).
+  // All controller state lives in the
   // control task; the loop touches none of it. If the task cannot be made,
   // the old single loop runs everything (rtos_ false).
   static void controlTaskEntry(void* arg) noexcept;
@@ -64,6 +65,7 @@ class AppV3 {
                    std::uint64_t now_us) noexcept;
   void report(std::uint64_t now_us) noexcept;
   void printTunables() noexcept;
+  bool tunables_pending_ = false;
 
   [[nodiscard]] bool imuFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] bool legsFresh(std::uint64_t now_us) const noexcept;
@@ -120,6 +122,8 @@ class AppV3 {
   std::uint32_t tick_exec_max_us_ = 0U;
   std::uint32_t tick_imu_max_us_ = 0U;
   std::uint32_t tick_ctrl_max_us_ = 0U;
+  std::uint32_t tick_period_max_us_ = 0U, tick_overrun_ = 0U;
+  std::uint32_t tick_report_max_us_ = 0U;
   // Per-section maxima of the control tick [us] (SENS prof=[update legs
   // wheels trace]) and the mean controller time (upd_avg).
   std::array<std::uint32_t, 4> prof_max_{};

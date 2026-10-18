@@ -18,6 +18,7 @@
 #include <esp_timer.h>
 
 #include "robot_hal/MotorFrameCodec.hpp"
+#include "robot_control/GeneratedGeometry.hpp"
 #include "tap_fw/FastFormat.hpp"
 #include "tap_fw/ImuMount.hpp"
 #include "tap_fw/v3/JointTestSchedule.hpp"
@@ -138,8 +139,11 @@ AppV3::AppV3() noexcept
   // keeps its command history across the microsecond jitter of the tick period since 18/10 (it used to be emptied
   // every tick, which made it predict as if no command were in flight). SET lqrpredict 0 turns it off.
   ctrl_.config().lqr_prediction.enabled = true;
-  // Stand-up from the lying pose: the tuned recovery (StandUp::tunedRecovery), still off until SET standup 1.
+  // Stand-up from the lying pose is enabled at boot. STANDUP still requires the
+  // operator to confirm the encoder reference with SET lying 1 after powering
+  // the motor supply on in the home pose.
   ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(ctrl_.config().lqr_prediction.lag_s);
+  ctrl_.config().standup.enabled = true;
 }
 
 bool AppV3::begin() noexcept {
@@ -155,6 +159,8 @@ bool AppV3::begin() noexcept {
   out_.println("TAP firmware v3.3beta: two-wheel inverted pendulum, legs locked at the "
                  "power-up pose (driver position mode), USB serial control");
   can_ready_ = can_.begin();
+  uart1_.setSpeedPriority(true);
+  uart2_.setSpeedPriority(true);
   uart_ready_ = uart1_.begin(tap_fw::board::kMotorUartBaud) &&
       uart2_.begin(tap_fw::board::kMotorUartBaud);
   imu_ready_ = mpu_.begin();
@@ -255,9 +261,6 @@ bool AppV3::begin() noexcept {
                                   &comms_task_, 0) != pdPASS) {
         comms_task_ = nullptr;
       }
-      out_.println(comms_task_ != nullptr
-                       ? "V3 RTOS: control task on core 1 every 2 ms, serial task on core 0"
-                       : "V3 RTOS: control task on core 1 every 2 ms, serial on the loop task");
     }
   }
 #endif
@@ -294,6 +297,9 @@ void AppV3::controlTaskEntry(void* arg) noexcept {
   static_assert(configTICK_RATE_HZ >= 500, "the 2 ms control period needs a >= 500 Hz RTOS tick");
   auto* app = static_cast<AppV3*>(arg);
   const TickType_t period = pdMS_TO_TICKS(tap_fw::board::kControlPeriodUs / 1000U);
+  // Once this task starts it is the only OutSink producer, including the
+  // boot banner. Setup must not interleave framed records with this task.
+  app->out_.println("V3 RTOS: control core 1 / 2 ms; deferred telemetry on serial task");
   TickType_t last = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&last, period);
@@ -307,7 +313,11 @@ void AppV3::step(bool task) noexcept {
     // Command lines the loop task queued: handled here, so every state
     // change happens in this task.
     LineItem item;
-    while (xQueueReceive(line_q_, &item, 0) == pdTRUE) handleLine(item.text, now_us);
+    // Snapshot the bounded queue depth. A producer continuously adding
+    // commands must not keep this task here instead of servicing sensors.
+    const auto pending = uxQueueMessagesWaiting(line_q_);
+    for (UBaseType_t i = 0; i < pending && xQueueReceive(line_q_, &item, 0) == pdTRUE; ++i)
+      handleLine(item.text, now_us);
   } else {
     pollSerial(now_us);
   }
@@ -346,6 +356,8 @@ void AppV3::step(bool task) noexcept {
 void AppV3::controlPart(std::uint64_t now_us) noexcept {
   constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
   const std::uint64_t t_bus = nowUs();
+  if (last_tick_us_ != 0U) tick_period_max_us_ = std::max(tick_period_max_us_,
+      static_cast<std::uint32_t>(now_us - last_tick_us_));
   tick_dt_s_ = last_tick_us_ == 0U ? static_cast<float>(kPeriod) * 1.0e-6F
       : std::clamp(static_cast<float>(now_us - last_tick_us_) * 1.0e-6F,
                    0.5e-6F * static_cast<float>(kPeriod),
@@ -360,6 +372,8 @@ void AppV3::controlPart(std::uint64_t now_us) noexcept {
   tick_imu_max_us_ = std::max(tick_imu_max_us_, static_cast<std::uint32_t>(t_imu - t_bus));
   tick_ctrl_max_us_ = std::max(tick_ctrl_max_us_, static_cast<std::uint32_t>(t_ctrl - t_imu));
   tick_exec_max_us_ = std::max(tick_exec_max_us_, static_cast<std::uint32_t>(t_end - now_us));
+  tick_report_max_us_ = std::max(tick_report_max_us_, static_cast<std::uint32_t>(t_end - t_ctrl));
+  if (t_end - now_us > kPeriod) ++tick_overrun_;
 }
 
 void AppV3::pollSerial(std::uint64_t now_us) noexcept {
@@ -531,6 +545,248 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       }
       ctrl_.config().standup.enabled = v >= 0.5F;
       out_.printf("V3 standup %s\n", ctrl_.config().standup.enabled ? "ENABLED" : "off");
+    }
+    else if (!std::strcmp(key, "standguard")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standguard refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.guarded_handoff = v >= 0.5F;
+      out_.printf("V3 standguard %s\n", ctrl_.config().standup.guarded_handoff ? "ON" : "off (legacy handoff)");
+    }
+    else if (!std::strcmp(key, "standimu")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standimu refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.gyro_dominant_imu = v >= 0.5F;
+      out_.printf("V3 standimu %s\n", ctrl_.config().standup.gyro_dominant_imu
+                  ? "ON (gyro-dominant recovery)" : "off (base estimator during recovery)");
+    }
+    else if (!std::strcmp(key, "standcapture")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standcapture refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.capture_first = v >= 0.5F;
+      out_.printf("V3 standcapture %s\n", ctrl_.config().standup.capture_first
+                  ? "ON (capture first, retain leg pose after handoff)" : "off (combined body leveling)");
+    }
+    else if (!std::strcmp(key, "standcoord")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standcoord refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.coordinated_speed = v >= 0.5F;
+      out_.printf("V3 standcoord=%d (1 speed error -> hip CoM target, 0 legacy wheel feedback)\n",
+                  ctrl_.config().standup.coordinated_speed ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standhip")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhip refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.support_hip_capture = v >= 0.5F;
+      out_.printf("V3 standhip=%d (1 retain CoM hip feedback after handoff, 0 fixed hip)\n",
+                  ctrl_.config().standup.support_hip_capture ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standlevel")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standlevel refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_body_leveling = v >= 0.5F;
+      out_.printf("V3 standlevel=%d (1 gated B4 anti-dive then Support leveling, 0 previous body law; knee/height held by standcapture)\n",
+                  ctrl_.config().standup.catch_body_leveling ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "wheelprio")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET wheelprio refused: DISABLE first");
+        return;
+      }
+      uart1_.setSpeedPriority(v >= 0.5F);
+      uart2_.setSpeedPriority(v >= 0.5F);
+      out_.printf("V3 wheelprio=%d (two speed writes per read at most; encoder urgency 6 ms retained)\n",
+                  v >= 0.5F ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standpostguard")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standpostguard refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_posture_capture_guard = v >= 0.5F;
+      out_.printf("V3 standpostguard=%d (B4 posture cannot add outward hip motion while COM/CP remain off-centre)\n",
+                  ctrl_.config().standup.catch_posture_capture_guard ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standhandoff")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhandoff refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_rolling_handoff = v >= 0.5F;
+      out_.printf("V3 standhandoff=%d (1 captured rolling handoff: 80 ms, cap allowed with measured tracking; 0 prior 200 ms/no-cap gate)\n",
+                  ctrl_.config().standup.catch_rolling_handoff ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standwheelref")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standwheelref refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_wheel_speed_lean = v >= 0.5F;
+      out_.printf("V3 standwheelref=%d (1 B4 wheel lean loop follows the stopping lean_ref, 0 previous zero-lean wheel target)\n",
+                  ctrl_.config().standup.catch_wheel_speed_lean ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standhospeed")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhospeed refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.rolling_handoff_speed_m_s = v <= 0.0F ? 0.0F : std::clamp(v, 0.15F, 1.0F);
+      out_.printf("V3 standhospeed=%.2f m/s (rolling handoff speed bound; 0 previous wheel cap + margin)\n",
+                  ctrl_.config().standup.rolling_handoff_speed_m_s);
+    }
+    else if (!std::strcmp(key, "standtransfer")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standtransfer refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_rolling_transfer = v >= 0.5F;
+      out_.printf("V3 standtransfer=%d (1 settle captured hip posture then guarded rolling LQR transfer, 0 prior B4)\n",
+                  ctrl_.config().standup.catch_rolling_transfer ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standbrake")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standbrake refused: DISABLE first");
+        return;
+      }
+      auto& su = ctrl_.config().standup;
+      su.catch_measured_braking = v >= 0.5F;
+      if (su.catch_measured_braking) {
+        su.catch_wheel_prediction = true;
+        su.catch_capture_velocity = true;
+      }
+      out_.printf("V3 standbrake=%d (1 measured-motion preview + persistent acceleration integral, 0 prior forecast speed servo)\n",
+                  su.catch_measured_braking ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standservo")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standservo refused: DISABLE first");
+        return;
+      }
+      auto& su = ctrl_.config().standup;
+      su.catch_capture_velocity = v >= 0.5F;
+      if (su.catch_capture_velocity) su.catch_wheel_prediction = true;
+      else su.catch_measured_braking = false;
+      out_.printf("V3 standservo=%d standbrake=%d (standservo 0 disables measured braking; SET standbrake 0 restores prior forecast servo)\n",
+                  su.catch_capture_velocity ? 1 : 0, su.catch_measured_braking ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standpred")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standpred refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_wheel_prediction = v >= 0.5F;
+      if (v < 0.5F) {
+        ctrl_.config().standup.catch_capture_velocity = false;
+        ctrl_.config().standup.catch_measured_braking = false;
+      }
+      out_.printf("V3 standpred=%d standservo=%d standbrake=%d (standpred 0 disables servo/brake; next recovery resets learned equilibrium)\n",
+                  ctrl_.config().standup.catch_wheel_prediction ? 1 : 0,
+                  ctrl_.config().standup.catch_capture_velocity ? 1 : 0,
+                  ctrl_.config().standup.catch_measured_braking ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standcp")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standcp refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_capture_point_hip = v >= 0.5F;
+      out_.printf("V3 standcp=%d (1 filtered CoM angle+rate/omega hip feedback, 0 prior angle/damping law)\n",
+                  ctrl_.config().standup.catch_capture_point_hip ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standbackdeg")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standbackdeg refused: DISABLE first");
+        return;
+      }
+      auto& su = ctrl_.config().standup;
+      su.back_pitch_limit_rad = v <= 0.0F ? 0.0F : std::clamp(v, 41.3F, 50.0F) * 0.0174532925F;
+      out_.printf("V3 standbackdeg=%.1f (recovery backward body only; 0 symmetric limits; floor and COM limits retained)\n",
+                  su.back_pitch_limit_rad * 57.2957795F);
+    }
+    else if (!std::strcmp(key, "standhipgain")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhipgain refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_hip_gain = std::clamp(v, 2.0F, 8.0F);
+      out_.printf("V3 standhipgain=%.2f (CoM hip allocator, driver current unchanged; 4 prior tuning)\n",
+                  ctrl_.config().standup.catch_hip_gain);
+    }
+    else if (!std::strcmp(key, "standfloor")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standfloor refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.floor_guard = v >= 0.5F;
+      out_.printf("V3 standfloor=%d (1 clearance velocity damper, 0 prior recovery law; no pitch target)\n",
+                  ctrl_.config().standup.floor_guard ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "floorgrace")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET floorgrace refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.floor_accel_grace = v >= 0.5F;
+      out_.printf("V3 floorgrace=%d (1 bounded accel while predicted clearance > margin, 0 strict Fault)\n",
+                  ctrl_.config().standup.floor_accel_grace ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "floormm")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET floormm refused: DISABLE first");
+        return;
+      }
+      auto& su = ctrl_.config().standup;
+      su.floor_clearance_m = std::clamp(v, 2.0F, 15.0F) * 0.001F;
+      su.floor_arm_clearance_m = su.floor_clearance_m + 0.002F;
+      out_.printf("V3 floormm=%.1f mm arm>=%.1f mm (model estimates)\n",
+                  su.floor_clearance_m * 1000.0F, su.floor_arm_clearance_m * 1000.0F);
+    }
+    else if (!std::strcmp(key, "standwheel")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standwheel refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_wheel_max_rad_s = std::clamp(v, 4.0F, 20.0F);
+      out_.printf("V3 standwheel %.1f rad/s (recovery wheel command cap, SET standwheel 16 restores previous cap)\n",
+                  ctrl_.config().standup.catch_wheel_max_rad_s);
+    }
+    else if (!std::strcmp(key, "standaccel")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standaccel refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_accel_max = std::clamp(v, 1.0F, 5.0F);
+      out_.printf("V3 standaccel %.2f m/s2 (command limit, not measured motor acceleration; previous=4)\n",
+                  ctrl_.config().standup.catch_accel_max);
+    }
+    else if (!std::strcmp(key, "standwheelms")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standwheelms refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_wheel_blend_s = v <= 0.0F ? 0.0F : std::clamp(v, 60.0F, 300.0F) * 0.001F;
+      out_.printf("V3 standwheelms %.0f ms (wheel-only B4 ramp; 0 inherits hip ramp, previous=80 ms)\n",
+                  ctrl_.config().standup.catch_wheel_blend_s * 1000.0F);
+    }
+    else if (!std::strcmp(key, "standspeed")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standspeed refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_speed_gain = std::clamp(v, 0.0F, 2.0F);
+      out_.printf("V3 standspeed %.2f /s (0 restores angle/rate-only capture)\n",
+                  ctrl_.config().standup.catch_speed_gain);
     }
     else if (!std::strcmp(key, "vmax")) {
       // Ground-speed cap of the wheel loop (also the wheel command cap); 4.1888 m/s = the BL4012 no-load 1000 rpm.
@@ -783,6 +1039,19 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
 }
 
 void AppV3::printTunables() noexcept {
+  // The full configuration dump uses many printf float conversions (~8 ms
+  // in the active log). Apply SET immediately, but print the full dump only
+  // after the robot is inactive. GET/SET cannot stall active motor updates.
+  if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+    if (!tunables_pending_) out_.println("V3 TUNE deferred until Idle/Fault to preserve control timing");
+    tunables_pending_ = true;
+    return;
+  }
+  tunables_pending_ = false;
+  out_.printf("V3 TUNE wheelprio=%d/%d (SET wheelprio): newest speed first, max 2 writes/read; "
+              "read urgency 6 ms, transaction timeout 8 ms; torque-on settle 20 ms; "
+              "WT=actual TX, WBUS=queue/ACK timing; motor response delay not measured at boot\n",
+              uart1_.speedPriority() ? 1 : 0, uart2_.speedPriority() ? 1 : 0);
   const auto& c = ctrl_.balancer().config();
   const auto& pid = ctrl_.config().pid;
   out_.printf("V3 TUNE algo=%s (SET algo 0=LQR 1=PID 2=WB) PID: kp=%.1f kd=%.2f kv=%.3f kx=%.3f "
@@ -829,6 +1098,10 @@ void AppV3::printTunables() noexcept {
                 tier.height_exp, tier.height_exp_tall,
                 tier.body_com_dx_m * 1000.0F, tier.imu_kinematic ? 1 : 0, tier.joint_rate_gain,
                 tier.joint_rate_gain_low);
+  out_.printf("V3 TUNE body COM: base_x=%+.2f mm extra_cdx=%+.2f mm effective_x=%+.2f mm (body frame, +X forward)\n",
+              robot_control::geometry::parts[0].x * 1000.0F,
+              tier.body_com_dx_m * 1000.0F,
+              (robot_control::geometry::parts[0].x + tier.body_com_dx_m) * 1000.0F);
   out_.printf("V3 TUNE body damping: tbdamp=%.3f s tbdlpf=%.1f Hz (0 = raw gyro)\n",
               ctrl_.config().tier.body_damping_s, ctrl_.config().tier.body_damp_lpf_hz);
   out_.printf("V3 TUNE knee follow: kfhz=%.2f Hz (0 = instant IK knee) kfrate=%.2f rad/s\n",
@@ -875,6 +1148,83 @@ void AppV3::printTunables() noexcept {
   }
   out_.printf("V3 TUNE standup=%d (SET standup) lying=%d (SET lying) home_hip=%+.4f home_knee=%+.4f\n",
               ctrl_.config().standup.enabled ? 1 : 0, lying_start_ ? 1 : 0, homeHip(), homeKnee());
+  {
+    const auto& su = ctrl_.config().standup;
+    out_.printf("V3 TUNE standguard=%d (SET standguard) standimu=%d (SET standimu) fold=%.2f skip_pitching=%d "
+                "settle=%.2f s body<=%.2f rad rate<=%.2f rad/s wheel_error<=%.1f rad/s "
+                "clearance>=%.1f mm (model estimate); standspeed=%.2f /s (SET standspeed); wheel_peak_hw=0\n",
+                su.guarded_handoff ? 1 : 0, su.gyro_dominant_imu ? 1 : 0,
+                su.fold_travel_rad, su.skip_pitching ? 1 : 0,
+                su.handoff_settle_s, su.handoff_body_tol_rad, su.handoff_body_rate_tol_rad_s,
+                su.handoff_wheel_tracking_tol_rad_s, su.lift_clearance_m * 1000.0F, su.catch_speed_gain);
+    out_.printf("V3 TUNE standcapture=%d (SET standcapture): legacy body leveling and pitch-zero handoff gate=%d; "
+                "preserve recovery knee/height=%d; hard pitch limits unchanged\n",
+                su.capture_first ? 1 : 0, su.capture_first ? 0 : 1, su.capture_first ? 1 : 0);
+    out_.printf("V3 TUNE standcoord=%d (SET standcoord) speed_lean<=%.3f rad filter=%.2f s; "
+                "knee=fixed (no opening); handoff_speed<=%.2f m/s; "
+                "recovery wheel/accel bounds retained after handoff\n",
+                su.coordinated_speed ? 1 : 0, su.catch_speed_lean_max_rad, su.catch_speed_filter_s,
+                su.catch_speed_tol_m_s);
+    out_.printf("V3 TUNE standhip=%d (SET standhip): supported CoM hip feedback; "
+                "wheel=LQR knee=fixed hip_rate<=%.2f rad/s hip_travel<=%.2f rad "
+                "standhipgain=%.2f (SET standhipgain) legacy_damping=%.2f (standcp=0 only)\n",
+                su.support_hip_capture ? 1 : 0,
+                su.catch_hip_rate_max_rad_s, su.catch_hip_travel_rad,
+                su.catch_hip_gain, su.catch_hip_damping_s);
+    out_.printf("V3 TUNE standlevel=%d (SET standlevel): arm hip_progress>=0.25 rad clearance>=8 mm; "
+                "B4 anti-dive ramp=80 ms, Support signed leveling ramp=250 ms; "
+                "kp=%.2f kd=%.2f gyro_filter=40 ms body_rate<=%.2f rad/s; knee fixed, hip/floor limits retained\n",
+                su.catch_body_leveling ? 1 : 0, su.recovery_body_gain,
+                su.recovery_body_damping_s, su.recovery_body_rate_max_rad_s);
+    out_.printf("V3 TUNE standcp=%d (SET standcp): when 1 hip_error=lean-lean_ref+filtered_rate/omega; "
+                "rate_filter=%.0f ms; 0 restores angle/damping; wheel and hard safety rates=raw\n",
+                su.catch_capture_point_hip ? 1 : 0, su.catch_capture_rate_filter_s * 1000.0F);
+    out_.printf("V3 TUNE standpred=%d (SET standpred): B4 wheel-only delay=%.0f ms actuator_lag=%.0f ms "
+                "observer=40 ms ramp=60 ms correction<=0.12 rad/1.0 rad/s; hip/raw safety unchanged; "
+                "delay/lag approximate log fits, not contact detection\n",
+                su.catch_wheel_prediction ? 1 : 0, su.catch_wheel_delay_s * 1000.0F,
+                su.catch_wheel_lag_s * 1000.0F);
+    out_.printf("V3 TUNE standservo=%d standbrake=%d (SET standservo/standbrake): brake=1 uses measured angular "
+                "preview + persistent acceleration integral + lead>=%.0f ms; brake=0 uses prior queued-model forecast speed servo; "
+                "equilibrium learn after quiet 250 ms tau=1 s rate<=0.02 rad/s max=0.06 rad; raw safety retained\n",
+                su.catch_capture_velocity ? 1 : 0, su.catch_measured_braking ? 1 : 0,
+                su.catch_wheel_lead_s * 1000.0F);
+    out_.printf("V3 TUNE standtransfer=%d (SET standtransfer): requires standcapture/standhip/standlevel/standfloor/guard; "
+                "capture dwell=%.0f ms ramp=%.0f ms rate<=%.2f rad/s clearance>=%.0f mm reserve>=%.0f mm; "
+                "signed posture after capture, rolling handoff<=%.2f m/s; existing body/hip/tracking/dwell guards retained\n",
+                su.catch_rolling_transfer ? 1 : 0, su.transfer_confirm_s * 1000.0F,
+                su.transfer_ramp_s * 1000.0F, su.transfer_capture_rate_rad_s,
+                su.transfer_clearance_m * 1000.0F, su.transfer_floor_reserve_m * 1000.0F,
+                su.rolling_handoff_speed_m_s > 0.0F
+                    ? std::min(su.rolling_handoff_speed_m_s,
+                          su.catch_wheel_max_rad_s * ctrl_.config().wheel_radius_m + su.catch_tracking_margin_m_s)
+                    : su.catch_wheel_max_rad_s * ctrl_.config().wheel_radius_m + su.catch_tracking_margin_m_s);
+    out_.printf("V3 TUNE standbackdeg=%.1f (SET standbackdeg, 0 symmetric limits) "
+                "catch_forward<=%.1f deg; recovery backward body only, floor and COM limits retained\n",
+                su.back_pitch_limit_rad * 57.2957795F, su.pitch_limit_rad * 57.2957795F);
+    out_.printf("V3 TUNE standhandoff=%d (SET standhandoff): captured rolling dwell=%.0f ms; "
+                "software wheel cap alone does not veto handoff; measured tracking/body/hip/COM/floor gates retained\n",
+                su.catch_rolling_handoff ? 1 : 0, su.rolling_handoff_settle_s * 1000.0F);
+    out_.printf("V3 TUNE standwheelref=%d (SET standwheelref): B4 wheel lean target = lean_ref (speed %.2f /s, |ref|<=%.2f rad); "
+                "standhospeed=%.2f m/s (SET standhospeed, 0 = cap+margin)\n",
+                su.catch_wheel_speed_lean ? 1 : 0, su.catch_speed_gain, su.catch_speed_lean_max_rad,
+                su.rolling_handoff_speed_m_s);
+    out_.printf("V3 TUNE standpostguard=%d (SET standpostguard): B4 transfer posture projection, "
+                "COM/CP same side, lean fade=0.015..0.030 rad; initial lift and Support unchanged\n",
+                su.catch_posture_capture_guard ? 1 : 0);
+    out_.printf("V3 TUNE standwheel=%.1f rad/s (SET standwheel): recovery wheel command cap; "
+                "integrator_speed<=%.2f m/s accel<=%.2f m/s2 (SET standaccel); "
+                "standwheelms=%.0f (SET standwheelms, 0 inherits hip); hip_blend=%.0f ms; commands, not measured limits\n",
+                su.catch_wheel_max_rad_s, su.catch_wheel_max_rad_s * ctrl_.config().wheel_radius_m,
+                su.catch_accel_max, su.catch_wheel_blend_s * 1000.0F, su.catch_blend_s * 1000.0F);
+    out_.printf("V3 TUNE standfloor=%d (SET standfloor) floormm=%.1f (SET floormm) "
+                "arm>=%.1f mm/%.0f ms approach=%.0f ms lag=%.0f ms; "
+                "floorgrace=%d (SET floorgrace); kinematic estimate, no pitch target, knee=fixed\n",
+                su.floor_guard ? 1 : 0, su.floor_clearance_m * 1000.0F,
+                su.floor_arm_clearance_m * 1000.0F, su.floor_arm_dwell_s * 1000.0F,
+                su.floor_approach_time_s * 1000.0F, su.floor_prediction_lag_s * 1000.0F,
+                su.floor_accel_grace ? 1 : 0);
+  }
   {
     const auto& gd = ctrl_.config().guard;
     out_.printf("V3 TUNE guard: mode=%d (SET guard 0 off/1 log/2 act) cut=%.2f (guardcut) lag+=%.3f s (guardlag) "
@@ -927,9 +1277,11 @@ void AppV3::updateImu(std::uint64_t now_us) noexcept {
   // does not tilt the estimate (Tier::imu_kinematic); otherwise it is invalid
   // and the estimate is a pure IMU one.
   const auto kv = ctrl_.imuVelocity();
+  const bool dynamic_recovery = ctrl_.state() == V3Controller::State::StandUp &&
+      ctrl_.config().standup.gyro_dominant_imu;
   const auto out = estimator_.update(body_.accel_m_s2, body_.gyro_rad_s, dt_s,
                                      static_cast<float>(now_us) * 1.0e-6F, 0.0F,
-                                     false, quiet,
+                                     dynamic_recovery, quiet && !dynamic_recovery,
                                      {kv.horizontal_m_s, kv.vertical_m_s, kv.valid});
   if (!out.valid) return;
   imu_ = out;
@@ -1249,7 +1601,19 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     } else {
       legs_.setOffsets(ctrl_.legPose().hip_offset_rad - homeHip(), ctrl_.legPose().knee_offset_rad - homeKnee());
     }
-    (void)legs_.engage(start, now_us, transport_, !standing_up_engage);
+    if (!legs_.engage(start, now_us, transport_, !standing_up_engage)) {
+      // A rejected setup/limits frame must not leave the stand-up wheels
+      // running with legs that never entered the requested closed loop.
+      V3Controller::Command cancel{};
+      cancel.disable = true;
+      (void)ctrl_.update(in, cancel);
+      (void)legs_.release(transport_);
+      driveWheels(false, {}, now_us);
+      out_.println("V3 leg engage failed: CAN setup not queued; disabled, START retries");
+      return;
+    }
+    out_.printf("V3 leg enable: Set_Limits queued current=%.1f A velocity=%.1f rotor turns/s (not read back)\n",
+                tap_fw::board::kLegCurrentLimitA, tap_fw::board::kLegVelLimitTurnsS);
     out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
@@ -1288,14 +1652,18 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
     }
     legs_.setOffsets(hip_cmd - homeHip(), knee_cmd - homeKnee());
-    // The stand-up path is a ramp and the driver position loop alone lags a ramp by rate / pos_gain: send the
-    // filtered path rate as the driver velocity feed-forward (stand-up only; zero elsewhere).
-    if (standing_up && ff_prev_us_ != 0U && now_us > ff_prev_us_) {
+    // Continue the recovery ramp feed-forward while its CoM hip allocator
+    // remains active after handoff. Knee stays fixed; Fault/held clears rates.
+    const bool supported_hip = !stand && out.state == V3Controller::State::Balancing &&
+        ctrl_.recoveryPoseHeld() && ctrl_.config().standup.support_hip_capture &&
+        !ctrl_.heldOuterOff() && !ctrl_.heldQuiet();
+    const bool recovery_path = standing_up || supported_hip;
+    if (recovery_path && ff_prev_us_ != 0U && now_us > ff_prev_us_) {
       const float dt_s = static_cast<float>(now_us - ff_prev_us_) * 1.0e-6F;
       const float alpha = dt_s / (0.02F + dt_s);  // 20 ms low-pass
       ff_hip_rate_ += alpha * (std::clamp((hip_cmd - ff_hip_prev_) / dt_s, -6.0F, 6.0F) - ff_hip_rate_);
       ff_knee_rate_ += alpha * (std::clamp((knee_cmd - ff_knee_prev_) / dt_s, -6.0F, 6.0F) - ff_knee_rate_);
-    } else if (!standing_up) {
+    } else if (!recovery_path) {
       ff_hip_rate_ = 0.0F;
       ff_knee_rate_ = 0.0F;
     }
@@ -1323,18 +1691,29 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   prof(2, p4 - p3 + wheel_send_us);
 
   const int state = static_cast<int>(out.state);
+  const bool recovery_handoff = last_state_ == static_cast<int>(V3Controller::State::StandUp) &&
+      out.state == V3Controller::State::Balancing;
   if (state != last_state_) {
     last_state_ = state;
     state_since_us_ = now_us;
     next_trace_us_ = now_us;
     out_.printf("CONTROL mode=%s enable=%d result=0\n", tap_fw::v3::toString(out.state),
                   out.legs_locked ? 1 : 0);
-    // Gyro-dominant pitch estimate only while balancing on the floor (see
-    // balancingEstimatorConfig); TILTTEST is hand-held and keeps the base.
+    // Recovery has the same dynamic specific-force problem as floor balance.
+    // Previously it kept the 55/s accelerometer correction throughout Catching
+    // (18/10 log: pitch drifted +0.44 rad while gyro integrated only +0.08).
+    // Switch config without resetting the seeded angle or gyro bias. Keep
+    // this config across the recovery->balance handoff; Idle/Fault restore
+    // the base. TILTTEST remains hand-held and uses the base.
     const bool floor_balance = out.state == V3Controller::State::Balancing && !tilt_test_;
-    estimator_.setConfig(floor_balance
+    const bool recovery_gyro = out.state == V3Controller::State::StandUp &&
+        ctrl_.config().standup.gyro_dominant_imu;
+    estimator_.setConfig((floor_balance || recovery_gyro)
         ? tap_fw::v3::balancingEstimatorConfig(robot_control::ImuStateEstimator::Config{})
         : robot_control::ImuStateEstimator::Config{});
+    if (out.state == V3Controller::State::StandUp) {
+      out_.printf("V3 STANDUP estimator=%s\n", recovery_gyro ? "gyro-dominant" : "base");
+    }
     if (out.state == V3Controller::State::Ready) {
       out_.println(tilt_test_ ? "V3 READY (TILTTEST: engaging at once)"
           : ctrl_.config().engage.automatic
@@ -1364,10 +1743,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const std::uint64_t p5 = nowUs();
   if (out.state != V3Controller::State::Idle && now_us >= next_trace_us_ && !rec_dumping_) {
     next_trace_us_ = now_us + kTraceUs;
-    // Same text as the former printf (tools parse it), built without
-    // printf's float conversion (FastFormat.hpp: that was most of the tick).
-    static char line[832];
-    tap_fw::LineBuf b(line, sizeof line);
+    // Copy typed fields here; OutSink formats on the communications task.
+    // Controller state is never read from that task. Text stays compatible.
+    static char line[1536];
+    tap_fw::DeferredLine b(line, sizeof line);
     b.str("TR t=").u32(static_cast<std::uint32_t>((now_us - state_since_us_) / 1000U))
         .str(" mode=").str(tap_fw::v3::toString(out.state))
         .str(" pitch=").fix(imu_.pitch_rad, 3, true).str(" rate=").fix(imu_.pitch_rate_rad_s, 2, true)
@@ -1412,8 +1791,140 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" ql=").fix(ctrl_.lqrLeadEffective(), 3)
         .str(" sdb=").fix(ctrl_.suspensionDeadband() * 1000.0F, 1)
         .str(" rref=").fix(ctrl_.rollReference(), 4, true)
-        .str(" rm=").i32(ctrl_.rollMode());
-    out_.println(line);
+        .str(" rm=").i32(ctrl_.rollMode())
+        .str(" suhold=").i32(ctrl_.recoveryPoseHeld() ? 1 : 0);
+    out_.println(b);
+    {
+      const auto left = uart1_.diagnostics();
+      const auto right = uart2_.diagnostics();
+      const auto wheels = tap_fw::board::MotorIds{}.wheel_uart;
+      tap_fw::DeferredLine wb(line, sizeof line);
+      wb.str("WT t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+          .str(" enabled=").i32(wheels_on_ ? 1 : 0)
+          .str(" sent=[").fix(wheels[0].driver_sign * frame::wheelRawSpeedToRadPerSec(left.sent_speed_raw), 2, true)
+          .chr(' ').fix(wheels[1].driver_sign * frame::wheelRawSpeedToRadPerSec(right.sent_speed_raw), 2, true)
+          .str("] age_us=[").u32(left.speed_tx_age_us).chr(' ').u32(right.speed_tx_age_us)
+          .str("] tx_count=[").u32(left.speed_tx).chr(' ').u32(right.speed_tx).chr(']');
+      out_.println(wb);
+    }
+    const auto& su = ctrl_.standupState();
+    if (recovery_handoff || out.state == V3Controller::State::StandUp ||
+        (out.state == V3Controller::State::Balancing && ctrl_.recoveryPoseHeld() &&
+         ctrl_.config().standup.support_hip_capture) ||
+        (out.state == V3Controller::State::Fault && su.phase != tap_fw::v3::StandUp::Phase::Idle)) {
+      // Separate bounded line: keep TR parser compatibility and its buffer size.
+      tap_fw::DeferredLine sb(line, sizeof line);
+      sb.str("SU t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+          .str(" state=").str(tap_fw::v3::toString(out.state))
+          .str(" snapshot=").i32(out.state == V3Controller::State::Fault ? 1 : 0)
+          .str(" phase=").str(tap_fw::v3::StandUp::name(su.phase))
+          .str(" capture_first=").i32(ctrl_.config().standup.capture_first ? 1 : 0)
+          .str(" hip_active=").i32(out.state == V3Controller::State::StandUp ||
+              (out.state == V3Controller::State::Balancing && ctrl_.recoveryPoseHeld() &&
+               ctrl_.config().standup.support_hip_capture &&
+               !ctrl_.heldOuterOff() && !ctrl_.heldQuiet()) ? 1 : 0)
+          .str(" wheel_owner=").str(out.state == V3Controller::State::Balancing ? "LQR" :
+              out.state == V3Controller::State::StandUp ? "catch" : "stopped")
+          .str(" lean_ref=").fix(su.capture_lean_target_rad, 3, true)
+          .str(" wheel_ref=").fix(su.wheel_lean_ref_rad, 3, true)
+          .str(" speed_f=").fix(su.speed_filtered_m_s, 3, true)
+          .str(" knee_tgt=").fix(su.knee_target_rad, 3)
+          .str(" elapsed=").fix(su.phase_elapsed_s, 3)
+          .str(" hip_tgt=").fix(su.hip_target_rad, 3, true)
+          .str(" hip_meas=").fix(su.hip_measured_rad, 3, true)
+          .str(" hip_rate=").fix(su.hip_rate_rad_s, 3, true)
+          .str(" lean=").fix(su.capture_lean_rad, 3, true)
+          .str(" com_rate=").fix(su.capture_rate_rad_s, 3, true)
+          .str(" cp=").fix(su.capture_point_rad, 3, true)
+          .str(" clearance_mm=").fix(su.body_clearance_m * 1000.0F, 1, true)
+          .str(" clearance_valid=").i32(su.body_clearance_valid ? 1 : 0)
+          .str(" wheel_error=").fix(su.wheel_tracking_error_rad_s, 2)
+          .str(" wheel_accel=").fix(su.wheel_accel_m_s2, 3, true)
+          .str(" speed_accel=").fix(su.speed_feedback_accel_m_s2, 3, true)
+          .str(" hip_limited=").i32(su.hip_limited ? 1 : 0)
+          .str(" wheel_limited=").i32(su.wheel_limited ? 1 : 0)
+          .str(" ready=").i32(su.handoff_ready ? 1 : 0)
+          .str(" rolling_gate=").i32(su.rolling_handoff ? 1 : 0)
+          .str(" settle=").fix(su.settle_s, 3)
+          .str(" settle_need=").fix(su.handoff_settle_required_s, 3)
+          .str(" reason=").str(tap_fw::v3::StandUp::failureName(su.failure))
+          .str(" controller_fault=").str(out.state == V3Controller::State::Fault ? ctrl_.lastFault() : "none");
+      out_.println(sb);
+      {
+        // Capture feedback telemetry has its own bounded buffer line. SU and
+        // SF retain their existing fields, including raw-rate safety evidence.
+        tap_fw::DeferredLine cb(line, sizeof line);
+        cb.str("SC t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+            .str(" state=").str(tap_fw::v3::toString(out.state))
+            .str(" snapshot=").i32(out.state == V3Controller::State::Fault ? 1 : 0)
+            .str(" phase=").str(tap_fw::v3::StandUp::name(su.phase))
+            .str(" standcp=").i32(ctrl_.config().standup.catch_capture_point_hip ? 1 : 0)
+            .str(" hip_rate_signal=").fix(su.hip_capture_rate_rad_s, 3, true)
+            .str(" hip_error=").fix(su.hip_capture_error_rad, 3, true)
+            .str(" feedback_rate=").fix(su.hip_feedback_rate_rad_s, 3, true)
+            .str(" post_guard=").i32(su.posture_capture_limited ? 1 : 0)
+            .str(" standlevel=").i32(ctrl_.config().standup.catch_body_leveling ? 1 : 0)
+            .str(" level_weight=").fix(su.body_level_weight, 2)
+            .str(" body_rate_f=").fix(su.body_rate_filtered_rad_s, 3, true)
+            .str(" level_rate=").fix(su.body_level_rate_rad_s, 3, true)
+            .str(" captured=").i32(su.transfer_captured ? 1 : 0)
+            .str(" transfer=").fix(su.transfer_weight, 2)
+            .str(" capture_dwell=").fix(su.transfer_confirm_s, 3)
+            .str(" applied_rate=").fix(su.hip_rate_rad_s, 3, true);
+        out_.println(cb);
+      }
+      if (ctrl_.config().standup.catch_wheel_prediction) {
+        tap_fw::DeferredLine wb(line, sizeof line);
+        wb.str("SW t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+            .str(" state=").str(tap_fw::v3::toString(out.state))
+            .str(" snapshot=").i32(out.state == V3Controller::State::Fault ? 1 : 0)
+            .str(" phase=").str(tap_fw::v3::StandUp::name(su.phase))
+            .str(" valid=").i32(su.wheel_prediction_valid ? 1 : 0)
+            .str(" source=").str(su.wheel_measured_preview ? "measured" : "queued")
+            .str(" weight=").fix(su.wheel_prediction_weight, 2)
+            .str(" capped=").i32(su.wheel_prediction_capped ? 1 : 0)
+            .str(" lean_pred=").fix(su.wheel_predicted_lean_rad, 3, true)
+            .str(" rate_pred=").fix(su.wheel_predicted_rate_rad_s, 3, true)
+            .str(" speed_pred=").fix(su.wheel_predicted_speed_m_s, 3, true)
+            .str(" accel_obs=").fix(su.wheel_observed_accel_m_s2, 3, true)
+            .str(" angular_accel_obs=").fix(su.wheel_observed_angular_accel_rad_s2, 2, true)
+            .str(" accel_raw=").fix(su.wheel_raw_accel_m_s2, 3, true)
+            .str(" accel_used=").fix(su.wheel_accel_m_s2, 3, true);
+        out_.println(wb);
+      }
+      if (ctrl_.config().standup.catch_capture_velocity) {
+        tap_fw::DeferredLine vb(line, sizeof line);
+        vb.str("SV t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+            .str(" state=").str(tap_fw::v3::toString(out.state))
+            .str(" snapshot=").i32(out.state == V3Controller::State::Fault ? 1 : 0)
+            .str(" phase=").str(tap_fw::v3::StandUp::name(su.phase))
+            .str(" weight=").fix(su.capture_servo_weight, 2)
+            .str(" standbrake=").i32(ctrl_.config().standup.catch_measured_braking ? 1 : 0)
+            .str(" speed_target=").fix(su.capture_servo_speed_m_s, 3, true)
+            .str(" speed_integral=").fix(su.capture_integrated_speed_m_s, 3, true)
+            .str(" equilibrium=").fix(su.capture_equilibrium_rad, 4, true)
+            .str(" learning=").i32(su.capture_equilibrium_learning ? 1 : 0);
+        out_.println(vb);
+      }
+      if (ctrl_.config().standup.floor_guard) {
+        // Separate line to avoid truncating the existing SU buffer/fields.
+        tap_fw::DeferredLine fb(line, sizeof line);
+        fb.str("SF t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+            .str(" state=").str(tap_fw::v3::toString(out.state))
+            .str(" snapshot=").i32(out.state == V3Controller::State::Fault ? 1 : 0)
+            .str(" valid=").i32(su.floor_bounds_valid ? 1 : 0)
+            .str(" armed=").i32(su.floor_armed ? 1 : 0)
+            .str(" limited=").i32(su.floor_limited ? 1 : 0)
+            .str(" infeasible=").i32(su.floor_infeasible ? 1 : 0)
+            .str(" accel_sat=").i32(su.floor_accel_saturated ? 1 : 0)
+            .str(" clearance_mm=").fix(su.body_clearance_m * 1000.0F, 2, true)
+            .str(" closing_mm_s=").fix(su.floor_clearance_rate_m_s * 1000.0F, 1, true)
+            .str(" predicted_mm=").fix(su.floor_predicted_clearance_m * 1000.0F, 2, true)
+            .str(" hip_rate_min=").fix(su.floor_hip_rate_lower_rad_s, 3, true)
+            .str(" hip_rate_max=").fix(su.floor_hip_rate_upper_rad_s, 3, true);
+        out_.println(fb);
+      }
+    }
     prof(3, nowUs() - p5);
   }
 }
@@ -1570,12 +2081,15 @@ void AppV3::driveWheels(bool enabled, const std::array<float, 2>& cmd_rad_s,
 void AppV3::report(std::uint64_t now_us) noexcept {
   if (now_us - last_report_us_ < kReportUs) return;
   last_report_us_ = now_us;
+  if (tunables_pending_ &&
+      (ctrl_.state() == V3Controller::State::Idle || ctrl_.state() == V3Controller::State::Fault))
+    printTunables();
   const long imu_age = last_imu_us_ == 0U ? -1L
       : static_cast<long>((now_us - last_imu_us_) / 1000U);
   // Same leading fields as the v1 SENS line, so the GUI status parser works
   // (FastFormat: same text as the former printf, without its float cost).
-  static char line[900];
-  tap_fw::LineBuf b(line, sizeof line);
+  static char line[1536];
+  tap_fw::DeferredLine b(line, sizeof line);
   b.str("SENS imu_age=").i32(static_cast<std::int32_t>(imu_age)).str("ms seed=").i32(imu_.seeded ? 1 : 0)
       .str(" can_legs=").i32(legsFresh(now_us) ? 1 : 0).str(" uart_wheels=").i32(feedback_.allWheelsFresh(now_us) ? 1 : 0)
       .str(" homed=").i32(legs_.engaged() ? 1 : 0)
@@ -1604,13 +2118,23 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" balance=").fix(ctrl_.balanceAngle(), 4, true).str(ctrl_.balanceAngleSet() ? "" : "(unset)")
       .str(" tick_max_us=").u32(tick_exec_max_us_).str(" imu_us=").u32(tick_imu_max_us_)
       .str(" ctrl_us=").u32(tick_ctrl_max_us_).str(" late=").u32(tick_late_)
+      .str(" period_max_us=").u32(tick_period_max_us_).str(" overrun=").u32(tick_overrun_)
+      .str(" report_us=").u32(tick_report_max_us_)
       .str(" serial_us=").u32(pre_serial_max_us_).str(" ble_us=").u32(pre_ble_max_us_)
       .str(" bus_us=").u32(pre_bus_max_us_)
       .str(" hipv_rms=").fix(hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F, 3)
       .str(" prof=[").u32(prof_max_[0]).chr(' ').u32(prof_max_[1]).chr(' ').u32(prof_max_[2]).chr(' ')
       .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
-  out_.println(line);
+  out_.println(b);
+  // Bounded transport evidence, separate from requested wcmd and controller
+  // snapshots. No motor requests or parameter writes are issued here.
+  tap_fw::DeferredLine left(line, sizeof line);
+  uart1_.format(left);
+  out_.println(left);
+  tap_fw::DeferredLine right(line, sizeof line);
+  uart2_.format(right);
+  out_.println(right);
   prof_max_.fill(0U);
   prof_upd_sum_ = 0U;
   prof_upd_n_ = 0U;
@@ -1623,6 +2147,7 @@ void AppV3::report(std::uint64_t now_us) noexcept {
   tick_imu_max_us_ = 0U;
   tick_ctrl_max_us_ = 0U;
   tick_late_ = 0U;
+  tick_period_max_us_ = tick_overrun_ = tick_report_max_us_ = 0U;
 }
 
 }  // namespace tap_hw

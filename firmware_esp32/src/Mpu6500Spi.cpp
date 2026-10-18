@@ -44,13 +44,17 @@ bool Mpu6500Spi::begin() noexcept {
 }
 
 bool Mpu6500Spi::read(Sample& sample) const noexcept {
-  std::uint8_t bytes[14]{};
+  // One hardware FIFO transaction instead of 15 SPI.transfer calls (each
+  // taking the Arduino peripheral lock). Keep the same clock and filters.
+  std::uint8_t request[15]{};
+  std::uint8_t response[15]{};
+  request[0] = 0x3BU | 0x80U;
   SPI.beginTransaction(kSpiReadSettings);
   digitalWrite(tap_fw::board::kImuCsGpio, LOW);
-  SPI.transfer(0x3BU | 0x80U);
-  for (std::uint8_t& value : bytes) value = SPI.transfer(0U);
+  SPI.transferBytes(request, response, sizeof request);
   digitalWrite(tap_fw::board::kImuCsGpio, HIGH);
   SPI.endTransaction();
+  const auto* bytes = response + 1U;  // discard the address-phase byte
   const auto be16 = [&](std::size_t index) {
     return static_cast<std::int16_t>(
         (static_cast<std::uint16_t>(bytes[index]) << 8U) |

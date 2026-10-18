@@ -21,6 +21,17 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
   next_send_us_ = now_us + config_.resend_period_us;
   bool ok = true;
   const auto legs = board::MotorIds{}.leg_can;
+  // Apply the board's intended limits on EVERY enable, including POS.
+  // Merely declaring BoardConfig constants does not update the GDS68's
+  // retained current/velocity limits. These frames precede closed loop.
+  for (const auto& leg : legs) {
+    ok = transport.sendCan(frame::canId(leg.node_id, frame::kSetLimitsCmdId),
+        frame::packSetLimits(board::kLegVelLimitTurnsS, board::kLegCurrentLimitA)) && ok;
+  }
+  if (!ok) {
+    engaged_ = false;
+    return false;
+  }
   for (std::size_t i = 0; i < kLegs; ++i) {
     const auto node = legs[i].node_id;
     const std::int32_t input_mode = jointMit(i) ? frame::kInputModeMit
@@ -32,6 +43,10 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
   // The first set-point equals the measured pose, so closing the loop does
   // not snap the leg anywhere; the ramp then walks it to 0.
   ok = sendTargets(now_us, transport) && ok;
+  if (!ok) {
+    engaged_ = false;
+    return false;
+  }
   for (std::size_t i = 0; i < kLegs; ++i) {
     ok = transport.sendCan(frame::canId(legs[i].node_id, frame::kSetAxisStateCmdId),
                            frame::packSetAxisState(frame::kAxisStateClosedLoop)) && ok;

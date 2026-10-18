@@ -28,7 +28,7 @@ rigid_groups:
     basis: inferred from the previously accepted 0.22 kg wheel-plus-motor lump
 
 derived:
-  total_robot_mass: 3.12
+  total_robot_mass: 3.232
   wheel_plus_motor_each: 0.22
 
 dissipation:
@@ -105,14 +105,18 @@ inertial_properties:
   status: provisional rigid-group estimates from CAD envelopes and assigned masses
   cad_frame: centered at the STEP assembly bounding box; +X forward, +Y left, +Z up
   body:
-    mass_kg: 2.5
-    com_m: [-0.0048, 0.0, 0.0140]
+    mass_kg: 2.612
+    com_m: [0.0053, 0.0, 0.0151]
     iyy_kg_m2: 0.0070
     diagonal_inertia_about_com_kg_m2: [0.020, 0.007, 0.020]
     note: >-
-      COM uses the user mass split (1.6 kg in four hip/knee motors, 0.278 kg
-      plastic, 0.210 kg battery, and remaining PCB/wiring/fasteners) and CAD
-      component locations. Iyy is a coarse group estimate, not a solid-mesh result.
+      COM uses the operator mass split (1.6 kg in four hip/knee motors, 0.35 kg
+      frame/mounts, 0.25 kg battery, remaining 0.412 kg PCB/wiring/fasteners,
+      so the body is 2.612 kg) and CAD component locations. On 2026-10-18
+      the operator confirmed the front battery slot and stated battery 0.25 kg
+      and frame 0.35 kg (previously inherited 0.210 / 0.278 kg), giving
+      x=+5.34 mm, z=15.05 mm (docs/GIM_COM_20261018.md). Iyy keeps the previous
+      coarse estimate; the masses are not weighed in this repository.
   thigh_each:
     mass_kg: 0.05
     com_from_hip_m: [-0.04908, 0.0, -0.00954]
@@ -137,8 +141,8 @@ inertial_properties:
     - Wheel-center spacing from STEP is 0.2654 m; the old 0.309 m contract is unresolved.
     - Do not treat these estimated inertias or the simulator as hardware calibration.
   cad_neutral_whole_robot:
-    com_relative_to_wheel_axle_m: [-0.00668, 0.0, 0.03632]
-    com_height_above_ground_m: 0.07632
-    pitch_inertia_about_axle_kg_m2: 0.01278
-    effective_pendulum_length_m: 0.11094
+    com_relative_to_wheel_axle_m: [0.001174872, 0.0, 0.036322179]
+    com_height_above_ground_m: 0.076322179
+    pitch_inertia_about_axle_kg_m2: 0.012787663
+    effective_pendulum_length_m: 0.112840414
     basis: rigid-group estimates above, symmetric two-leg CAD-zero pose

@@ -767,6 +767,7 @@ class V3Controller {
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
   [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
   [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
+  [[nodiscard]] bool recoveryPoseHeld() const noexcept { return recovery_pose_held_; }
   [[nodiscard]] float guardRisk() const noexcept { return guard_out_.risk; }
   [[nodiscard]] float guardAmplitude() const noexcept { return guard_out_.amplitude; }
   [[nodiscard]] float guardRaise() const noexcept { return guard_raise_m_; }
@@ -897,6 +898,8 @@ class V3Controller {
   StandUp standup_{};
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
+  bool recovery_pose_held_ = false;
+  [[nodiscard]] StandUp::Input recoveryInput(const Input& raw) const;
   OscillationGuard guard_{};
   OscillationGuard::Output guard_out_{};
   float guard_raise_m_ = 0.0F;
@@ -961,7 +964,17 @@ class V3Controller {
     return config_.tier.virtual_pitch && legs_measured_ && config_.algo == Algo::Lqr;
   }
   // com_line angle [rad] and its partials by hip/knee at core leg offsets.
-  struct ComLine { float angle, d_hip, d_knee, height_m; };
+  struct ComLine { float angle, d_hip, d_knee, height_m, pitch_inertia_at_axle; };
+  // Exact-input memoization only: encoder samples arrive slower than the
+  // controller, and recovery requests the same model twice in one tick.
+  // Include the runtime COM offset; never quantize angles or reuse stale rates.
+  struct ComCache {
+    float hip = 0.0F, knee = 0.0F, dx = 0.0F;
+    ComLine value{};
+    bool valid = false;
+  };
+  mutable std::array<ComCache, 4> com_cache_{};
+  mutable std::size_t com_cache_next_ = 0U;
   void resetReadyStill() noexcept;
   [[nodiscard]] bool readyStill(const Input& in, float body_pitch, float body_rate) noexcept;
   [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;

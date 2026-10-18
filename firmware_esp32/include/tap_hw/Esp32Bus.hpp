@@ -7,6 +7,7 @@
 #include <HardwareSerial.h>
 
 #include "tap_fw/BusTransport.hpp"
+#include "tap_fw/DeferredFormat.hpp"
 
 namespace tap_hw {
 
@@ -61,6 +62,9 @@ class Esp32UartPort {
 
   bool begin(std::uint32_t baud) noexcept;
   [[nodiscard]] tap_fw::UartPort port() noexcept;
+  // Opt-in bounded speed-write bursts; encoder deadline still has priority.
+  void setSpeedPriority(bool enabled) noexcept;
+  [[nodiscard]] bool speedPriority() noexcept;
 
   struct Diagnostics {
     std::uint32_t rx = 0U, read_timeouts = 0U, write_timeouts = 0U, motor_errors = 0U;
@@ -68,14 +72,18 @@ class Esp32UartPort {
     std::uint32_t gap_max_us = 0U;             // longest gap between encoder samples since the last report
     std::uint32_t rtt_max_us = 0U, late = 0U;  // reply latency: max since last report, count > 3 ms
     std::uint32_t tx_hold_max_us = 0U, tx_late = 0U;
+    std::uint32_t speed_tx = 0U, coalesced = 0U, unchanged = 0U, cancelled = 0U;
+    std::uint32_t speed_queue_max_us = 0U, pending_max_us = 0U, speed_tx_age_us = 0U;
+    std::int16_t sent_speed_raw = 0;
+    bool speed_priority = false;
     std::uint32_t reply_age_ms = 0U;  // since the last valid frame (saturates)
     std::int32_t drv_mode = -1;
     std::int32_t status_return = -1;   // reg 0x10: 2 = driver acks every instruction, 1 = reads only
     bool synced = false, silent = false;
   };
-  [[nodiscard]] Diagnostics diagnostics() noexcept;
+  [[nodiscard]] Diagnostics diagnostics(bool reset_maxima = false) noexcept;
   // One "WBUS ..." status line for the serial log.
-  void format(char* buffer, std::size_t size) noexcept;
+  void format(tap_fw::DeferredLine& line) noexcept;
 
  private:
   static bool send(void* context, const tap_fw::motor_frame::DxlFrame& frame) noexcept;
@@ -83,19 +91,28 @@ class Esp32UartPort {
   static void taskEntry(void* context) noexcept;
 
   struct Response { tap_fw::motor_frame::DxlFrame frame{}; std::uint64_t stamp_us = 0U; };
-  struct Pending { tap_fw::motor_frame::DxlFrame frame{}; std::uint8_t attempts = 0U; bool speed = false; std::int16_t speed_raw = 0; };
+  struct Pending {
+    tap_fw::motor_frame::DxlFrame frame{};
+    std::uint8_t attempts = 0U;
+    bool speed = false;
+    std::int16_t speed_raw = 0;
+    std::uint32_t epoch = 0U;
+    std::int64_t queued_us = 0, latest_us = 0;
+  };
 
   void taskMain() noexcept;
   bool installUart(std::uint32_t baud) noexcept;
   void run() noexcept;
   void bootSync(std::int64_t now) noexcept;
   bool transact(const tap_fw::motor_frame::DxlFrame& request, tap_fw::motor_frame::DxlParsed* reply,
-                std::int64_t window_us) noexcept;
+                std::int64_t window_us, const Pending* pending = nullptr) noexcept;
   bool transmit(const tap_fw::motor_frame::DxlFrame& request) noexcept;
   bool readReply(tap_fw::motor_frame::DxlFrame& out, bool block) noexcept;
   void drive() noexcept;
   void release() noexcept;
   [[nodiscard]] bool popPending(Pending& out) noexcept;
+  [[nodiscard]] bool speedPending() noexcept;
+  [[nodiscard]] bool stopPending() noexcept;
 
   int uart_num_;
   int gpio_;
@@ -113,11 +130,14 @@ class Esp32UartPort {
   static constexpr std::size_t kQueue = 8U;
   std::array<Pending, kQueue> queue_{};
   std::size_t q_head_ = 0U, q_count_ = 0U;
+  std::uint32_t stop_epoch_ = 0U;
   bool poll_pending_ = false;
+  bool speed_priority_ = false;
   // Last Moving Speed that reached the driver; an unchanged speed is not re-sent until kSpeedKeepaliveUs.
   bool last_speed_valid_ = false;
   std::int16_t last_speed_raw_ = 0;
   std::int64_t last_speed_tx_us_ = 0;
+  std::int64_t last_speed_wire_us_ = 0;
   Diagnostics diag_{};
 
   // Worker-owned state.
@@ -130,6 +150,7 @@ class Esp32UartPort {
   std::int16_t drv_mode_ = -1;
   std::uint8_t boot_stage_ = 0U, boot_tries_ = 0U;
   bool synced_ = false, prefer_read_ = false;
+  std::uint8_t writes_since_read_ = 0U;
   // Status Return Level (reg 0x10) read at boot. At 1 the driver answers reads only, so a write is
   // fire-and-forget: the bus is free ~0.3 ms after it instead of waiting for an acknowledgement.
   std::int16_t status_return_ = -1;

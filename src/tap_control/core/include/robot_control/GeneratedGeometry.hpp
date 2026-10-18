@@ -7,11 +7,12 @@ struct Part { float mass, x, z, iyy; };
 struct Origin { float x, y, z; };
 // Order: body, left thigh/shin/wheel, right thigh/shin/wheel.
 inline constexpr std::array<Part, 7> parts{{
-    // Body COM x: +0.00488 m = the 210 g battery in the FRONT slot (it was -0.0048 m, battery in the rear STEP slot).
-    // Measured on the robot (18/10): with the rear value the virtual-pitch equilibrium theta_v shifted by 0.07 rad
-    // between 175 mm and 70 mm body height (cx / cz grows as the legs fold), which the trim then had to chase; with
-    // this value it stays within 0.006 rad over the whole height range.
-    {2.50F, 0.00488392F, 0.0140F, 0.0070F},
+    // Body (18/10): operator masses motors 1.6 + battery 0.25 (front slot)
+    // + frame 0.35 + 0.412 kg PCB/wiring residual = 2.612 kg; STEP group
+    // centroids give x=+5.34 mm, z=15.05 mm (docs/GIM_COM_20261018.md).
+    // Body-frame offset, not a fixed whole-robot axle offset. The masses are
+    // operator-stated, not weighed here; Iyy stays a provisional estimate.
+    {2.612F, 0.0053F, 0.0151F, 0.0070F},
     {0.05F, -0.04908F, -0.00954F, 0.0000417F},
     {0.24F,  0.08998F, -0.01749F, 0.0002200F},
     {0.02F,  0.00000F,  0.00000F, 0.0000160F},
@@ -28,7 +29,7 @@ inline constexpr std::array<Origin, 6> origins{{
     {-0.09816F,-0.01050F, -0.01908F},
     {0.09816F, -0.01970F, -0.01908F}
 }};
-inline constexpr float total_mass_kg = 3.12F;
+inline constexpr float total_mass_kg = 3.232F;
 inline constexpr float wheel_radius_m = 0.040F;
 inline constexpr float axle_spacing_m = 0.2654F;
 inline constexpr float neutral_hip_rad = 0.0F;

@@ -44,6 +44,9 @@ def vec(values):
 def main():
     doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
     parts = {p["number"]: p for p in doc["components"]}
+    # Operator confirmed front battery slot (+X), unlike the source STEP.
+    # Keep regeneration consistent with the adopted +5 mm body COM.
+    parts[49]["center_m"][0] = abs(parts[49]["center_m"][0])
     assigned = set().union(*GROUPS.values())
     if assigned != set(parts) or sum(map(len, GROUPS.values())) != len(assigned):
         raise ValueError("each CAD component must belong to exactly one rigid link")
@@ -124,7 +127,7 @@ def main():
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <inertial pos="0.0053 0 0.0151" mass="2.612" diaginertia="0.020 0.007 0.020"/>
 {body_geom}
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
