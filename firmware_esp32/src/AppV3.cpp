@@ -131,9 +131,18 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
 
 }  // namespace
 
+namespace {
+// Default controller config with the legs starting fully extended (see AppV3::kStraightKneeRad).
+tap_fw::v3::V3Controller::Config straightStartConfig() noexcept {
+  auto config = tap_fw::v3::defaultV3Config();
+  config.initial_knee_rad = tap_fw::v3::LegHeight::kKneeMaxRad;
+  return config;
+}
+}  // namespace
+
 AppV3::AppV3() noexcept
     : transport_(can_.port(), uart1_.port(), uart2_.port()),
-      ctrl_(tap_fw::v3::defaultV3Config()) {
+      ctrl_(straightStartConfig()) {
   ctrl_.config().jump.enabled = false;  // v3.5.2 has no jump skills
   // Wheel command-to-speed lag measured on the robot is ~85-120 ms (the sim's delay 50 ms + lag 75 ms model);
   // without the actuation predictor the sim falls once delay + lag grow to 100 + 120 ms. Boot ON, as in the sim
@@ -694,6 +703,8 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
         return;
       }
       lying_start_ = v >= 0.5F;
+      // The lying start keeps the knee at its homing stop (0); the straight start begins fully extended.
+      ctrl_.config().initial_knee_rad = lying_start_ ? 0.0F : tap_fw::v3::LegHeight::kKneeMaxRad;
       out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n",
                   lying_start_ ? "ON" : "off", homeHip(), homeKnee());
     }
@@ -892,9 +903,10 @@ void AppV3::printTunables() noexcept {
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
   }
-  out_.printf("V3 TUNE version=v3.5.2 legmode=%s lying=%d standup=%d iq_required=%d leg_vel_limit=%.1f "
-              "leg_current_limit=%.1f\n",
+  out_.printf("V3 TUNE version=v3.5.2 legmode=%s lying=%d standup=%d home_hip=%+.4f home_knee=%+.4f "
+              "iq_required=%d leg_vel_limit=%.1f leg_current_limit=%.1f\n",
               legs_.modeName(), lying_start_ ? 1 : 0, ctrl_.config().standup.enabled ? 1 : 0,
+              homeHip(), homeKnee(),
               legs_.requiresCurrentFeedback() ? 1 : 0,
               legs_.config().velocity_limit_turns_s, legs_.config().current_limit_a);
   if (legs_.requiresCurrentFeedback()) {

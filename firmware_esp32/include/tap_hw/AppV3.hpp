@@ -138,8 +138,15 @@ class AppV3 {
   bool lying_start_ = false;
   static constexpr float kHomeHipRad = 1.30550628F;
   static constexpr float kHomeKneeRad = 0.0F;
-  [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : 0.0F; }
-  [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : 0.0F; }
+  // Straight-leg start (default; body on the stand, legs hanging straight down, motor supply switched on in
+  // that pose): the encoder zero is the fully extended pose, hip -0.9861 rad and knee 1.9722 rad (135 deg) in
+  // the CAD frame the controller works in (LegHeight::forKnee(kKneeMaxRad), 184.8 mm axle below the hip). Without
+  // this offset the controller computed its centre-of-mass line and virtual pitch for the folded pose (knee 0,
+  // 38 mm) while the robot stood tall; the sim already feeds absolute angles.
+  static constexpr float kStraightHipRad = -0.98611111F;
+  static constexpr float kStraightKneeRad = 1.97222222F;
+  [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : kStraightHipRad; }
+  [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : kStraightKneeRad; }
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;
