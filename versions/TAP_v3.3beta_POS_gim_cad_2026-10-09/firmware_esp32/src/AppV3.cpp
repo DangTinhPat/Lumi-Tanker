@@ -985,7 +985,8 @@ float AppV3::legTargetRad(std::size_t leg) const noexcept {
   const auto binding = tap_fw::board::MotorIds{}.leg_can[leg];
   const auto& pose = ctrl_.legPose();
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
-  return (knee ? pose.knee_offset_rad : pose.hip_offset_rad) * binding.driver_sign;
+  // Raw encoder frame (zero = the pose the motor supply was switched on in), like legJointRad().
+  return (knee ? pose.knee_offset_rad - kStraightKneeRad : pose.hip_offset_rad - kStraightHipRad) * binding.driver_sign;
 }
 
 float AppV3::legChainRad() const noexcept {
@@ -1087,14 +1088,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.accel_z_m_s2 = body_.accel_m_s2[2];
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
-  in.leg_chain_rad = legChainRad();
+  in.leg_chain_rad = legChainRad() + kStraightHipRad + kStraightKneeRad;
   // Measured joints per side, core frame (LegLock order LH LK RH RK).
   {
     const auto legs = tap_fw::board::MotorIds{}.leg_can;
     for (std::size_t side = 0; side < 2U; ++side) {
       const std::size_t hip = 2U * side, knee = hip + 1U;
-      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign;
-      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign;
+      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign + kStraightHipRad;
+      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign + kStraightKneeRad;
       in.hip_rate_rad_s[side] = legJointRate(hip) * legs[hip].driver_sign;
       in.knee_rate_rad_s[side] = legJointRate(knee) * legs[knee].driver_sign;
     }
@@ -1153,7 +1154,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       start[leg] = feedback_.legEstimate(tap_fw::board::MotorIds{}.leg_can[leg].joint_index).pos_turns;
     }
     engage_us_ = now_us;
-    legs_.setOffsets(ctrl_.legPose().hip_offset_rad, ctrl_.legPose().knee_offset_rad);
+    legs_.setOffsets(ctrl_.legPose().hip_offset_rad - kStraightHipRad, ctrl_.legPose().knee_offset_rad - kStraightKneeRad);
     (void)legs_.engage(start, now_us, transport_);
     out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
@@ -1190,7 +1191,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand && rec_kind_ == RecKind::KneeStand) {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
     }
-    legs_.setOffsets(hip_cmd, knee_cmd);
+    legs_.setOffsets(hip_cmd - kStraightHipRad, knee_cmd - kStraightKneeRad);
     // Roll: per-side offsets (zero unless SET roll 1 and balancing).
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,

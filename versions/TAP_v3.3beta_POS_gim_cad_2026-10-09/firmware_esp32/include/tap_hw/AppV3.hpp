@@ -73,6 +73,13 @@ class AppV3 {
   // joint angle (driver frame, rad) the lock is holding this leg at.
   [[nodiscard]] float legTargetRad(std::size_t leg) const noexcept;
   [[nodiscard]] float legChainRad() const noexcept;
+  // Straight-leg start (body on the stand, legs hanging straight down, motor supply switched on in that pose): the
+  // encoder zero is the fully extended pose, hip -0.9861 rad and knee 1.9722 rad (135 deg) in the CAD frame the
+  // controller works in (LegHeight::forKnee(kKneeMaxRad), 184.8 mm axle below the hip). Measured joints get this
+  // offset added and every leg target has it subtracted; without it the controller modelled the folded pose
+  // (knee 0, 38 mm) while the robot stood tall.
+  static constexpr float kStraightHipRad = -0.98611111F;
+  static constexpr float kStraightKneeRad = 1.97222222F;
   [[nodiscard]] const char* legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept;
 
   Mpu6500Spi mpu_{};

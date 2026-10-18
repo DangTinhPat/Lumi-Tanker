@@ -15,6 +15,9 @@ V3Controller::V3Controller(Config config)
       com_reference_m_(LegHeight::forKnee(LegHeight::kKneeMaxRad).com_above_axle_m) {
   // Initial pendulum length (legs at the power-up pose); lqrUpdate follows the pose.
   lqr_.setComHeight(config_.com_height_m);
+  knee_target_rad_ = knee_cmd_rad_ = LegHeight::kKneeMaxRad;
+  pose_ = LegHeight::forKnee(LegHeight::kKneeMaxRad);
+  height_target_m_ = pose_.axle_below_hip_m;
 }
 
 V3Controller::Output V3Controller::fault(const char* reason, const Output& base) {
@@ -156,12 +159,14 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         state_since_us_ = in.now_us;
         runaway_since_us_ = 0U;
         if (!legs_held_) {
-          // Fresh lock: legs go to their zero, so the height starts at max.
-          height_target_m_ = LegHeight::maxHeight();
-          knee_target_rad_ = knee_cmd_rad_ = 0.0F;
+          // Fresh lock: the legs hang straight (fully extended) at the power-up pose, which is the controller's
+          // knee kKneeMaxRad / 184.8 mm (AppV3 adds that home offset to the encoder angles). The pose and the
+          // height target start there, not at the folded knee 0 / 38 mm the encoder zero used to be taken for.
+          knee_target_rad_ = knee_cmd_rad_ = LegHeight::kKneeMaxRad;
+          pose_ = LegHeight::forKnee(LegHeight::kKneeMaxRad);
+          height_target_m_ = pose_.axle_below_hip_m;
           height_speed_m_s_ = 0.0F;
           height_accel_m_s2_ = 0.0F;
-          pose_ = LegHeight::forKnee(0.0F);
         }
         out.engage_legs = !legs_held_;  // already holding after a fault: keep it
         legs_held_ = true;
