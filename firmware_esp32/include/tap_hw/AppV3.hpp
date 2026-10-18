@@ -80,6 +80,17 @@ class AppV3 {
   // (knee 0, 38 mm) while the robot stood tall.
   static constexpr float kStraightHipRad = -0.98611111F;
   static constexpr float kStraightKneeRad = 1.97222222F;
+  // Lying start (SET lying 1): the motor supply was switched on with the robot in the `home` lying pose, so the
+  // driver zero is that pose: hip 1.3055 rad, knee 0 in the same CAD frame. STANDUP works from here.
+  static constexpr float kHomeHipRad = 1.30550628F;
+  static constexpr float kHomeKneeRad = 0.0F;
+  bool lying_start_ = false;
+  bool standup_pending_ = false;  // STANDUP request (SET lying 1, SET standup 1)
+  // Stand-up POS velocity feed-forward: filtered rate of the commanded hip/knee path [core rad/s].
+  float ff_hip_prev_ = 0.0F, ff_knee_prev_ = 0.0F, ff_hip_rate_ = 0.0F, ff_knee_rate_ = 0.0F;
+  std::uint64_t ff_prev_us_ = 0U;
+  [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : kStraightHipRad; }
+  [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : kStraightKneeRad; }
   [[nodiscard]] const char* legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept;
 
   Mpu6500Spi mpu_{};

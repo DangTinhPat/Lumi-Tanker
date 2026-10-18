@@ -236,6 +236,9 @@ class LqrBalancer {
   void setAccelFeedForward(float accel_m_s2) noexcept {
     accel_ff_m_s2_ = std::isfinite(accel_m_s2) ? accel_m_s2 : 0.0F;
   }
+  // After a reset while the robot already moves (a stand-up hand-over): the velocity references start at this
+  // speed instead of ramping up from zero.
+  void seedForwardVelocity(float velocity_m_s) noexcept;
   void setMaxGroundAccel(float accel_m_s2) noexcept {
     if (std::isfinite(accel_m_s2) && accel_m_s2 > 0.0F) {
       config_.max_ground_accel_m_s2 = accel_m_s2;

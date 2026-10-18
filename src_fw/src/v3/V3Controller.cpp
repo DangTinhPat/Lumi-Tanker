@@ -1,5 +1,7 @@
 #include "tap_fw/v3/V3Controller.hpp"
 
+#include "robot_control/BodyClearance.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -43,6 +45,7 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
 
 V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_in) {
   wheel_carrier_rad_s_.fill(0.0F);
+  bool recovery_roll_updated = false;
   // Roll on: the turn command is slewed (Roll::yaw_accel_rad_s2) so the
   // lean-in can build with the centripetal pull instead of after it.
   Command cmd = cmd_in;
@@ -108,6 +111,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   // the virtual pitch. Ready's operator-motion rate stays on the body IMU; its
   // balance seed still uses the virtual pitch.
   updateVirtualPitch(raw);
+  standup_lean_ = theta_v_ + com_line_hang_;
   Input in = raw;
   in.pitch_rad = theta_v_;
   in.pitch_rate_rad_s = theta_v_rate_;
@@ -136,6 +140,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   if (cmd.disable) {
     lqr_prediction_.reset();
     resetGuard();
+    standup_.reset();
+    standup_state_ = {};
     legs_held_ = false;
     #ifdef TAP_SPLIT_HOST_PROTOTYPE
     if (config_.split.enabled) {
@@ -157,6 +163,33 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   switch (state_) {
     case State::Idle:
     case State::Fault:
+      if (cmd.standup && config_.standup.enabled) {
+        // Fold to the support-pose encoder target, then use body pitch to
+        // unwind the hips toward a level trunk.
+        if (!in.sensors_ok || !legs_measured_) return fault("sensors not ready", out);
+        if (config_.algo != Algo::Lqr || !config_.tier.virtual_pitch)
+          return fault("stand-up requires virtual-pitch LQR", out);
+        state_ = State::StandUp;
+        state_since_us_ = in.now_us;
+        runaway_since_us_ = 0U;
+        out.engage_legs = !legs_held_;
+        legs_held_ = true;
+        out.legs_locked = true;
+        knee_target_rad_ = knee_cmd_rad_ = LegHeight::kKneeMinRad;
+        pose_ = LegHeight::forKnee(knee_cmd_rad_);
+        height_target_m_ = pose_.axle_below_hip_m;
+        height_speed_m_s_ = height_accel_m_s2_ = 0.0F;
+        height_startup_ = false;
+        dhip_ = dknee_ = axle_hip_correction_ = 0.0F;
+        standup_.config() = config_.standup;
+        lqr_prediction_.reset();
+        const float hip = 0.5F * (raw.hip_rad[0] + raw.hip_rad[1]);
+        standup_.begin(hip, pose_.knee_offset_rad);
+        out.leg_hip_offset_rad = 0.5F * (raw.hip_rad[0] + raw.hip_rad[1]);
+        out.leg_knee_offset_rad = pose_.knee_offset_rad;
+        out.state = state_;
+        return out;
+      }
       if (cmd.start) {
         if (!in.sensors_ok) return fault("sensors not ready", out);
         state_ = State::Locking;
@@ -245,6 +278,102 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         return out;
       }
       break;
+    }
+    case State::StandUp: {
+      out.legs_locked = true;
+      out.wheels_enabled = false;     // set from the sequence below
+      if (!in.sensors_ok || !legs_measured_)
+        return fault("sensor feedback lost during the stand-up", out);
+      if (cmd.standup_advance) standup_.advanceFromKneeling();
+      StandUp::Input si{};
+      si.dt_s = in.dt_s;
+      si.pitch_rad = raw.pitch_rad;
+      si.pitch_rate_rad_s = raw.pitch_rate_rad_s;
+      const auto capture = comLine(hip_meas_, knee_meas_);
+      si.capture_lean_rad = raw.pitch_rad + capture.angle;
+      si.capture_rate_rad_s = raw.pitch_rate_rad_s +
+          capture.d_hip * hip_rate_meas_ + capture.d_knee * knee_rate_meas_;
+      si.hip_jacobian = capture.d_hip;
+      si.hip_measured_rad = hip_meas_;
+      si.carrier_rate_rad_s = raw.pitch_rate_rad_s + hip_rate_meas_ + knee_rate_meas_;
+      si.ground_speed_m_s = ground_v_;
+      si.wheel_radius_m = config_.wheel_radius_m;
+      if (config_.standup.overlap_after_lift && !config_.standup.hold_after_flip) {
+        if (!std::isfinite(raw.roll_rate_rad_s) || !std::isfinite(raw.accel_y_m_s2) ||
+            !std::isfinite(raw.accel_z_m_s2) || !std::isfinite(raw.accel_x_m_s2))
+          return fault("invalid IMU for recovery clearance", out);
+        // Keep the existing IMU roll estimator alive during recovery, with
+        // roll actuation disabled. Do not update it twice on the handoff tick.
+        updateRoll(raw, false);
+        recovery_roll_updated = true;
+        const float hang = LegHeight::hangHipCad();
+        si.body_clearance_m = robot_control::bodyClearance(raw.pitch_rad, roll_est_,
+            {hang + raw.hip_rad[0], hang + raw.hip_rad[1]}, raw.knee_rad,
+            config_.wheel_radius_m);
+        si.body_clearance_valid = std::isfinite(si.body_clearance_m);
+      }
+      const auto capture_model = robot_control::WholeBodyModel{}.compute(
+          hip_meas_ + LegHeight::hangHipCad(), knee_meas_,
+          hip_meas_ + LegHeight::hangHipCad(), knee_meas_);
+      const float capture_length = capture_model.pitch_inertia_at_axle_kg_m2 /
+          (robot_control::geometry::total_mass_kg * std::max(capture.height_m, 0.01F));
+      si.capture_omega_rad_s = std::sqrt(9.80665F / std::max(capture_length, 0.02F));
+      standup_lean_ = si.capture_lean_rad;
+      si.sensors_ok = in.sensors_ok;
+      standup_state_ = standup_.update(si);
+      if (standup_state_.phase == StandUp::Phase::Failed) return fault("stand-up failed", out);
+      if (standup_state_.phase == StandUp::Phase::Support) {
+        // Preserve the last recovery command; rebasing to measured encoders
+        // would step the target by the driver's tracking error at handoff.
+        const float hip = standup_state_.hip_target_rad;
+        const float knee = standup_state_.knee_target_rad;
+        // Keep V3's nominal pose on its supported height manifold. The hip
+        // offset from that pose carries the commanded recovery geometry through
+        // the handoff, because updateHeight() recomputes pose_ from the knee.
+        pose_ = LegHeight::forKnee(knee);
+        dhip_ = hip - pose_.hip_offset_rad;
+        axle_hip_correction_ = 0.0F;
+        height_target_m_ = pose_.axle_below_hip_m;
+        knee_cmd_rad_ = knee_target_rad_ = knee;
+        // updateVirtualPitch cached the upright-hip Jacobian during the fold;
+        // invalidate it for the newly measured kneeling configuration.
+        j_hip_knee_ = std::numeric_limits<float>::quiet_NaN();
+        updateVirtualPitch(raw);
+        in.pitch_rad = theta_v_;
+        in.pitch_rate_rad_s = theta_v_rate_;
+
+        // Physical CoM zero is virtual pitch = -hang reference. Seed speed
+        // and retain the commands still travelling through the wheel delay.
+        engageBalance(in, -com_line_hang_, true);
+        lqr_.seedForwardVelocity(ground_v_);
+        pid_v_filt_ = ground_v_;
+        // The preview planner owns LQR's velocity reference when enabled.
+        // Seed it too: otherwise its stale zero overwrites the rolling seed
+        // on this very tick, and the station loop banks the braking travel as
+        // position error. Plan the stop from the measured capture velocity.
+        plan_v_ = ground_v_;
+        plan_a_ = plan_j_ = 0.0F;
+        plan_head_ = plan_n_ = 0U;
+        plan_init_ = true;
+        pid_driving_ = true;  // reanchor after the planned stop, as after DRIVE
+        // A stand-up handoff has already established its leg height. Skip the
+        // normal powered-up startup-height ramp so it cannot overwrite the
+        // kneeling hip offset before the wheel controller catches the COM.
+        height_startup_ = false;
+        height_target_m_ = pose_.axle_below_hip_m;
+        break;
+      }
+      out.wheels_enabled = standup_state_.wheels_on;
+      out.leg_hip_offset_rad = standup_state_.hip_target_rad;
+      out.leg_knee_offset_rad = standup_state_.knee_target_rad;
+      out.legs_moving = true;
+      if (standup_state_.wheels_on) {
+        out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
+      }
+      lqr_prediction_.record(config_.wheel_radius_m * standup_state_.wheel_rad_s,
+                             config_.lqr_prediction, in.dt_s);
+      out.state = state_;
+      return out;
     }
     case State::Balancing:
       break;
@@ -335,9 +464,10 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
     out.leg_hip_offset_rad = hipCommand();
     out.leg_knee_offset_rad = kneeCommand();
     out.legs_moving = knee_cmd_rad_ != kneeGoalRad();
-    updateRoll(raw, !held_outer_off_ && !held_quiet_ && legs_measured_);
+    if (!recovery_roll_updated)
+      updateRoll(raw, !held_outer_off_ && !held_quiet_ && legs_measured_);
   } else {
-    updateRoll(raw, false);
+    if (!recovery_roll_updated) updateRoll(raw, false);
   }
   out.leg_roll_hip_rad = roll_hip_;
   out.leg_roll_knee_rad = roll_knee_;
@@ -377,8 +507,8 @@ void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_tr
   }
 }
 
-void V3Controller::engageBalance(const Input& in, float seed) {
-  lqr_prediction_.reset();
+void V3Controller::engageBalance(const Input& in, float seed, bool preserve_wheel_history) {
+  if (!preserve_wheel_history) lqr_prediction_.reset();
   resetGuard();
   state_ = State::Balancing;
   ga_init_ = false;
@@ -2318,6 +2448,7 @@ const char* toString(V3Controller::State state) noexcept {
     case V3Controller::State::Ready: return "Ready";
     case V3Controller::State::Balancing: return "Balancing";
     case V3Controller::State::Fault: return "Fault";
+    case V3Controller::State::StandUp: return "StandUp";
   }
   return "?";
 }

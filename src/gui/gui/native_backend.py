@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 import math
+import os
 from pathlib import Path
 import queue
 import socket
@@ -29,8 +30,11 @@ class NativeBackend:
         self.root = Path(root or workspace_root())
         self.rate_hz = int(rate_hz)
         self.process: Optional[subprocess.Popen[str]] = None
-        self.lines: queue.Queue[str] = queue.Queue()
+        self.lines: queue.Queue[str] = queue.Queue(maxsize=256)
         self.telemetry: Dict[str, str] = {}
+        # TAP_SIM_LOG=<file>: append the telemetry (STATE) and the commands sent, for offline analysis.
+        log_path = os.environ.get("TAP_SIM_LOG")
+        self._sim_log = open(log_path, "a", buffering=1) if log_path else None
         self.telemetry_received_monotonic_s = 0.0
         self.view: Dict[str, str] = {}
         self.log = deque(maxlen=200)
@@ -43,16 +47,14 @@ class NativeBackend:
 
     def runner_path(self) -> Path:
         candidates = [
-            self.root / "build/bin/tap_mujoco_native",
-            self.root / "build/native/bin/tap_mujoco_native",
-            self.root / "build/tap_mujoco_native3/tap_mujoco_native",
-            self.root / "build/tap_mujoco_native/tap_mujoco_native",
-            self.root / "build/tap_mujoco_native2/tap_mujoco_native",
+            self.root / "build/native/bin/tap_mujoco_gim_v3",
+            self.root / "build/bin/tap_mujoco_gim_v3",
+            self.root / "build/tap_mujoco_gim_v3/tap_mujoco_gim_v3",
         ]
         for path in candidates:
             if path.is_file() and path.stat().st_mode & 0o111:
                 return path
-        raise RuntimeError("native runner is not built; build tap_mujoco_native first")
+        raise RuntimeError("GIM V3 runner is not built; build tap_mujoco_gim_v3 first")
 
     @property
     def running(self) -> bool:
@@ -68,12 +70,28 @@ class NativeBackend:
             if self.running:
                 return
             runner = self.runner_path()
-            model = self.root / "src/tap_sim/model/tap_robot.xml"
+            # TAP_SIM_MODEL=<xml>: another model (e.g. the rough terrain, tools/build_rough_terrain.py)
+            model = Path(os.environ.get("TAP_SIM_MODEL") or self.root / "src/tap_sim/model/gim_dynamic.xml")
+            if not model.is_absolute():
+                model = self.root / model
+            if not model.is_file():
+                raise RuntimeError(f"GIM dynamic model is missing: {model}")
             self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._ready.clear()
+            command = [str(runner), "--model", str(model), "--rate", str(self.rate_hz),
+                       "--command-port", str(self._command_port), "--realtime"]
+            # v3.5 jump tuning override for trials: TAP_JUMP_SPEC="key=val,key=val,..."
+            # (keys: applyJumpSpec in gim_v3_runner.cpp).
+            if os.environ.get("TAP_JUMP_SPEC"):
+                command += ["--jump", os.environ["TAP_JUMP_SPEC"]]
+            # Roll balance is on in the dashboard sim (TAP_SIM_ROLL=0 turns it off); the headless tests keep it off.
+            command += ["--roll", "0" if os.environ.get("TAP_SIM_ROLL") == "0" else "1"]
+            # TAP_SIM_START=<keyframe>: start in another MJCF keyframe, e.g. "home" (the lying pose, shown frozen:
+            # the V3 start-up sequence only knows the extended spawn pose)
+            if os.environ.get("TAP_SIM_START"):
+                command += ["--start-key", os.environ["TAP_SIM_START"]]
             self.process = subprocess.Popen(
-                [str(runner), "--model", str(model), "--rate", str(self.rate_hz),
-                 "--command-port", str(self._command_port), "--realtime"],
+                command,
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1)
             self._reader = threading.Thread(target=self._read_output, daemon=True)
@@ -100,6 +118,7 @@ class NativeBackend:
             [sys.executable, str(viewer_script), "--model", str(model_path)],
             cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT, text=True, bufsize=1)
+        os.set_blocking(self._viewer_process.stdin.fileno(), False)
 
     def _sync_mujoco_viewer(self) -> None:
         if not self.viewer_running or self._viewer_process.stdin is None:
@@ -107,11 +126,12 @@ class NativeBackend:
         try:
             line = "VIEW|" + "|".join(
                 f"{key}={value}" for key, value in self.view.items()) + "\n"
-            self._viewer_process.stdin.write(line)
-            self._viewer_process.stdin.flush()
+            packet = line.encode("ascii")
+            # Atomic nonblocking snapshots: a busy renderer must not stall GUI input.
+            if len(packet) <= 4096:
+                os.write(self._viewer_process.stdin.fileno(), packet)
         except (BrokenPipeError, OSError):
-            # A user closing the MuJoCo window is not a controller fault. The
-            # child continues safely; the dashboard reports the viewer state.
+            # A busy or closed viewer only drops a debug frame.
             return
 
     def _close_mujoco_viewer(self) -> None:
@@ -140,7 +160,15 @@ class NativeBackend:
         for line in process.stdout:
             if line.startswith("READY|"):
                 self._ready.set()
-            self.lines.put(line.rstrip("\n"))
+            line = line.rstrip("\n")
+            try:
+                self.lines.put_nowait(line)
+            except queue.Full:
+                try:
+                    self.lines.get_nowait()
+                except queue.Empty:
+                    pass
+                self.lines.put_nowait(line)
 
     @staticmethod
     def _parse(line: str) -> Dict[str, str]:
@@ -149,23 +177,30 @@ class NativeBackend:
 
     def drain(self) -> int:
         count = 0
-        while True:
+        view_changed = False
+        for _ in range(self.lines.qsize()):
             try:
                 line = self.lines.get_nowait()
             except queue.Empty:
                 break
             count += 1
             if line.startswith("STATE|"):
+                if self._sim_log is not None:
+                    self._sim_log.write(line + "\n")
                 self.telemetry = self._parse(line)
                 self.telemetry_received_monotonic_s = time.monotonic()
             elif line.startswith("VIEW|"):
                 self.view = self._parse(line)
-                self._sync_mujoco_viewer()
+                view_changed = True
             else:
                 self.log.append(line)
+        if view_changed:
+            self._sync_mujoco_viewer()
         return count
 
     def send(self, command: str) -> None:
+        if self._sim_log is not None:
+            self._sim_log.write(f"CMD|{command}|t={self.telemetry.get('t', '')}\n")
         process = self.process
         if process is None or process.poll() is not None:
             return
@@ -224,6 +259,27 @@ class NativeBackend:
         """Request a symmetric FK height target; C++ owns the inverse FK."""
         if math.isfinite(body_height_m):
             self.send(f"HEIGHT {body_height_m:.7g}")
+
+    @property
+    def starts_lying(self) -> bool:
+        """The sim starts in another keyframe (TAP_SIM_START, e.g. "home"): ENABLE is not the way to start it."""
+        return bool(os.environ.get("TAP_SIM_START"))
+
+    def command_standup(self) -> None:
+        """Start autonomous fold/pause/flip/capture from TAP_SIM_START=home."""
+        self.send("STANDUP")
+
+    def command_standup_flip(self) -> None:
+        """Start the pitch-to-level phase from the held kneeling pose."""
+        self.send("FLIP")
+
+    def command_jump(self, forward_m: float = 0.0) -> None:
+        """v3.5 jump: vertical, or forward over forward_m metres (run-up, jump, land, stop)."""
+        # "JUMP 0" is the vertical jump ("JUMP" alone is the default forward hop)
+        if math.isfinite(forward_m) and forward_m > 0.0:
+            self.send(f"JUMP {forward_m:.3f}")
+        else:
+            self.send("JUMP 0")
 
     def command_dance(self, direction: float = 1.0) -> None:
         if math.isfinite(direction):

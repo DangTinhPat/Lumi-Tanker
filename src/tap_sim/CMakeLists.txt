@@ -36,6 +36,10 @@ if(NOT TARGET tap_control_hal)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tap_control/hal tap_control_hal_build)
 endif()
 
+if(NOT TARGET tap_fw)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../src_fw tap_fw_build)
+endif()
+
 add_executable(tap_mujoco_native native/native_runner.cpp)
 target_compile_features(tap_mujoco_native PRIVATE cxx_std_17)
 target_compile_options(tap_mujoco_native PRIVATE -Wall -Wextra -Wpedantic)
@@ -46,9 +50,20 @@ target_link_libraries(tap_mujoco_native PRIVATE
   tap_control_core tap_control_hal "${MUJOCO_LIBRARY}" Threads::Threads dl)
 set_target_properties(tap_mujoco_native PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
 
+# The firmware V3Controller in MuJoCo on the GIM6010-8 model (gim_dynamic.xml).
+add_executable(tap_mujoco_gim_v3 native/gim_v3_runner.cpp)
+target_compile_features(tap_mujoco_gim_v3 PRIVATE cxx_std_17)
+target_compile_options(tap_mujoco_gim_v3 PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(tap_mujoco_gim_v3 PRIVATE
+  "${MUJOCO_ROOT}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/drivers")
+target_link_libraries(tap_mujoco_gim_v3 PRIVATE
+  tap_fw tap_control_core tap_control_hal "${MUJOCO_LIBRARY}" Threads::Threads dl)
+set_target_properties(tap_mujoco_gim_v3 PROPERTIES BUILD_RPATH "${MUJOCO_ROOT}")
+
 include(CTest)
 
-install(TARGETS tap_mujoco_native RUNTIME DESTINATION bin)
+install(TARGETS tap_mujoco_native tap_mujoco_gim_v3 RUNTIME DESTINATION bin)
 install(DIRECTORY model DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/validate_model.py

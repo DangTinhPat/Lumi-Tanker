@@ -41,6 +41,10 @@ class MotorFeedback {
   [[nodiscard]] float takeMinBusVoltage() noexcept;
   [[nodiscard]] bool allLegsFresh(std::uint64_t now_us) const noexcept;
   [[nodiscard]] bool allWheelsFresh(std::uint64_t now_us) const noexcept;
+  // Same, with a caller-chosen age limit [us] (the controller allows a longer outage while the wheels only hold).
+  [[nodiscard]] bool allWheelsFreshWithin(std::uint64_t now_us, std::uint32_t max_age_us) const noexcept;
+  // Oldest wheel reply [us]; 0xFFFFFFFF if a wheel has never answered (telemetry).
+  [[nodiscard]] std::uint32_t oldestWheelAgeUs(std::uint64_t now_us) const noexcept;
   [[nodiscard]] std::uint64_t sequence() const noexcept { return sequence_; }
 
   // Leg zero reference. GDS68 positions restart from zero at every driver

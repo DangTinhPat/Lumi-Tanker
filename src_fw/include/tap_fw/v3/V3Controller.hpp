@@ -8,6 +8,7 @@
 #include "robot_control/LqrActuationPredictor.hpp"
 #include "robot_control/LqrBalancer.hpp"
 #include "tap_fw/v3/OscillationGuard.hpp"
+#include "tap_fw/v3/StandUp.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
@@ -25,7 +26,8 @@ namespace tap_fw::v3 {
 // (ARMED) -> it engages after Engage::armed_go_s or at the first tip (or on GO).
 class V3Controller {
  public:
-  enum class State { Idle, Locking, Ready, Balancing, Fault };
+  // StandUp: fold, level the body, then hand off to V3 balance for COM capture (from the lying pose).
+  enum class State { Idle, Locking, Ready, Balancing, Fault, StandUp };
 
   // Lqr (SET algo 0) with the tiers is the shipped balancer. Pid (SET algo 1) is the
   // classic two-loop fallback. WholeBody (SET algo 2) is an opt-in single LQR for
@@ -514,6 +516,7 @@ class V3Controller {
     #endif
     Tier tier{};
     Guard guard{};
+    StandUp::Config standup;
     Roll roll;
     WheelPredict wheel_pred;
     Height height{};
@@ -675,6 +678,8 @@ class V3Controller {
   struct Command {
     bool start = false;       // edge
     bool go = false;          // edge: engage balancing now (from Ready)
+    bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
+    bool standup_advance = false;  // edge: begin the pitch-to-level phase from Kneeling
     bool disable = false;     // level: stop everything
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
@@ -760,6 +765,8 @@ class V3Controller {
   [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
   [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
+  [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
+  [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
   [[nodiscard]] float guardRisk() const noexcept { return guard_out_.risk; }
   [[nodiscard]] float guardAmplitude() const noexcept { return guard_out_.amplitude; }
   [[nodiscard]] float guardRaise() const noexcept { return guard_raise_m_; }
@@ -887,6 +894,9 @@ class V3Controller {
   Config config_{};
   robot_control::LqrBalancer lqr_;
   robot_control::LqrActuationPredictor lqr_prediction_{};
+  StandUp standup_{};
+  StandUp::Output standup_state_{};
+  float standup_lean_ = 0.0F;
   OscillationGuard guard_{};
   OscillationGuard::Output guard_out_{};
   float guard_raise_m_ = 0.0F;
@@ -1123,7 +1133,7 @@ class V3Controller {
   bool still_quiet_ = false;
   float armed_pitch_ = 0.0F;
 
-  void engageBalance(const Input& in, float seed);
+  void engageBalance(const Input& in, float seed, bool preserve_wheel_history = false);
   void heldRezero(const Input& in);
   [[nodiscard]] float releaseBalance(const Input& in) const;
   void updateLearnedTrim(const Input& in, float ex, float current_trim_rad);

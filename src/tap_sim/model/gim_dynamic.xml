@@ -79,7 +79,7 @@
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
+      <inertial pos="0.00488392 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
       <geom name="cad_07_0" type="mesh" mesh="cad_07_0" material="gim_structure" pos="2.64662958e-13 0.10245 0.00827948982" contype="1" conaffinity="1"/>
       <geom name="cad_08_0" type="mesh" mesh="cad_08_0" material="gim_structure" pos="-0.00723794046 0.1122 0.0109132013" contype="1" conaffinity="1"/>
       <geom name="cad_13_0" type="mesh" mesh="cad_13_0" material="gim_structure" pos="-5.45696821e-15 0.0237 0.00827948981" contype="0" conaffinity="0"/>
@@ -104,7 +104,7 @@
       <geom name="cad_46_0" type="mesh" mesh="cad_46_0" material="gim_structure" pos="-5.91171556e-15 0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_47_0" type="mesh" mesh="cad_47_0" material="gim_structure" pos="0 -0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_48_0" type="mesh" mesh="cad_48_0" material="gim_electronics" pos="0 -3.41060513e-16 0.0560794898" contype="0" conaffinity="0"/>
-      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="-0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
+      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
       <geom name="cad_50_0" type="mesh" mesh="cad_50_0" material="gim_structure" pos="0 -3.41060513e-16 0.00677948981" contype="1" conaffinity="1"/>
       <geom name="cad_51_0" type="mesh" mesh="cad_51_0" material="gim_hardware" pos="-0.036 0.095 0.00697948981" contype="0" conaffinity="0"/>
       <geom name="cad_52_0" type="mesh" mesh="cad_52_0" material="gim_hardware" pos="0.036 -0.095 0.00697948981" contype="0" conaffinity="0"/>
@@ -193,5 +193,6 @@
   <keyframe>
     <key name="spawn_extended" qpos="0 0 0.216490386 1 0 0 0 -0.986111111 1.97222222 0 -0.986111111 1.97222222 0"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
+    <key name="home" qpos="0 0 0.04172 1 0 0 0 1.30550628 0 0 1.30550628 0 0"/>
   </keyframe>
 </mujoco>

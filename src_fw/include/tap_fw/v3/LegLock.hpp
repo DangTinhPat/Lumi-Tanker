@@ -40,8 +40,10 @@ class LegLock {
   explicit LegLock(Config config) noexcept : config_(config) {}
 
   // Starts the lock from the measured rotor positions (driver turns).
+  // Stand-up passes ramp_to_zero=false: the caller supplies the measured pose as the offsets and owns the
+  // trajectory, so no homing ramp is superimposed.
   bool engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
-              motor_transport::Transport& transport) noexcept;
+              motor_transport::Transport& transport, bool ramp_to_zero = true) noexcept;
   // Sends the (ramped) hold target at the resend period. Call every tick.
   bool update(std::uint64_t now_us, motor_transport::Transport& transport) noexcept;
   // All legs to IDLE.
@@ -73,6 +75,12 @@ class LegLock {
     side_knee_rate_ = knee_rate;
   }
   // Velocity feed-forward this leg's target carries [driver turns/s].
+  // Rate of the common hip/knee offsets [core rad/s]; the driver position loop lags a ramped target by
+  // rate / pos_gain, so the stand-up path rate goes out as the velocity feed-forward. Zero when the path is held.
+  void setCommonRates(float hip_rate, float knee_rate) noexcept {
+    common_hip_rate_ = hip_rate;
+    common_knee_rate_ = knee_rate;
+  }
   [[nodiscard]] float velFfTurns(std::size_t leg) const noexcept;
   void setResendPeriod(std::uint32_t period_us) noexcept {
     config_.resend_period_us = period_us;
@@ -88,6 +96,7 @@ class LegLock {
   float knee_offset_rad_ = 0.0F;
   std::array<float, 2> side_hip_rad_{};
   std::array<float, 2> side_knee_rad_{};
+  float common_hip_rate_ = 0.0F, common_knee_rate_ = 0.0F;
   std::array<float, 2> side_hip_rate_{};
   std::array<float, 2> side_knee_rate_{};
   [[nodiscard]] bool jointMit(std::size_t leg) const noexcept;
@@ -95,6 +104,7 @@ class LegLock {
 
   Config config_{};
   bool engaged_ = false;
+  bool ramp_to_zero_ = true;
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;
   std::uint64_t next_send_us_ = 0U;

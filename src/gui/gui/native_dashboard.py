@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 import time
 import tkinter as tk
@@ -21,38 +20,25 @@ MUTED = "#98a0b0"
 GOOD = "#3ecf8e"
 WARN = "#ffb454"
 BAD = "#ff5c68"
-NATURAL_BODY_HEIGHT_M = 0.1484350374792
-# These bounds come from the native FK envelope (knee -1.2..0.458407 rad)
-# with the axle fore/aft coordinate held at natural ENABLE.  They are not a
-# claim that the STEP contains calibrated physical stop phasing.
-# Keep a small clearance margin inside the measured FK envelope. The native
-# runner still rejects any target that cannot be reached from the live encoder
-# seed, and reports the rejection through telemetry.
-MIN_BODY_HEIGHT_M = 0.140
-# The 0.200 m target is the best short native trial so far (not a long-duration
-# station-hold certification). The lower slider bound remains the FK/CAD
-# envelope for inspection; the native core still performs the live feasibility
-# and capture checks before starting the path.
-BEST_TESTED_BODY_HEIGHT_M = 0.200
-# The high endpoint is the native FK/CAD envelope, not a knee-stop command.
-MAX_BODY_HEIGHT_M = 0.245
+MIN_BODY_HEIGHT_M = 0.06988
+MAX_BODY_HEIGHT_M = 0.21649
+NATURAL_BODY_HEIGHT_M = MAX_BODY_HEIGHT_M
+SPAWN_POSE = (-0.9861111111111111, 1.9722222222222222,
+              -0.9861111111111111, 1.9722222222222222)
+BEST_TESTED_BODY_HEIGHT_M = MAX_BODY_HEIGHT_M
 
 
 def _posture_to_height(position: float) -> float:
     """Map one operator posture axis around natural ENABLE to FK height."""
     position = max(-1.0, min(1.0, float(position)))
-    if position >= 0.0:
-        return NATURAL_BODY_HEIGHT_M - position * (NATURAL_BODY_HEIGHT_M - MIN_BODY_HEIGHT_M)
-    return NATURAL_BODY_HEIGHT_M + (-position) * (MAX_BODY_HEIGHT_M - NATURAL_BODY_HEIGHT_M)
+    return NATURAL_BODY_HEIGHT_M + min(position, 0.0) * (
+        NATURAL_BODY_HEIGHT_M - MIN_BODY_HEIGHT_M)
 
 
 def _height_to_posture(height_m: float) -> float:
     height_m = max(MIN_BODY_HEIGHT_M, min(MAX_BODY_HEIGHT_M, float(height_m)))
-    if height_m <= NATURAL_BODY_HEIGHT_M:
-        return ((NATURAL_BODY_HEIGHT_M - height_m) /
-                (NATURAL_BODY_HEIGHT_M - MIN_BODY_HEIGHT_M))
-    return -((height_m - NATURAL_BODY_HEIGHT_M) /
-              (MAX_BODY_HEIGHT_M - NATURAL_BODY_HEIGHT_M))
+    return (height_m - NATURAL_BODY_HEIGHT_M) / (
+        NATURAL_BODY_HEIGHT_M - MIN_BODY_HEIGHT_M)
 
 
 def _sample_curve(curves, mode, amount):
@@ -76,7 +62,7 @@ class NativeDashboard:
         # Retain this dashboard's existing command envelope. Other callers,
         # including ball following, use the lower conservative API defaults.
         self.motion = MotionAPI(
-            backend, limits=MotionLimits(max_linear_m_s=1.0, max_yaw_rad_s=0.8))
+            backend, limits=MotionLimits(max_linear_m_s=4.1888, max_yaw_rad_s=1.5))
         self.vision_process = PersonVisionProcess(
             self.backend.root / "blue_object_vision")
         self.vision_behavior = None
@@ -95,12 +81,14 @@ class NativeDashboard:
         self._posture_send_period_ms = 120
         self._posture_quiet_since = None
         self._show_waiting = False
+        self._standup_active = False
         self._status_window = None
         self._log_window = None
         self.telemetry = tk.StringVar(value="No telemetry")
         self._last_log_text = ""
         self.logbox = None
-        self.curves = self._load_pose_curves()
+        self.curves = {"natural_enable_pose": SPAWN_POSE,
+                       "rest_pose": SPAWN_POSE, "tables": {}}
         self.root.title("TAP · native MuJoCo")
         self.root.configure(bg=BG)
         self.root.geometry("900x520")
@@ -170,7 +158,7 @@ class NativeDashboard:
         speed_row.pack(fill="x", pady=(6, 0))
         ttk.Label(speed_row, textvariable=self.speed_readout,
                   style="Card.TLabel").pack(anchor="w")
-        tk.Scale(speed_row, from_=0.05, to=1.00, resolution=0.05,
+        tk.Scale(speed_row, from_=0.05, to=4.15, resolution=0.05,
                  orient="horizontal", showvalue=False, variable=self.speed,
                  command=self._speed_preview, bg=CARD, fg=FG,
                  troughcolor="#3a4050", highlightthickness=0, bd=0,
@@ -187,14 +175,14 @@ class NativeDashboard:
 
         posture = ttk.LabelFrame(toolbar, text="Chiều cao thân", style="Card.TLabelframe", padding=10)
         posture.grid(row=0, column=1, sticky="nsew")
-        ttk.Label(posture, text="−1 extension · 0 natural · +1 squat",
+        ttk.Label(posture, text="−1 CAD zero · 0 spawn: gối 135°",
                   style="Card.TLabel").pack(anchor="w")
         self.posture_var = tk.DoubleVar(value=0.0)
         self.height_var = tk.DoubleVar(value=NATURAL_BODY_HEIGHT_M)
         self.height_readout = tk.StringVar(
-            value=f"Natural ENABLE · {NATURAL_BODY_HEIGHT_M:.3f} m")
+            value=f"Spawn: gối 135° · {NATURAL_BODY_HEIGHT_M:.3f} m")
         self.posture_scale = tk.Scale(
-            posture, from_=1.0, to=-1.0, resolution=0.01,
+            posture, from_=-1.0, to=0.0, resolution=0.01,
             orient="horizontal", showvalue=False,
             variable=self.posture_var, command=self._posture_preview,
             bg=CARD, fg=FG, troughcolor="#3a4050", highlightthickness=0,
@@ -212,8 +200,8 @@ class NativeDashboard:
         height_presets.pack(fill="x")
         for index, (label, height) in enumerate((
                 ("Natural", NATURAL_BODY_HEIGHT_M),
-                ("Max standup", MAX_BODY_HEIGHT_M),
-                ("Deep squat", MIN_BODY_HEIGHT_M))):
+                ("Max extension", MAX_BODY_HEIGHT_M),
+                ("CAD zero", MIN_BODY_HEIGHT_M))):
             ttk.Button(height_presets, text=label,
                        command=lambda h=height: self.send_height(h)).grid(
                            row=0, column=index,
@@ -223,14 +211,20 @@ class NativeDashboard:
 
         skill = ttk.LabelFrame(toolbar, text="Skill", style="Card.TLabelframe", padding=6)
         skill.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(skill, text="Gimbal · xoay tại chỗ + đổi chiều cao theo nhịp",
+        ttk.Label(skill, text="Kịch bản chuyển động chưa hiệu chỉnh cho GIM",
                   style="Card.TLabel").pack(side="left", padx=(2, 10))
         ttk.Button(skill, text="Múa ↻",
-                   command=lambda: self.start_dance(1.0)).pack(side="left", padx=2)
+                   command=lambda: self.start_dance(1.0), state="disabled").pack(side="left", padx=2)
         ttk.Button(skill, text="Múa ↺",
-                   command=lambda: self.start_dance(-1.0)).pack(side="left", padx=2)
+                   command=lambda: self.start_dance(-1.0), state="disabled").pack(side="left", padx=2)
+        self.jump_status = tk.StringVar(value="")
+        ttk.Button(skill, text="Đứng dậy (từ nằm)", command=self.start_standup).pack(side="left", padx=2)
+        ttk.Button(skill, text="Nhảy đứng 12 cm", command=self.start_jump).pack(side="left", padx=2)
+        ttk.Button(skill, text="Nhảy tiến (kanguru)", command=lambda: self.start_jump(0.08)).pack(side="left", padx=2)
+        ttk.Label(skill, textvariable=self.jump_status, style="Card.TLabel").pack(
+            side="left", padx=(4, 8))
         ttk.Button(skill, text="Dừng skill",
-                   command=self.stop_skill).pack(side="left", padx=2)
+                   command=self.stop_skill, state="disabled").pack(side="left", padx=2)
 
         body = ttk.Frame(outer, style="Card.TFrame", padding=18)
         body.pack(fill="both", expand=True)
@@ -238,7 +232,7 @@ class NativeDashboard:
         ttk.Label(
             body,
             text="MuJoCo 3-D viewer mở trong cửa sổ riêng.\n"
-                 "Dùng phím mũi tên hoặc các nút điều hướng; slider và preset điều khiển chiều cao.",
+                 "Dùng phím mũi tên hoặc các nút điều hướng; thanh chiều cao đi từ CAD zero đến gối 135°.",
             style="Card.TLabel",
             justify="center",
         ).pack(expand=True)
@@ -331,19 +325,12 @@ class NativeDashboard:
         self._last_log_text = log_text
 
     def _load_pose_curves(self):
-        path = Path(__file__).resolve().parents[1] / "config" / "pose_curves.json"
-        try:
-            with path.open(encoding="utf-8") as stream:
-                curves = json.load(stream)
-            if not all(mode in curves["tables"] for mode in ("squat", "roll_left", "roll_right")):
-                raise ValueError("pose curve modes missing")
-            return curves
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"cannot load CAD pose curves: {path}") from exc
+        return {"natural_enable_pose": SPAWN_POSE,
+                "rest_pose": SPAWN_POSE, "tables": {}}
 
     def _natural_enable_pose(self):
-        """Return the mechanical zero used when ENABLE is first acquired."""
-        return self.curves.get("natural_enable_pose", self.curves["rest_pose"])
+        """Return the extended spawn pose in CAD joint coordinates."""
+        return SPAWN_POSE
 
     def _bind_keys(self):
         keys = {"Up": (1.0, 0.0), "Down": (-1.0, 0.0), "Left": (0.0, 1.0), "Right": (0.0, -1.0)}
@@ -365,6 +352,8 @@ class NativeDashboard:
                 self.estop = False
                 self._posture_last_sent_height = None
                 self.backend.start()
+                self.posture_var.set(0.0)
+                self._posture_preview(0.0)
                 # Starting the simulation is only power-up. Keep the robot
                 # disabled until the operator has confirmed the physical
                 # fixture/natural pose with the explicit ENABLE button.
@@ -380,6 +369,11 @@ class NativeDashboard:
         self._show_waiting = False
 
     def enable(self):
+        if self.backend.starts_lying:
+            # The robot lies on its belly and stays limp until "Đứng dậy": ENABLE would lock its legs to the
+            # extended pose instead.
+            self.jump_status.set("Robot đang nằm: bấm 'Đứng dậy (từ nằm)' để kích hoạt")
+            return
         if self.backend.running and not self.estop:
             self.backend.send("ENABLE")
             self.enabled = True
@@ -410,7 +404,9 @@ class NativeDashboard:
         self.enabled = False
         self.estop = False
         self._posture_last_sent_height = None
-        if was_enabled:
+        self.posture_var.set(0.0)
+        self._posture_preview(0.0)
+        if was_enabled and not self.backend.starts_lying:
             self.backend.send("ENABLE")
             self.enabled = True
 
@@ -436,24 +432,31 @@ class NativeDashboard:
         self.estop = False
 
     def _speed_preview(self, _value=None):
-        self.speed_readout.set(f"{float(self.speed.get()):.2f} m/s")
+        speed = float(self.speed.get())
+        self.speed_readout.set(f"{speed:.2f} m/s")
+        if self.drive[0] != 0.0:
+            self.drive = (speed if self.drive[0] > 0.0 else -speed, self.drive[1])
 
-    def set_drive(self, forward: float, yaw: float):
+    def set_drive(self, forward: float, yaw: float) -> bool:
         if (forward != 0.0 or yaw != 0.0) and self.vision_process.running:
             self.stop_vision("Vision: dừng để nhận điều khiển tay")
         if self.enabled and not self.estop:
             fields = self.backend.telemetry
-            drive_ready = (fields.get("mode") == "Balance" and
-                           fields.get("station_eligible") == "1" and
-                           fields.get("station_capture_ready") == "1")
+            if "drive_ready" in fields:
+                drive_ready = fields["drive_ready"] == "1"
+            else:
+                drive_ready = (fields.get("mode") == "Balance" and
+                               fields.get("station_eligible") == "1" and
+                               fields.get("station_capture_ready") == "1")
             if (forward != 0.0 or yaw != 0.0) and not drive_ready:
                 self.backend.log.append("DRIVE_BLOCKED|reason=station_not_ready")
-                return
+                return False
             self._cancel_pending_posture()
             self.stop_skill()
         if forward != 0.0 or yaw != 0.0:
             self._drive_stop_latched = False
         self.drive = (forward * float(self.speed.get()), yaw * float(self.yaw.get()))
+        return True
 
     def toggle_vision(self):
         if self.vision_process.running:
@@ -555,7 +558,10 @@ class NativeDashboard:
 
     def _drive_press(self, forward: float, yaw: float):
         self._drive_button_active = True
-        self.set_drive(forward, yaw)
+        accepted = self.set_drive(forward, yaw)
+        if (accepted and self.enabled and not self.estop and self.backend.running and
+                not self._drive_stop_latched):
+            self.motion.command_velocity(*self.drive)
 
     def _drive_release(self, _event=None):
         if self._drive_button_active:
@@ -571,6 +577,8 @@ class NativeDashboard:
 
     def _posture_capture_ready(self):
         fields = self.backend.telemetry
+        if "drive_ready" in fields:
+            return fields["drive_ready"] == "1" and fields.get("height_motion") == "0"
         if fields.get("mode") != "Balance":
             return False
         try:
@@ -624,9 +632,7 @@ class NativeDashboard:
     def _posture_preview(self, value):
         try:
             height = _posture_to_height(float(value))
-            label = ("deep squat" if float(value) > 0.01 else
-                     "max extension" if float(value) < -0.01 else
-                     "natural ENABLE")
+            label = "CAD zero / squat" if float(value) < -0.01 else "Spawn: gối 135°"
             self.height_var.set(height)
             self.height_readout.set(f"{label} · {height:.3f} m")
             if self._posture_drag_active:
@@ -684,6 +690,9 @@ class NativeDashboard:
         self.stop_skill()
         self.drive = (0.0, 0.0)
         value = max(MIN_BODY_HEIGHT_M, min(MAX_BODY_HEIGHT_M, float(height_m)))
+        maximum = self.backend.telemetry.get("max_body_height")
+        if maximum is not None:
+            value = min(value, float(maximum))
         if (self._posture_last_sent_height is not None and
                 abs(value - self._posture_last_sent_height) <= 1.0e-4):
             return
@@ -717,7 +726,36 @@ class NativeDashboard:
             self._posture_quiet_since = None
             self.show_started_s = None
 
+    def start_standup(self):
+        """One command starts the core's fold, pause, flip and balance capture."""
+        if not self.backend.running or self.estop:
+            self.jump_status.set("Cần Start SIM (mở bằng TAP_SIM_START=home) trước")
+            return
+        self.stop_skill()
+        self.drive = (0.0, 0.0)
+        self._cancel_pending_posture()
+        self.backend.command_standup()
+        self.enabled = True
+        self._standup_active = True
+        self.jump_status.set("Đang gập hip vào tư thế quỳ; sẽ nghỉ 1 giây rồi tự lật thân theo IMU")
+
+    def start_jump(self, forward_m=0.0):
+        """JUMP [m]: the controller plans the dip, thrust, tuck and landing from its own FK/IK;
+        with a distance it first runs up in the ready pose and jumps forward."""
+        if not self.backend.running or not self.enabled or self.estop:
+            self.jump_status.set("Cần Start SIM và ENABLE trước")
+            return
+        self.stop_skill()
+        self.drive = (0.0, 0.0)
+        self._cancel_pending_posture()
+        self.backend.command_jump(forward_m)
+        if forward_m > 0.0:
+            self.jump_status.set(f"Đã gửi JUMP {forward_m:.2f} (lấy đà, tư thế sẵn sàng, nhảy tiến, tiếp đất, dừng)")
+        else:
+            self.jump_status.set("Đã gửi JUMP (tự nhún, nhảy, co/duỗi chân, tiếp đất)")
+
     def stop_skill(self):
+        self._standup_active = False
         if self.vision_process.running:
             self.stop_vision("Vision: dừng do lệnh operator")
         if self.dance_active:
@@ -758,6 +796,26 @@ class NativeDashboard:
         self.backend.drain()
         self._tick_vision()
         fields = self.backend.telemetry
+        if not self.backend.running or self.estop:
+            self._standup_active = False
+        elif self._standup_active:
+            phase = fields.get("su_phase_name", "")
+            if fields.get("mode") == "Fault" or phase == "Failed":
+                self.jump_status.set("Đứng dậy đã dừng: " + fields.get("fault_reason", "lỗi điều khiển"))
+                self._standup_active = False
+            elif fields.get("mode") == "Balancing":
+                self.jump_status.set("Đã bắt tâm — đang cân bằng và nâng lên độ cao yêu cầu")
+                self._standup_active = False
+            else:
+                status = {
+                    "Folding": "Bước 1: gập hip vào tư thế quỳ",
+                    "Kneeling": "Bước 2: giữ quỳ 1 giây",
+                    "Pitching": "Bước 3: ngẩng nhẹ để thân rời sàn",
+                    "Flipped": "Đã ngẩng thân — đang giữ theo cấu hình chẩn đoán",
+                    "Catching": "Bước 3 + 4: tiếp nối ngẩng thân, phối hợp hip và bánh bắt tâm",
+                }.get(phase)
+                if status:
+                    self.jump_status.set(status)
         if (self._posture_last_sent_height is not None and
                 (fields.get("height_rejected") == "1" or
                  (fields.get("height_request") == "0" and
@@ -770,14 +828,10 @@ class NativeDashboard:
         self.sim_button.configure(text="Stop SIM" if self.backend.running else "Start SIM")
         self.enable_button.configure(
             text="DISABLE" if self.enabled and not self.estop else "ENABLE",
-            state=("normal" if self.backend.running and not self.estop
-                   else "disabled"))
-        self.vision_button.configure(
-            text="Dừng theo dõi" if self.vision_process.running
-            else "Theo dõi người",
-            state=("normal" if self.backend.running and self.enabled and not self.estop
-                   else "disabled"))
-        self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop") else WARN)
+            state=("normal" if self.backend.running and not self.estop and
+                   (self.enabled or not self.backend.starts_lying) else "disabled"))
+        self.vision_button.configure(text="Camera ngoài contract", state="disabled")
+        self.mode.configure(text=f" {mode} ", bg=GOOD if mode in ("Balance", "Balancing", "Drive", "PoseChange") else BAD if mode in ("Fallen", "EmergencyStop", "Fault") else WARN)
         self.viewer_status.set(
             "MuJoCo 3-D viewer connected" if self.backend.viewer_running
             else "MuJoCo 3-D viewer closed (control process may still be running)"

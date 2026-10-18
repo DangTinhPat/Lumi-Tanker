@@ -133,7 +133,14 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
 
 AppV3::AppV3() noexcept
     : transport_(can_.port(), uart1_.port(), uart2_.port()),
-      ctrl_(tap_fw::v3::defaultV3Config()) {}
+      ctrl_(tap_fw::v3::defaultV3Config()) {
+  // Actuation prediction on at boot: the wheel command-to-speed lag is 85-120 ms on the robot. The predictor
+  // keeps its command history across the microsecond jitter of the tick period since 18/10 (it used to be emptied
+  // every tick, which made it predict as if no command were in flight). SET lqrpredict 0 turns it off.
+  ctrl_.config().lqr_prediction.enabled = true;
+  // Stand-up from the lying pose: the tuned recovery (StandUp::tunedRecovery), still off until SET standup 1.
+  ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(ctrl_.config().lqr_prediction.lag_s);
+}
 
 bool AppV3::begin() noexcept {
   Serial.setTxBufferSize(4096U);
@@ -381,6 +388,32 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   last_rx_us_ = now_us;  // any line keeps the session lease alive
   if (std::strcmp(line, "HEARTBEAT") == 0) return;
   auto& lqr = ctrl_.balancer();
+  if (lying_start_ && (std::strcmp(line, "START") == 0 ||
+                       std::strcmp(line, "TILTTEST") == 0 || std::strcmp(line, "GO") == 0)) {
+    out_.println("V3 start refused: lying encoder frame requires STANDUP");
+    return;
+  }
+  if (std::strcmp(line, "STANDUP") == 0) {
+    // Rocking stand-up from the lying pose (Idle or Fault only): the legs lock where they are, the hips fold, and
+    // the controller hands over to the balancer when the CoM is over the axle.
+    if (estop_) {
+      out_.println("V3 STANDUP refused: E-STOP latched (CLEAR_ESTOP)");
+    } else if (!ctrl_.config().standup.enabled) {
+      out_.println("V3 STANDUP refused: SET standup 1 first");
+    } else if (!lying_start_) {
+      out_.println("V3 STANDUP refused: SET lying 1 first (the supply must have been switched on in the home pose)");
+    } else if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+      out_.println("V3 STANDUP refused: not idle (DISABLE first)");
+    } else {
+      // Match the 130 mm body/root height the sim stand-up uses.
+      height_request_m_ = std::clamp(0.130F - robot_control::geometry::wheel_radius_m +
+          robot_control::geometry::origins[0].z, tap_fw::v3::LegHeight::minHeight(),
+          ctrl_.supportedMaxHeight());
+      standup_pending_ = true;
+      out_.println("V3 STANDUP");
+    }
+    return;
+  }
   if (std::strcmp(line, "START") == 0 || std::strcmp(line, "TILTTEST") == 0) {
     if (estop_) {
       out_.println("V3 START refused: E-STOP latched (CLEAR_ESTOP)");
@@ -478,6 +511,27 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "guardrisk")) ctrl_.config().guard.raise_risk = std::clamp(v, 0.1F, 1.0F);
     else if (!std::strcmp(key, "guardgrow")) ctrl_.config().guard.detect.growth_ratio = std::clamp(v, 1.02F, 2.0F);
     else if (!std::strcmp(key, "guardamp")) ctrl_.config().guard.detect.amp_min_rad = std::clamp(v, 0.001F, 0.05F);
+    else if (!std::strcmp(key, "lying")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET lying refused: DISABLE first");
+        return;
+      }
+      if (legs_.engaged() && lying_start_ != (v >= 0.5F)) {
+        out_.println("V3 SET lying refused: DISABLE before changing the encoder frame");
+        return;
+      }
+      lying_start_ = v >= 0.5F;
+      out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n",
+                  lying_start_ ? "ON" : "off", homeHip(), homeKnee());
+    }
+    else if (!std::strcmp(key, "standup")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standup refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.enabled = v >= 0.5F;
+      out_.printf("V3 standup %s\n", ctrl_.config().standup.enabled ? "ENABLED" : "off");
+    }
     else if (!std::strcmp(key, "vmax")) {
       // Ground-speed cap of the wheel loop (also the wheel command cap); 4.1888 m/s = the BL4012 no-load 1000 rpm.
       const float cap = std::clamp(v, 0.2F, 4.1888F);
@@ -819,6 +873,8 @@ void AppV3::printTunables() noexcept {
                 wp.enabled ? 1 : 0, wp.with_wb ? 1 : 0, wp.act_delay_s * 1000.0F, wp.tau_s * 1000.0F,
                 wp.meas_delay_s * 1000.0F);
   }
+  out_.printf("V3 TUNE standup=%d (SET standup) lying=%d (SET lying) home_hip=%+.4f home_knee=%+.4f\n",
+              ctrl_.config().standup.enabled ? 1 : 0, lying_start_ ? 1 : 0, homeHip(), homeKnee());
   {
     const auto& gd = ctrl_.config().guard;
     out_.printf("V3 TUNE guard: mode=%d (SET guard 0 off/1 log/2 act) cut=%.2f (guardcut) lag+=%.3f s (guardlag) "
@@ -1014,7 +1070,7 @@ float AppV3::legTargetRad(std::size_t leg) const noexcept {
   const auto& pose = ctrl_.legPose();
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
   // Raw encoder frame (zero = the pose the motor supply was switched on in), like legJointRad().
-  return (knee ? pose.knee_offset_rad - kStraightKneeRad : pose.hip_offset_rad - kStraightHipRad) * binding.driver_sign;
+  return (knee ? pose.knee_offset_rad - homeKnee() : pose.hip_offset_rad - homeHip()) * binding.driver_sign;
 }
 
 float AppV3::legChainRad() const noexcept {
@@ -1041,7 +1097,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   feedback_.writeTo(state_);
   const auto st = ctrl_.state();
   const bool active = st == V3Controller::State::Locking || st == V3Controller::State::Ready ||
-      st == V3Controller::State::Balancing;
+      st == V3Controller::State::Balancing || st == V3Controller::State::StandUp;
 
   V3Controller::Command cmd{};
   cmd.forward_m_s = drive_forward_;
@@ -1099,6 +1155,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   // TILTTEST skips the carry-to-floor wait (it is a hand-held check).
   const bool ready_now = ctrl_.state() == V3Controller::State::Ready;
+  cmd.standup = standup_pending_;
+  standup_pending_ = false;
   cmd.go = go_pending_ || (tilt_test_ && ready_now);
   go_pending_ = false;
 
@@ -1116,14 +1174,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   in.accel_z_m_s2 = body_.accel_m_s2[2];
   in.wheel_rad_s = {state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5]};
   in.wheel_pos_rad = {state_.joints.position_rad[2], state_.joints.position_rad[5]};
-  in.leg_chain_rad = legChainRad() + kStraightHipRad + kStraightKneeRad;
+  in.leg_chain_rad = legChainRad() + homeHip() + homeKnee();
   // Measured joints per side, core frame (LegLock order LH LK RH RK).
   {
     const auto legs = tap_fw::board::MotorIds{}.leg_can;
     for (std::size_t side = 0; side < 2U; ++side) {
       const std::size_t hip = 2U * side, knee = hip + 1U;
-      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign + kStraightHipRad;
-      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign + kStraightKneeRad;
+      in.hip_rad[side] = legJointRad(hip) * legs[hip].driver_sign + homeHip();
+      in.knee_rad[side] = legJointRad(knee) * legs[knee].driver_sign + homeKnee();
       in.hip_rate_rad_s[side] = legJointRate(hip) * legs[hip].driver_sign;
       in.knee_rate_rad_s[side] = legJointRate(knee) * legs[knee].driver_sign;
     }
@@ -1136,7 +1194,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     hip_vel_n_ += 2U;
   }
   const bool closed_loop_due = legs_.engaged() && now_us - engage_us_ > kClosedLoopGraceUs;
-  in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFresh(now_us) && legsFresh(now_us) &&
+  const std::uint32_t wheel_age_limit_us = st == V3Controller::State::Balancing
+      ? tap_fw::board::kWheelBalanceMaxAgeUs : tap_fw::board::kWheelHoldMaxAgeUs;
+  in.sensors_ok = imuFresh(now_us) && feedback_.allWheelsFreshWithin(now_us, wheel_age_limit_us) && legsFresh(now_us) &&
       legAxisProblem(now_us, closed_loop_due) == nullptr;
   bool legs_ready = legs_.atZero(now_us);
   for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
@@ -1182,8 +1242,14 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
       start[leg] = feedback_.legEstimate(tap_fw::board::MotorIds{}.leg_can[leg].joint_index).pos_turns;
     }
     engage_us_ = now_us;
-    legs_.setOffsets(ctrl_.legPose().hip_offset_rad - kStraightHipRad, ctrl_.legPose().knee_offset_rad - kStraightKneeRad);
-    (void)legs_.engage(start, now_us, transport_);
+    const bool standing_up_engage = out.state == V3Controller::State::StandUp;
+    if (standing_up_engage) {
+      legs_.setOffsets(out.leg_hip_offset_rad - homeHip(), out.leg_knee_offset_rad - homeKnee());
+      legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
+    } else {
+      legs_.setOffsets(ctrl_.legPose().hip_offset_rad - homeHip(), ctrl_.legPose().knee_offset_rad - homeKnee());
+    }
+    (void)legs_.engage(start, now_us, transport_, !standing_up_engage);
     out_.printf("V3 legs locking (%s): from [%+.3f %+.3f %+.3f %+.3f] rad to 0\n",
                   tap_fw::v3::toString(legs_.config().mode), legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
@@ -1213,13 +1279,30 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (stand) rec_cmd_ = recExcitation(now_us);
     // The height pose plus the tier-2 hip offset (0 unless trunk is on and
     // balancing); the stand tests drive the bare pose.
-    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : ctrl_.hipCommand();
-    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : ctrl_.kneeCommand();
+    // The stand-up output owns the rocking path; the other states use the balance pose.
+    const bool standing_up = !stand && out.state == V3Controller::State::StandUp;
+    hip_cmd = stand ? ctrl_.legPose().hip_offset_rad : standing_up ? out.leg_hip_offset_rad : ctrl_.hipCommand();
+    knee_cmd = stand ? ctrl_.legPose().knee_offset_rad : standing_up ? out.leg_knee_offset_rad : ctrl_.kneeCommand();
     if (stand && rec_kind_ == RecKind::HipStand) hip_cmd += rec_cmd_;
     if (stand && rec_kind_ == RecKind::KneeStand) {
       knee_cmd = std::clamp(knee_cmd + rec_cmd_, tap_fw::v3::LegHeight::kKneeMinRad, 0.0F);
     }
-    legs_.setOffsets(hip_cmd - kStraightHipRad, knee_cmd - kStraightKneeRad);
+    legs_.setOffsets(hip_cmd - homeHip(), knee_cmd - homeKnee());
+    // The stand-up path is a ramp and the driver position loop alone lags a ramp by rate / pos_gain: send the
+    // filtered path rate as the driver velocity feed-forward (stand-up only; zero elsewhere).
+    if (standing_up && ff_prev_us_ != 0U && now_us > ff_prev_us_) {
+      const float dt_s = static_cast<float>(now_us - ff_prev_us_) * 1.0e-6F;
+      const float alpha = dt_s / (0.02F + dt_s);  // 20 ms low-pass
+      ff_hip_rate_ += alpha * (std::clamp((hip_cmd - ff_hip_prev_) / dt_s, -6.0F, 6.0F) - ff_hip_rate_);
+      ff_knee_rate_ += alpha * (std::clamp((knee_cmd - ff_knee_prev_) / dt_s, -6.0F, 6.0F) - ff_knee_rate_);
+    } else if (!standing_up) {
+      ff_hip_rate_ = 0.0F;
+      ff_knee_rate_ = 0.0F;
+    }
+    ff_hip_prev_ = hip_cmd;
+    ff_knee_prev_ = knee_cmd;
+    ff_prev_us_ = now_us;
+    legs_.setCommonRates(ff_hip_rate_, ff_knee_rate_);
     // Roll: per-side offsets (zero unless SET roll 1 and balancing).
     if (stand) legs_.setSideOffsets({0.0F, 0.0F}, {0.0F, 0.0F});
     else legs_.setSideOffsets(out.leg_roll_hip_rad, out.leg_roll_knee_rad,
@@ -1300,6 +1383,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" ready=").i32(ctrl_.readyPhase()).str(" held=").i32(static_cast<std::int32_t>(ctrl_.heldResets()))
         .str(" h=").fix(ctrl_.legPose().axle_below_hip_m * 1000.0F, 1)
         .str(" htgt=").fix(ctrl_.heightTarget() * 1000.0F, 1)
+        .str(" wa=").fix(static_cast<float>(feedback_.oldestWheelAgeUs(now_us)) * 1.0e-3F, 1)
         .str(" gr=").fix(ctrl_.guardRisk(), 2).str(" ga=").fix(ctrl_.guardAmplitude(), 3)
         .str(" gz=").fix(ctrl_.guardRaise() * 1000.0F, 1)
         .str(" knee=").fix(ctrl_.legPose().knee_offset_rad, 3, true)

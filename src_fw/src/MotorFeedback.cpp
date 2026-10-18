@@ -327,6 +327,22 @@ bool MotorFeedback::allWheelsFresh(std::uint64_t now_us) const noexcept {
   return true;
 }
 
+bool MotorFeedback::allWheelsFreshWithin(std::uint64_t now_us, std::uint32_t max_age_us) const noexcept {
+  for (const std::size_t joint : kWheelJoints) {
+    if (!valid_[joint] || now_us < stamp_us_[joint] || now_us - stamp_us_[joint] > max_age_us) return false;
+  }
+  return true;
+}
+
+std::uint32_t MotorFeedback::oldestWheelAgeUs(std::uint64_t now_us) const noexcept {
+  std::uint64_t oldest = 0;
+  for (const std::size_t joint : kWheelJoints) {
+    if (!valid_[joint] || now_us < stamp_us_[joint]) return 0xFFFFFFFFU;
+    oldest = std::max<std::uint64_t>(oldest, now_us - stamp_us_[joint]);
+  }
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(oldest, 0xFFFFFFFEU));
+}
+
 bool MotorFeedback::ready(std::uint64_t now_us) const noexcept {
   return allLegsFresh(now_us) && allWheelsFresh(now_us);
 }

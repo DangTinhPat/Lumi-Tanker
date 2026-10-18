@@ -13,7 +13,8 @@ constexpr float kTwoPi = 6.28318530717958647692F;
 }
 
 bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t now_us,
-                     motor_transport::Transport& transport) noexcept {
+                     motor_transport::Transport& transport, bool ramp_to_zero) noexcept {
+  ramp_to_zero_ = ramp_to_zero;
   start_turns_ = start_turns;
   engage_us_ = now_us;
   engaged_ = true;
@@ -40,6 +41,9 @@ bool LegLock::engage(const std::array<float, kLegs>& start_turns, std::uint64_t 
 
 float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept {
   if (leg >= kLegs) return 0.0F;
+  // Stand-up supplies the measured pose as the offsets and owns the path: close the driver loop at each joint's
+  // own measured position (the two sides need not be symmetric), no homing ramp on top.
+  if (!ramp_to_zero_ && now_us <= engage_us_) return start_turns_[leg];
   const float elapsed = now_us > engage_us_
       ? static_cast<float>(now_us - engage_us_) * 1.0e-6F : 0.0F;
   const float tau = config_.ramp_s > 0.0F
@@ -53,7 +57,7 @@ float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept
   const float offset_core = knee ? knee_offset_rad_ + side_knee_rad_[side]
                                  : hip_offset_rad_ + side_hip_rad_[side];
   const float offset_turns = offset_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
-  return start_turns_[leg] * (1.0F - blend) + offset_turns;
+  return ramp_to_zero_ ? start_turns_[leg] * (1.0F - blend) + offset_turns : offset_turns;
 }
 
 float LegLock::velFfTurns(std::size_t leg) const noexcept {
@@ -61,7 +65,8 @@ float LegLock::velFfTurns(std::size_t leg) const noexcept {
   const auto binding = board::MotorIds{}.leg_can[leg];
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
   const std::size_t side = binding.joint_index < 3U ? 0U : 1U;
-  const float rate_core = knee ? side_knee_rate_[side] : side_hip_rate_[side];
+  const float rate_core = knee ? common_knee_rate_ + side_knee_rate_[side]
+                               : common_hip_rate_ + side_hip_rate_[side];
   return rate_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
 }
 
@@ -71,7 +76,7 @@ bool LegLock::jointMit(std::size_t leg) const noexcept {
 }
 
 bool LegLock::atZero(std::uint64_t now_us) const noexcept {
-  return engaged_ && (config_.ramp_s <= 0.0F ||
+  return engaged_ && (!ramp_to_zero_ || config_.ramp_s <= 0.0F ||
       (now_us > engage_us_ &&
        static_cast<float>(now_us - engage_us_) * 1.0e-6F >= config_.ramp_s));
 }

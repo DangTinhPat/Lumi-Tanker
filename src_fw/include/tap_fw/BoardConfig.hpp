@@ -41,6 +41,12 @@ inline constexpr std::uint32_t kCanBitrate = 500'000U;
 inline constexpr std::uint32_t kMotorUartBaud = 1'000'000U;
 inline constexpr std::uint32_t kControlPeriodUs = 2'000U;
 inline constexpr std::uint32_t kFeedbackMaxAgeUs = 20'000U;
+// Wheel reply age the controller tolerates before it declares the sensors lost. The wheel bus is single-wire
+// half-duplex: when the robot is carried or touched its gaps reach 9-27 ms (logged 18/10) and the 20 ms limit
+// faulted 7 of 23 starts at Ready. Ready / Locking only hold the wheels still, so they tolerate a long outage;
+// Balancing acts on the wheel speed, so it tolerates less.
+inline constexpr std::uint32_t kWheelHoldMaxAgeUs = 100'000U;
+inline constexpr std::uint32_t kWheelBalanceMaxAgeUs = 40'000U;
 inline constexpr std::uint32_t kCanProbePeriodUs = 10'000U;
 inline constexpr std::uint32_t kWheelFeedbackPeriodUs = 2'000U;
 inline constexpr bool kWheelDirectionsVerified =
