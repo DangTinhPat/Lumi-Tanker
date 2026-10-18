@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RB R1 native MuJoCo model.
+
+  The seven STL meshes are link-local exports of the supplied STEP assembly.
+  Joint origins are the measured CAD origins and all six axes are native +Y.
+  STL is visual geometry; the simple collision envelopes below are deliberately
+  separate so detailed CAD seams do not destabilise contact resolution.
+  Masses are the BOM values.  Inertias are uniform-density estimates from the
+  exported mesh surfaces and are not a hardware calibration.
+-->
+<mujoco model="rb_r1_cad">
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+  <option timestep="0.0003333333333333333" integrator="implicitfast"
+          cone="elliptic" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global azimuth="135" elevation="-18" fovy="45"/>
+    <headlight ambient="0.65 0.65 0.65" diffuse="0.80 0.80 0.80"
+               specular="0.30 0.30 0.30"/>
+    <map znear="0.01" zfar="50" haze="0.02"/>
+  </visual>
+
+  <default>
+    <joint damping="0.15" armature="0.0002"/>
+    <!-- Dry rubber on a clean, flat hard floor.  MuJoCo's first two values
+         are the two independent sliding directions.  They must both be
+         traction values: leaving the second at 0.005 makes a differential
+         yaw look like a frictionless lateral slide.  The third value is the
+         torsional contact coefficient and approximates a small compliant
+         tire patch; these are simulation assumptions pending a tire test. -->
+    <geom condim="3" friction="0.8 0.8 0.015" rgba="0.5 0.5 0.5 1"/>
+    <motor ctrllimited="true"/>
+  </default>
+
+  <asset>
+    <texture name="bright_sky" type="skybox" builtin="gradient"
+             rgb1="0.93 0.96 1.00" rgb2="0.58 0.68 0.80"
+             width="512" height="512"/>
+    <texture name="ground_checker" type="2d" builtin="checker"
+             rgb1="0.88 0.90 0.93" rgb2="0.72 0.76 0.81"
+             width="512" height="512"/>
+    <material name="ground_material" texture="ground_checker"
+              texrepeat="24 24" texuniform="true" reflectance="0.03"/>
+    <!-- MuJoCo caps one mesh at 200k triangles; the body CAD surface is
+         partitioned into four visual assets so all 638,359 STEP triangles are
+         retained without changing their coordinates. -->
+    <mesh name="body_mesh_0" file="body_detail_0.stl"/>
+    <mesh name="body_mesh_1" file="body_detail_1.stl"/>
+    <mesh name="body_mesh_2" file="body_detail_2.stl"/>
+    <mesh name="body_mesh_3" file="body_detail_3.stl"/>
+    <mesh name="left_thigh_mesh" file="left_thigh.stl"/>
+    <mesh name="left_shin_mesh" file="left_shin.stl"/>
+    <mesh name="left_wheel_mesh" file="left_wheel.stl"/>
+    <mesh name="right_thigh_mesh" file="right_thigh.stl"/>
+    <mesh name="right_shin_mesh" file="right_shin.stl"/>
+    <mesh name="right_wheel_mesh" file="right_wheel.stl"/>
+    <mesh name="left_assist_upper_mesh" file="left_assist_upper.stl"/>
+    <mesh name="left_assist_lower_mesh" file="left_assist_lower.stl"/>
+    <mesh name="right_assist_upper_mesh" file="right_assist_upper.stl"/>
+    <mesh name="right_assist_lower_mesh" file="right_assist_lower.stl"/>
+    <material name="body_material" rgba="0.42 0.50 0.60 1"/>
+    <material name="thigh_material" rgba="0.10 0.48 0.58 1"/>
+    <material name="shin_material" rgba="0.82 0.42 0.12 1"/>
+    <material name="wheel_material" rgba="0.06 0.07 0.08 1"/>
+    <material name="assist_material" rgba="0.76 0.78 0.82 1" specular="0.8" shininess="0.75"/>
+  </asset>
+
+  <worldbody>
+    <geom name="ground" type="plane" pos="0 0 0" size="20 20 0.1"
+          material="ground_material" friction="0.8 0.8 0.015"/>
+
+    <body name="cad_body">
+      <freejoint name="cad_free_root"/>
+      <inertial pos="-0.002547775 0.010674063 -0.001303325"
+                mass="3.371"
+                fullinertia="0.0152342952 0.0180676312 0.0201477767 -0.000203139132 -0.00113257251 -0.0000846507048"/>
+      <geom name="cad_body_visual_0" type="mesh" mesh="body_mesh_0"
+            material="body_material" contype="0" conaffinity="0"/>
+      <geom name="cad_body_visual_1" type="mesh" mesh="body_mesh_1"
+            material="body_material" contype="0" conaffinity="0"/>
+      <geom name="cad_body_visual_2" type="mesh" mesh="body_mesh_2"
+            material="body_material" contype="0" conaffinity="0"/>
+      <geom name="cad_body_visual_3" type="mesh" mesh="body_mesh_3"
+            material="body_material" contype="0" conaffinity="0"/>
+      <geom name="cad_body_collision" type="box" pos="-0.011 0.005 0.020"
+            size="0.111 0.105 0.090" rgba="0 0 0 0"/>
+      <!-- MPU6500 is centered in X/Y and mounted 20 mm above the body
+           reference origin, at the upper body surface. -->
+      <site name="mpu6500_site" pos="0 0 0.020"/>
+
+      <body name="cad_left_thigh" pos="0 0.125 0">
+        <!-- User-provided one-revolution hip envelope; exact stop phasing is
+             not encoded in the supplied STEP assembly. -->
+        <joint name="cad_left_hip" axis="0 1 0" range="-3.1415926536 3.1415926536"
+               limited="true" damping="0.15"/>
+        <inertial pos="-0.008337474 0.003345208 -0.036038582"
+                  mass="0.296"
+                  fullinertia="0.000748306627 0.000792430278 0.000245860537 0.00000178743198 -0.0000770665558 -0.000000349275268"/>
+        <geom name="cad_left_thigh_visual" type="mesh" mesh="left_thigh_mesh"
+              material="thigh_material" contype="0" conaffinity="0"/>
+        <geom name="cad_left_assist_upper_visual" type="mesh"
+              mesh="left_assist_upper_mesh" material="assist_material"
+              contype="0" conaffinity="0"/>
+        <site name="left_assist_upper_site" pos="-0.02553 0.002 -0.01583"
+              size="0.004" rgba="0.95 0.65 0.12 1"/>
+        <geom name="cad_left_thigh_collision" type="box" pos="-0.008337 0.003345 -0.036039"
+              size="0.0436 0.0311 0.0887" rgba="0 0 0 0"/>
+
+        <!-- Encoder q=0 remains the mechanical reference; natural ENABLE is
+             the user-requested 30 mm lower reference at q=-1.0682730675 rad. -->
+        <body name="cad_left_shin" pos="-0.01410935 0.002 -0.10476742"
+              euler="0 -0.45 0">
+          <!-- 95 deg total user-provided knee travel.  The STEP does not
+               carry mating/stop metadata, so the phase around encoder q=0
+               is an explicitly provisional simulation envelope. -->
+          <joint name="cad_left_knee" axis="0 1 0" range="-1.2 0.4584073464"
+                 limited="true" damping="0.15"/>
+          <inertial pos="0.022977794 0.000411188 -0.047988798"
+                    mass="0.109"
+                    fullinertia="0.000190025861 0.000227856474 0.0000553716106 -0.000000279240308 0.0000813680963 0.000000575946269"/>
+          <geom name="cad_left_shin_visual" type="mesh" mesh="left_shin_mesh"
+                material="shin_material" contype="0" conaffinity="0"/>
+          <geom name="cad_left_assist_lower_visual" type="mesh"
+                mesh="left_assist_lower_mesh" material="assist_material"
+                contype="0" conaffinity="0"/>
+          <site name="left_assist_lower_site" pos="-0.00880 0 0.01880"
+                size="0.004" rgba="0.95 0.65 0.12 1"/>
+          <!-- The shin is a slender diagonal carrier.  Its AABB contains a
+               large empty corner which reaches the floor about 20 mm before
+               the CAD surface during a deep squat.  A capsule follows the
+               actual knee-to-wheel carrier axis and preserves the measured
+               clearance without inventing a floor contact. -->
+          <geom name="cad_left_shin_collision" type="capsule"
+                fromto="0 0.000411 0 0.04663076 0.000411 -0.1"
+                size="0.0215" rgba="0 0 0 0"/>
+
+          <body name="cad_left_wheel_link" pos="0.04663076 0.0275 -0.1">
+            <joint name="cad_left_wheel" axis="0 1 0" damping="0.001"
+                   frictionloss="0"/>
+            <inertial pos="0.000196080 0.001848490 0.000289130"
+                      mass="0.220"
+                      fullinertia="0.0000809478695 0.000146352414 0.0000809507445 -0.000000000155326464 -0.00000000308980409 -0.00000000065535445"/>
+            <geom name="cad_left_wheel_visual" type="mesh" mesh="left_wheel_mesh"
+                  material="wheel_material" contype="0" conaffinity="0"/>
+            <geom name="cad_left_wheel_collision" type="cylinder" pos="0 0 0"
+                  euler="1.5707963267948966 0 0" size="0.040 0.01285"
+                  friction="0.8 0.8 0.015"
+                  solref="0.015 0.95" solimp="0.90 0.98 0.002"
+                  rgba="0 0 0 0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="cad_right_thigh" pos="0 -0.125 0">
+        <joint name="cad_right_hip" axis="0 1 0" range="-3.1415926536 3.1415926536"
+               limited="true" damping="0.15"/>
+        <inertial pos="-0.008337297 -0.003345326 -0.036038375"
+                  mass="0.296"
+                  fullinertia="0.000748302542 0.000792425709 0.000245862909 -0.00000178617202 -0.0000770659485 0.000000350686465"/>
+        <geom name="cad_right_thigh_visual" type="mesh" mesh="right_thigh_mesh"
+              material="thigh_material" contype="0" conaffinity="0"/>
+        <geom name="cad_right_assist_upper_visual" type="mesh"
+              mesh="right_assist_upper_mesh" material="assist_material"
+              contype="0" conaffinity="0"/>
+        <site name="right_assist_upper_site" pos="-0.02553 -0.002 -0.01583"
+              size="0.004" rgba="0.95 0.65 0.12 1"/>
+        <geom name="cad_right_thigh_collision" type="box" pos="-0.008337 -0.003345 -0.036038"
+              size="0.0436 0.0311 0.0887" rgba="0 0 0 0"/>
+
+        <!-- Same +Y joint convention and mechanical zero on the right side. -->
+        <body name="cad_right_shin" pos="-0.01410935 -0.002 -0.10476742"
+              euler="0 -0.45 0">
+          <joint name="cad_right_knee" axis="0 1 0" range="-1.2 0.4584073464"
+                 limited="true" damping="0.15"/>
+          <inertial pos="0.022977792 -0.000411190 -0.047988801"
+                    mass="0.109"
+                    fullinertia="0.000190025879 0.000227856498 0.0000553716129 0.000000279243339 0.0000813681129 -0.000000575941519"/>
+          <geom name="cad_right_shin_visual" type="mesh" mesh="right_shin_mesh"
+                material="shin_material" contype="0" conaffinity="0"/>
+          <geom name="cad_right_assist_lower_visual" type="mesh"
+                mesh="right_assist_lower_mesh" material="assist_material"
+                contype="0" conaffinity="0"/>
+          <site name="right_assist_lower_site" pos="-0.00880 0 0.01880"
+                size="0.004" rgba="0.95 0.65 0.12 1"/>
+          <geom name="cad_right_shin_collision" type="capsule"
+                fromto="0 -0.000411 0 0.04663076 -0.000411 -0.1"
+                size="0.0215" rgba="0 0 0 0"/>
+
+          <body name="cad_right_wheel_link" pos="0.04663076 -0.0275 -0.1">
+            <joint name="cad_right_wheel" axis="0 1 0" damping="0.001"
+                   frictionloss="0"/>
+            <inertial pos="0.000196163 -0.001848506 0.000289011"
+                      mass="0.220"
+                      fullinertia="0.0000809482060 0.000146352306 0.0000809502498 0.0000000000778529 -0.00000000331628222 0.000000000650743004"/>
+            <geom name="cad_right_wheel_visual" type="mesh" mesh="right_wheel_mesh"
+                  material="wheel_material" contype="0" conaffinity="0"/>
+            <geom name="cad_right_wheel_collision" type="cylinder" pos="0 0 0"
+                  euler="1.5707963267948966 0 0" size="0.040 0.01285"
+                  friction="0.8 0.8 0.015"
+                  solref="0.015 0.95" solimp="0.90 0.98 0.002"
+                  rgba="0 0 0 0"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- Connected-link collision is excluded; ground contact remains active. -->
+  <contact>
+    <exclude body1="cad_body" body2="cad_left_thigh"/>
+    <exclude body1="cad_body" body2="cad_left_shin"/>
+    <exclude body1="cad_body" body2="cad_left_wheel_link"/>
+    <exclude body1="cad_body" body2="cad_right_thigh"/>
+    <exclude body1="cad_body" body2="cad_right_shin"/>
+    <exclude body1="cad_body" body2="cad_right_wheel_link"/>
+    <exclude body1="cad_left_thigh" body2="cad_left_shin"/>
+    <exclude body1="cad_left_shin" body2="cad_left_wheel_link"/>
+    <exclude body1="cad_right_thigh" body2="cad_right_shin"/>
+    <exclude body1="cad_right_shin" body2="cad_right_wheel_link"/>
+  </contact>
+
+  <!--
+    The CAD assist barrel/rod is split at its fixed/moving interface.  These
+    spatial tendons are the deployable mechanical abstraction of the spring:
+    each endpoint is carried by its real link, so knee motion changes the
+    length and the passive spring force without introducing a controller
+    sensor or simulator-only actuator.
+    The passive assist is currently disabled by configuration (zero stiffness
+    and damping) until the physical spring is measured. The CAD endpoints and
+    changing length remain visible for later calibration.
+  -->
+  <tendon>
+    <spatial name="left_knee_assist" width="0.005" rgba="0.95 0.65 0.12 1"
+             stiffness="0" damping="0" springlength="0.0970534886"
+             limited="false">
+      <site site="left_assist_upper_site"/>
+      <site site="left_assist_lower_site"/>
+    </spatial>
+    <spatial name="right_knee_assist" width="0.005" rgba="0.95 0.65 0.12 1"
+             stiffness="0" damping="0" springlength="0.0970534886"
+             limited="false">
+      <site site="right_assist_upper_site"/>
+      <site site="right_assist_lower_site"/>
+    </spatial>
+  </tendon>
+
+  <sensor>
+    <accelerometer name="mpu6500_accel" site="mpu6500_site"/>
+    <gyro name="mpu6500_gyro" site="mpu6500_site"/>
+    <jointpos name="enc_left_hip_pos" joint="cad_left_hip"/>
+    <jointpos name="enc_left_knee_pos" joint="cad_left_knee"/>
+    <jointpos name="enc_left_wheel_pos" joint="cad_left_wheel"/>
+    <jointpos name="enc_right_hip_pos" joint="cad_right_hip"/>
+    <jointpos name="enc_right_knee_pos" joint="cad_right_knee"/>
+    <jointpos name="enc_right_wheel_pos" joint="cad_right_wheel"/>
+    <jointvel name="enc_left_hip_vel" joint="cad_left_hip"/>
+    <jointvel name="enc_left_knee_vel" joint="cad_left_knee"/>
+    <jointvel name="enc_left_wheel_vel" joint="cad_left_wheel"/>
+    <jointvel name="enc_right_hip_vel" joint="cad_right_hip"/>
+    <jointvel name="enc_right_knee_vel" joint="cad_right_knee"/>
+    <jointvel name="enc_right_wheel_vel" joint="cad_right_wheel"/>
+  </sensor>
+
+  <actuator>
+    <motor name="act_left_hip" joint="cad_left_hip" ctrlrange="-12 12" gear="1"/>
+    <motor name="act_left_knee" joint="cad_left_knee" ctrlrange="-12 12" gear="1"/>
+    <motor name="act_right_hip" joint="cad_right_hip" ctrlrange="-12 12" gear="1"/>
+    <motor name="act_right_knee" joint="cad_right_knee" ctrlrange="-12 12" gear="1"/>
+    <motor name="act_left_wheel" joint="cad_left_wheel" ctrlrange="-0.13 0.13" gear="1"/>
+    <motor name="act_right_wheel" joint="cad_right_wheel" ctrlrange="-0.13 0.13" gear="1"/>
+  </actuator>
+
+  <keyframe>
+    <!-- Natural ENABLE reference: 30 mm below the previous pose;
+         q_hip=1.0104670525, q_knee=-1.0682730675; not a limit or standing pose. -->
+    <key name="neutral" qpos="0 0 0.1484350375 1 0 0 0 1.0104670525 -1.0682730675 0 1.0104670525 -1.0682730675 0"/>
+  </keyframe>
+</mujoco>

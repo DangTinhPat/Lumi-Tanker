@@ -117,6 +117,9 @@ JointArray JumpController::neutralPose(float knee) {
 JointArray JumpController::landingPose(float knee,float pitch) {
   WholeBodyModel model;
   const float c=std::cos(pitch),s=std::sin(pitch);
+  // The RB CAD-derived COM shifts the deep neutral hip above the old 1.05
+  // rad preview bracket; keep the root bracket wide enough to solve the
+  // actual native model instead of silently returning a biased endpoint.
   float lo=-.6F,hi=1.2F;
   for (int i=0;i<30;++i) {
     float m=(lo+hi)/2;

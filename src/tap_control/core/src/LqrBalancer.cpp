@@ -289,13 +289,6 @@ void LqrBalancer::clearForwardVelocityReference() noexcept {
   target_forward_velocity_m_s_ = 0.0F;
 }
 
-void LqrBalancer::seedForwardVelocity(float velocity_m_s) noexcept {
-  if (!std::isfinite(velocity_m_s)) return;
-  commanded_ground_velocity_m_s_ = velocity_m_s;
-  target_forward_velocity_m_s_ = velocity_m_s;
-  station_velocity_reference_m_s_ = velocity_m_s;
-}
-
 void LqrBalancer::setStationVelocityReference(float velocity_m_s) noexcept {
   if (std::isfinite(velocity_m_s)) {
     station_velocity_reference_m_s_ = velocity_m_s;
@@ -660,13 +653,10 @@ LqrBalancer::Output LqrBalancer::update(const RobotState& state,
       config_.half_wheel_base_m * yaw_command;
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
   output.ground_velocity_m_s = commanded_ground_velocity_m_s_;
-  // Wheel speed bounded by the configured ground speed cap (was a hard-coded 50 rad/s = 2.0 m/s on a 4 cm
-  // wheel, which silently capped the catch above ~2 m/s whatever max_ground_velocity_m_s said).
-  const float wheel_limit = std::max(config_.max_ground_velocity_m_s, 0.05F) / radius;
   output.left_wheel_velocity_rad_s = clampFinite(config_.left_wheel_sign *
-      left_ground / radius, -wheel_limit, wheel_limit);
+      left_ground / radius, -50.0F, 50.0F);
   output.right_wheel_velocity_rad_s = clampFinite(config_.left_wheel_sign *
-      right_ground / radius, -wheel_limit, wheel_limit);
+      right_ground / radius, -50.0F, 50.0F);
   // Speed error handed to the leg task - see the Output field's note on why
   // this, and not either form of acceleration, is the signal that keeps the
   // leg loop negative.

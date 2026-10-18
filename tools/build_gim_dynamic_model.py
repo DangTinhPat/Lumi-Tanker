@@ -11,9 +11,6 @@ MODEL_DIR = ROOT / "src/tap_sim/model"
 MANIFEST = MODEL_DIR / "gim_components.json"
 ASSETS = MODEL_DIR / "gim_components"
 OUTPUT = MODEL_DIR / "gim_dynamic.xml"
-# The STEP assembly places its only battery in the rear slot. The matching
-# front slot is 114 mm ahead; this variant transfers the same 210 g there.
-BATTERY_FRONT_OFFSET_M = 0.114
 
 BODY = {7, 8, 13, 14, 15, 17, 18, 19, 20, 21, 22, 24,
         31, 32, 35, 36, 37, 39, 40, 44, 45, 46, 47,
@@ -54,9 +51,7 @@ def main():
     meshes, geoms = [], {name: [] for name in GROUPS}
     for number in sorted(parts):
         part = parts[number]
-        center = list(part["center_m"])
-        if number == 49:
-            center[0] += BATTERY_FRONT_OFFSET_M
+        center = part["center_m"]
         category = part["category"]
         stem = part["mesh_stem"]
         files = sorted(ASSETS.glob(stem + "_*.stl"))
@@ -86,9 +81,7 @@ def main():
     for name, items in geoms.items():
         fixed = []
         for number, line in items:
-            center = list(parts[number]["center_m"])
-            if number == 49:
-                center[0] += BATTERY_FRONT_OFFSET_M
+            center = parts[number]["center_m"]
             local = [center[i] - origins[name][i] for i in range(3)]
             fixed.append(line.replace(f'pos="{vec(center)}"', f'pos="{vec(local)}"'))
         geoms[name] = fixed
@@ -114,12 +107,6 @@ def main():
               - math.sin(hip + knee) * 0.09816 + math.cos(hip + knee) * -0.01908)
     spawn_qpos = vec((0, 0, 0.040 - axle_z, 1, 0, 0, 0,
                       hip, knee, 0, hip, knee, 0))
-    # "home": the lying pose (body 41.7 mm above the floor, hips folded 74.8 deg, knees at their CAD zero); the
-    # body and the shin convex hulls overlap by 2.3 mm there, so that pair is excluded from collision below.
-    hip_home = math.radians(74.8)
-    knee_home = 0.0
-    home_qpos = vec((0, 0, 0.04172, 1, 0, 0, 0, hip_home, knee_home, 0,
-                     hip_home, knee_home, 0))
     xml = f'''<mujoco model="gim6010_v3_dynamic">
   <compiler angle="radian" autolimits="true"/>
   <option timestep="0.0005" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
@@ -137,11 +124,11 @@ def main():
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="0.00488392 0.00012802 0.01378601" mass="2.4" fullinertia="0.008501529 0.004314721 0.009305282 -0.0000136742 0.0001729831 0.0000044670"/>
+      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
 {body_geom}
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
-        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
+        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
 {left_thigh}
         <body name="left_shin" pos="-0.09816 0.0105 -0.01908">
@@ -157,7 +144,7 @@ def main():
         </body>
       </body>
       <body name="right_thigh" pos="0 -0.1025 0.00828">
-        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
+        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
 {right_thigh}
         <body name="right_shin" pos="-0.09816 -0.0105 -0.01908">
@@ -175,8 +162,6 @@ def main():
     </body>
   </worldbody>
   <contact>
-    <exclude body1="gim_body" body2="left_shin"/>
-    <exclude body1="gim_body" body2="right_shin"/>
     <pair geom1="ground" geom2="left_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
     <pair geom1="ground" geom2="right_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
   </contact>
@@ -185,8 +170,8 @@ def main():
     <motor name="left_knee_torque" joint="knee_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_hip_torque" joint="hip_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_knee_torque" joint="knee_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
-    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.20 0.20"/>
-    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.20 0.20"/>
+    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.13 0.13"/>
   </actuator>
   <sensor>
     <accelerometer name="mpu6500_accel" site="imu_site"/>
@@ -201,7 +186,6 @@ def main():
   <keyframe>
     <key name="spawn_extended" qpos="{spawn_qpos}"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
-    <key name="home" qpos="{home_qpos}"/>
   </keyframe>
 </mujoco>
 '''

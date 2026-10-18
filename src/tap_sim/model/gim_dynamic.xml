@@ -79,7 +79,7 @@
     <geom name="ground" type="plane" pos="0 0 0" size="2 2 0.1" rgba="0.20 0.22 0.24 1"/>
     <body name="gim_body" pos="0 0 0.06988">
       <freejoint name="root"/>
-      <inertial pos="0.00488392 0.00012802 0.01378601" mass="2.4" fullinertia="0.008501529 0.004314721 0.009305282 -0.0000136742 0.0001729831 0.0000044670"/>
+      <inertial pos="-0.0048 0 0.014" mass="2.5" diaginertia="0.020 0.007 0.020"/>
       <geom name="cad_07_0" type="mesh" mesh="cad_07_0" material="gim_structure" pos="2.64662958e-13 0.10245 0.00827948982" contype="1" conaffinity="1"/>
       <geom name="cad_08_0" type="mesh" mesh="cad_08_0" material="gim_structure" pos="-0.00723794046 0.1122 0.0109132013" contype="1" conaffinity="1"/>
       <geom name="cad_13_0" type="mesh" mesh="cad_13_0" material="gim_structure" pos="-5.45696821e-15 0.0237 0.00827948981" contype="0" conaffinity="0"/>
@@ -104,7 +104,7 @@
       <geom name="cad_46_0" type="mesh" mesh="cad_46_0" material="gim_structure" pos="-5.91171556e-15 0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_47_0" type="mesh" mesh="cad_47_0" material="gim_structure" pos="0 -0.0067 0.00552948981" contype="0" conaffinity="0"/>
       <geom name="cad_48_0" type="mesh" mesh="cad_48_0" material="gim_electronics" pos="0 -3.41060513e-16 0.0560794898" contype="0" conaffinity="0"/>
-      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
+      <geom name="cad_49_0" type="mesh" mesh="cad_49_0" material="gim_battery" pos="-0.057 -3.41060513e-16 0.000279489814" contype="0" conaffinity="0"/>
       <geom name="cad_50_0" type="mesh" mesh="cad_50_0" material="gim_structure" pos="0 -3.41060513e-16 0.00677948981" contype="1" conaffinity="1"/>
       <geom name="cad_51_0" type="mesh" mesh="cad_51_0" material="gim_hardware" pos="-0.036 0.095 0.00697948981" contype="0" conaffinity="0"/>
       <geom name="cad_52_0" type="mesh" mesh="cad_52_0" material="gim_hardware" pos="0.036 -0.095 0.00697948981" contype="0" conaffinity="0"/>
@@ -117,7 +117,7 @@
       <geom name="cad_59_0" type="mesh" mesh="cad_59_0" material="gim_hardware" pos="-0.071 0.07 0.0588794898" contype="0" conaffinity="0"/>
       <site name="imu_site" pos="0 0 0.0561" size="0.004"/>
       <body name="left_thigh" pos="0 0.1025 0.00828">
-        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
+        <joint name="hip_left" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
       <geom name="cad_09_0" type="mesh" mesh="cad_09_0" material="gim_spring" pos="-0.0534809567 0.01 -0.0107805682" contype="1" conaffinity="1"/>
       <geom name="cad_10_0" type="mesh" mesh="cad_10_0" material="gim_spring" pos="-0.0392454865 0.01 -0.00911584016" contype="1" conaffinity="1"/>
@@ -134,7 +134,7 @@
       <geom name="cad_05_0" type="mesh" mesh="cad_05_0" material="gim_hardware" pos="0.0199485627 -0.0005 0.00139371975" contype="1" conaffinity="1"/>
       <geom name="cad_23_0" type="mesh" mesh="cad_23_0" material="gim_hardware" pos="-2.71834477e-06 -0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
           <body name="left_wheel" pos="0.09816 0.0197 -0.01908">
-            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0"/>
+            <joint name="wheel_left" type="hinge" axis="0 1 0" damping="0.002"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
       <geom name="cad_06_0" type="mesh" mesh="cad_06_0" material="gim_wheel" pos="-2.27373675e-15 7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
             <geom name="left_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
@@ -142,7 +142,7 @@
         </body>
       </body>
       <body name="right_thigh" pos="0 -0.1025 0.00828">
-        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.05"/>
+        <joint name="hip_right" type="hinge" axis="0 1 0" damping="0" frictionloss="0.1"/>
         <inertial pos="-0.04908 0 -0.00954" mass="0.05" diaginertia="0.00042 0.0000417 0.00042"/>
       <geom name="cad_33_0" type="mesh" mesh="cad_33_0" material="gim_spring" pos="-0.0534809567 -0.01 -0.0107805682" contype="1" conaffinity="1"/>
       <geom name="cad_34_0" type="mesh" mesh="cad_34_0" material="gim_spring" pos="-0.0392454865 -0.01 -0.00911584016" contype="1" conaffinity="1"/>
@@ -159,7 +159,7 @@
       <geom name="cad_30_0" type="mesh" mesh="cad_30_0" material="gim_hardware" pos="0.0199485627 0.0005 0.00139371975" contype="1" conaffinity="1"/>
       <geom name="cad_41_0" type="mesh" mesh="cad_41_0" material="gim_hardware" pos="-2.71834476e-06 0.00025 -1.40972341e-06" contype="1" conaffinity="1"/>
           <body name="right_wheel" pos="0.09816 -0.0197 -0.01908">
-            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0"/>
+            <joint name="wheel_right" type="hinge" axis="0 1 0" damping="0.002"/>
             <inertial pos="0 0 0" mass="0.02" diaginertia="0.000008 0.000016 0.000008"/>
       <geom name="cad_25_0" type="mesh" mesh="cad_25_0" material="gim_wheel" pos="7.86712917e-14 -7.21644966e-16 -2.30926108e-06" contype="0" conaffinity="0"/>
             <geom name="right_wheel_collision" type="cylinder" size="0.040 0.0085" quat="0.7071067812 0.7071067812 0 0" contype="1" conaffinity="1"/>
@@ -169,8 +169,6 @@
     </body>
   </worldbody>
   <contact>
-    <exclude body1="gim_body" body2="left_shin"/>
-    <exclude body1="gim_body" body2="right_shin"/>
     <pair geom1="ground" geom2="left_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
     <pair geom1="ground" geom2="right_wheel_collision" condim="3" friction="0.8 0.8 0 0 0" solref="0.006 1" solimp="0.95 0.99 0.001"/>
   </contact>
@@ -179,8 +177,8 @@
     <motor name="left_knee_torque" joint="knee_left" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_hip_torque" joint="hip_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
     <motor name="right_knee_torque" joint="knee_right" ctrllimited="true" ctrlrange="-3.76 3.76"/>
-    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.20 0.20"/>
-    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.20 0.20"/>
+    <motor name="left_wheel_torque" joint="wheel_left" ctrllimited="true" ctrlrange="-0.13 0.13"/>
+    <motor name="right_wheel_torque" joint="wheel_right" ctrllimited="true" ctrlrange="-0.13 0.13"/>
   </actuator>
   <sensor>
     <accelerometer name="mpu6500_accel" site="imu_site"/>
@@ -195,6 +193,5 @@
   <keyframe>
     <key name="spawn_extended" qpos="0 0 0.216490386 1 0 0 0 -0.986111111 1.97222222 0 -0.986111111 1.97222222 0"/>
     <key name="cad_neutral" qpos="0 0 0.06988 1 0 0 0 0 0 0 0 0 0"/>
-    <key name="home" qpos="0 0 0.04172 1 0 0 0 1.30550628 0 0 1.30550628 0 0"/>
   </keyframe>
 </mujoco>

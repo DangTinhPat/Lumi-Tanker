@@ -501,7 +501,7 @@ class NativeRunner {
     EmbeddedController::Config cfg;
     auto& lqr = cfg.lqr;
     lqr.wheel_radius_m = robot_control::geometry::wheel_radius_m;
-    lqr.half_wheel_base_m = 0.5F * robot_control::geometry::axle_spacing_m;
+    lqr.half_wheel_base_m = 0.1545F;
     lqr.left_wheel_sign = 1.0F;
     // The speed actuator is torque-limited at 0.13 N.m. Keep the operator
     // envelope wider than the validated cruise range so the feedback loop can
@@ -782,7 +782,8 @@ class NativeRunner {
     accel_id_ = mj_name2id(model_, mjOBJ_SENSOR, "mpu6500_accel");
     gyro_id_ = mj_name2id(model_, mjOBJ_SENSOR, "mpu6500_gyro");
     if (accel_id_ < 0 || gyro_id_ < 0) throw std::runtime_error("MJCF missing IMU sensors");
-    // Look up named sensors so reordering the MJCF cannot silently swap a side.
+    // IDs are fixed by the model contract and validated by validate_model.py;
+    // look up by the explicit names so a reordered XML cannot silently swap a side.
     const std::array<const char*, 6> names = {
         "enc_left_hip_pos", "enc_left_knee_pos", "enc_left_wheel_pos",
         "enc_right_hip_pos", "enc_right_knee_pos", "enc_right_wheel_pos"};
@@ -1102,7 +1103,7 @@ class NativeRunner {
         }
       }
     }
-    // Wheel actuation: the fake BL4012 driver (SimActuatorBus.hpp) owns
+    // Wheel actuation: the fake BL4820M12 driver (SimActuatorBus.hpp) owns
     // the torque-enable gate, the settle window and the velocity->torque
     // servo. This loop only steps its physics-rate lag model and applies
     // the torque it returns - no separate MPC/yaw torque math belongs here
@@ -1230,7 +1231,7 @@ class NativeRunner {
           binding.driver_sign * static_cast<float>(data_->qvel[kJointQvel[j]]));
       leg_command_[i] = binding.driver_sign * driver_torque;
     }
-    // Wheels: the ONLY channel a real BL4012 exposes is Moving Speed
+    // Wheels: the ONLY channel a real BL4820M12 exposes is Moving Speed
     // (WHEEL_MOTOR_PROTOCOL.md §4) - MotorCommand.velocity_rad_s[wheel] is
     // already the MPC's full ground+yaw wheel velocity intent
     // (LqrBalancer, left/right_wheel_velocity_rad_s), so it is the
@@ -1437,7 +1438,7 @@ class NativeRunner {
       const MotorCommand motors = controller_.update(state_, command);
       // Wheel actuation authority travels ONLY through MotorCommand from
       // here on - see docs/MOTOR_HAL_PLAN.md section 3, leak 1. A real
-      // BL4012 has no register for "ground acceleration"; the only thing
+      // BL4820M12 has no register for "ground acceleration"; the only thing
       // that reaches it is a Moving Speed target, so that is the only thing
       // applyMotorCommand may read for wheel intent.
       applyMotorCommand(motors);
@@ -1865,7 +1866,7 @@ class NativeRunner {
   std::array<float, 4> leg_command_{};
   std::array<float, 4> applied_leg_torque_{};
   std::array<float, 4> leg_state_{};
-  // Fake drivers standing in for the real GDS68 (legs) / BL4012 (wheels)
+  // Fake drivers standing in for the real GDS68 (legs) / BL4820M12 (wheels)
   // bus hardware; see SimActuatorBus.hpp and docs/MOTOR_HAL_PLAN.md section 4.
   // Node ids/motor ids match the hardware map in that doc section 1.
   robot_control::SimMotorTransport motor_transport_{};

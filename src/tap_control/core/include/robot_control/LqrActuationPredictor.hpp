@@ -65,18 +65,25 @@ class LqrActuationPredictor {
       return false;
     }
     const float dt = std::clamp(dt_s, .00025F, .05F);
-    const auto ticks = static_cast<std::size_t>(std::clamp(
-        std::lround(std::clamp(cfg.delay_s, 0.0F, .1F) / dt), 0L, 400L));
-    if (ticks != ticks_ || std::abs(dt-dt_s_) > 1e-6F) {
+    // The robot passes the MEASURED tick period, which jitters by microseconds. Rebuilding the queue on every
+    // such change (the old 1e-6 s test) emptied the command history each tick, so the prediction ran as if no
+    // command were in flight. Re-fit only when the period really changed (>10 %) or the delay was edited.
+    const bool fitted = ticks_ != 0 && dt_s_ > 0;
+    const bool period_changed = fitted && std::abs(dt - dt_s_) > .1F * dt_s_;
+    const bool delay_changed = fitted && std::abs(cfg.delay_s - delay_s_) > 1e-6F;
+    if (!fitted || period_changed || delay_changed) {
+      const auto ticks = static_cast<std::size_t>(std::clamp(
+          std::lround(std::clamp(cfg.delay_s, 0.0F, .1F) / dt), 0L, 400L));
       reset();
       ticks_ = ticks;
       dt_s_ = dt;
+      delay_s_ = cfg.delay_s;
     }
-    return true;
+    return ticks_ != 0;
   }
   std::array<float, kCapacity> history_{};
   std::size_t head_ = 0, ticks_ = 0;
-  float dt_s_ = 0;
+  float dt_s_ = 0, delay_s_ = 0;
 };
 
 }  // namespace robot_control

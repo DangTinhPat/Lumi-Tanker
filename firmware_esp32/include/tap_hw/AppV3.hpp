@@ -1,7 +1,5 @@
 #pragma once
 
-#include <limits>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -25,10 +23,10 @@
 
 namespace tap_hw {
 
-// Firmware v3.5.2: two-wheel inverted pendulum. The legs are arranged before the
-// motor supply is switched on and controlled around that power-up pose from
-// encoder 0 using GDS68 POS; the wheels run the balance loop.
-// USB serial GUI (tools/tap_serial_control_gui.py) or Dabble BLE gamepad.
+// Firmware v3: two-wheel inverted pendulum. The legs are arranged before the
+// motor supply is switched on and locked at that power-up pose (encoder 0 of
+// each GDS68, driver position mode); only the wheels balance. USB serial only
+// (tools/tap_serial_control_gui.py), no BLE.
 class AppV3 {
  public:
   AppV3() noexcept;
@@ -75,12 +73,20 @@ class AppV3 {
   // joint angle (driver frame, rad) the lock is holding this leg at.
   [[nodiscard]] float legTargetRad(std::size_t leg) const noexcept;
   [[nodiscard]] float legChainRad() const noexcept;
+  // Straight-leg start (body on the stand, legs hanging straight down, motor supply switched on in that pose): the
+  // encoder zero is the fully extended pose, hip -0.9861 rad and knee 1.9722 rad (135 deg) in the CAD frame the
+  // controller works in (LegHeight::forKnee(kKneeMaxRad), 184.8 mm axle below the hip). Measured joints get this
+  // offset added and every leg target has it subtracted; without it the controller modelled the folded pose
+  // (knee 0, 38 mm) while the robot stood tall.
+  static constexpr float kStraightHipRad = -0.98611111F;
+  static constexpr float kStraightKneeRad = 1.97222222F;
   [[nodiscard]] const char* legAxisProblem(std::uint64_t now_us, bool need_closed_loop) const noexcept;
 
   Mpu6500Spi mpu_{};
   robot_control::ImuStateEstimator estimator_{};
   Esp32TwaiPort can_{};
   // Transport bus 0 = left wheel (id 2), bus 1 = right wheel (id 1); see MotorMapping.hpp.
+  // Kpower BL4012 wheel drivers: one half-duplex single-wire bus per wheel (ported from v3.5.2).
   Esp32UartPort uart1_{2, tap_fw::board::kWheelLeftGpio,
                        tap_fw::board::kWheelLeftUnusedRxGpio, 2U, "left"};
   Esp32UartPort uart2_{1, tap_fw::board::kWheelRightGpio,
@@ -128,25 +134,6 @@ class AppV3 {
   bool start_pending_ = false;
   bool disable_pending_ = false;
   bool go_pending_ = false;
-  // Stand-up POS velocity feed-forward: filtered rate of the commanded hip/knee path [core rad/s].
-  float ff_hip_prev_ = 0.0F, ff_knee_prev_ = 0.0F, ff_hip_rate_ = 0.0F, ff_knee_rate_ = 0.0F;
-  std::uint64_t ff_prev_us_ = 0U;
-  bool standup_pending_ = false;  // STANDUP request (SET standup 1, SET lying 1)
-  // Lying start (SET lying 1): the motor supply was switched on with the robot in the `home` lying
-  // pose, so the driver zero is that pose. The controller works in the CAD frame (hip 1.3055 rad,
-  // knee 0 there): measured joints get this offset added and every leg target has it subtracted.
-  bool lying_start_ = false;
-  static constexpr float kHomeHipRad = 1.30550628F;
-  static constexpr float kHomeKneeRad = 0.0F;
-  // Straight-leg start (default; body on the stand, legs hanging straight down, motor supply switched on in
-  // that pose): the encoder zero is the fully extended pose, hip -0.9861 rad and knee 1.9722 rad (135 deg) in
-  // the CAD frame the controller works in (LegHeight::forKnee(kKneeMaxRad), 184.8 mm axle below the hip). Without
-  // this offset the controller computed its centre-of-mass line and virtual pitch for the folded pose (knee 0,
-  // 38 mm) while the robot stood tall; the sim already feeds absolute angles.
-  static constexpr float kStraightHipRad = -0.98611111F;
-  static constexpr float kStraightKneeRad = 1.97222222F;
-  [[nodiscard]] float homeHip() const noexcept { return lying_start_ ? kHomeHipRad : kStraightHipRad; }
-  [[nodiscard]] float homeKnee() const noexcept { return lying_start_ ? kHomeKneeRad : kStraightKneeRad; }
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;

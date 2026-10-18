@@ -52,7 +52,7 @@ int main() {
 
   bus.setWheelMeasurement(0, 1.25F, 2.0F);
   check(bus.sendUart(0, buildReadPresent(1)),
-        "UART present-data read reaches simulated BL4012");
+        "UART present-data read reaches simulated BL4820M12");
   DxlFrame response;
   check(bus.receiveUart(0, response), "UART response is readable by the host");
   const auto parsed = parseDxlResponse(response.bytes.data(), response.len);

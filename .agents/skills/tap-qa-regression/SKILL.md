@@ -10,10 +10,9 @@ Read workspace `AGENTS.md` and the current test/build entrypoints
 implementation before selecting commands; do not invent a passing run or copy
 thresholds from another project as TAP acceptance limits.
 
-- Model checks (RB v2 / GIM6010-8 model, `src/tap_sim/model/gim_dynamic.xml`):
-  `gim_model_physics_tests`, `gim_physics_lifecycle_test.py` and the `gim_*`
-  scenario tests in `src/tap_sim/tests`; specification in
-  `docs/GIM_SIM_PHYSICS_SPEC.md`.
+- Model checks: `src/tap_sim/scripts/validate_model.py` (mesh integrity, seven
+  inertial links, six movable joints, native +Y axes, mass sum, rotated body
+  COM/tensor, independent FK).
 - Host checks: `ctest` (five failures predate current work and are listed in the
   handoff; new failures are regressions), the `v3_*` tests, and the `TIER_*`
   planar sims in `v3_tier_tests`. For a refactor, build the old and new firmware

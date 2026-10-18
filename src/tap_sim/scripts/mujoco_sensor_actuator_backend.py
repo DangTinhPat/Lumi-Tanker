@@ -87,8 +87,7 @@ class ActuatorConfig:
     leg_time_constant_s: float = 0.003
     wheel_time_constant_s: float = 0.005
     wheel_velocity_kp: float = 2.0
-    # Kpower BL4012 rated speed: 400 rpm, direct drive (same as the CJC
-    # BL4820M12 it replaced, 2026-10-12).
+    # CJC BL4820M12 rated speed: 400 rpm, direct drive.
     wheel_velocity_limit_rad_s: float = 41.88790204786391
     wheel_coulomb_friction_nm: float = 0.006
     wheel_viscous_friction_nm_s_rad: float = 0.001
@@ -135,8 +134,13 @@ class TapMujocoBackend:
         self.data = mujoco.MjData(self.model)
         self.sensor = sensor or SensorConfig()
         self.actuator = actuator or ActuatorConfig()
-        # The initial pose prevents startup collision from becoming an
-        # artificial landing test; it does not constrain the free body.
+        # The CAD-zero model is not statically balanced if it is dropped from
+        # a 2.4 mm gap while the controller is still waiting for the IMU seed.
+        # This is the same preload used by the canonical tap_robot.xml:
+        # wheels tangent to the plane and hips at the CAD-derived neutral
+        # equilibrium.
+        # It prevents a startup collision from becoming an artificial landing
+        # test; it does not constrain the free body once stepping begins.
         self.initial_root_z_m = float(initial_root_z_m)
         self.initial_hip_rad = float(initial_hip_rad)
         self.initial_knee_rad = float(initial_knee_rad)

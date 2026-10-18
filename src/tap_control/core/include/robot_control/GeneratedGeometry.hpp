@@ -1,8 +1,5 @@
 // Derived from ROBOT (GIM6010-8).STEP and the adopted mass assignments.
-// Body inertial aggregates the assigned masses with the 210 g battery moved
-// from the rear STEP slot to the symmetric front slot; this proposed physical
-// placement must be matched on hardware before deploying this geometry.
-// Mass-distribution assumptions are recorded in PHYSICS.md.
+// COM and inertia values are provisional lumped estimates; see PHYSICS.md.
 #pragma once
 #include <array>
 namespace robot_control::geometry {
@@ -10,7 +7,7 @@ struct Part { float mass, x, z, iyy; };
 struct Origin { float x, y, z; };
 // Order: body, left thigh/shin/wheel, right thigh/shin/wheel.
 inline constexpr std::array<Part, 7> parts{{
-    {2.40F,  0.00488392F, 0.01378601F, 0.004314721F},
+    {2.50F, -0.0048F, 0.0140F, 0.0070F},
     {0.05F, -0.04908F, -0.00954F, 0.0000417F},
     {0.24F,  0.08998F, -0.01749F, 0.0002200F},
     {0.02F,  0.00000F,  0.00000F, 0.0000160F},
@@ -27,7 +24,7 @@ inline constexpr std::array<Origin, 6> origins{{
     {-0.09816F,-0.01050F, -0.01908F},
     {0.09816F, -0.01970F, -0.01908F}
 }};
-inline constexpr float total_mass_kg = 3.02F;
+inline constexpr float total_mass_kg = 3.12F;
 inline constexpr float wheel_radius_m = 0.040F;
 inline constexpr float axle_spacing_m = 0.2654F;
 inline constexpr float neutral_hip_rad = 0.0F;

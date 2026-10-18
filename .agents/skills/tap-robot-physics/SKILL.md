@@ -5,9 +5,8 @@ description: Adapt TAP CAD robot kinematics, mass properties, COM models and col
 
 # Robot Physics And Kinematics Expert
 
-Read workspace `AGENTS.md`, the current source CAD, and the model files that
-belong to that CAD before deriving physical parameters. No simulation CAD
-model is currently configured in this workspace.
+Read workspace `AGENTS.md` and the current `src/tap_sim/model/{tap_robot.xml,PHYSICS.md,rb_cad_manifest.json,mesh_inertials.yaml}`
+and `src/tap_control/core/include/robot_control/{GeneratedGeometry.hpp,WholeBodyModel.hpp}`.
 
 - Preserve CAD zero and native +Y axes on both sides. Build FK using actual
   origins, axes and link inertials; never substitute a mirrored model. Keep
@@ -16,8 +15,12 @@ model is currently configured in this workspace.
 - Use SI units. For rotated inertials, compare tensors in the same frame with
   `R I R^T`; check COM transformation, positive eigenvalues, principal-moment
   triangle inequalities and summed mass. Do not double-count motor mass.
-- Treat existing generated control geometry as unverified until it is rebuilt
-  from the adopted CAD and checked against independent forward kinematics.
+- `GeneratedGeometry.hpp` is marked as generated from the MJCF, but its
+  generator script is no longer in the repository. After any change to
+  geometry, mass allocation or body orientation, update the header consistently
+  and validate `WholeBodyModel` against independent FK from `tap_robot.xml`
+  (`src/tap_sim/scripts/validate_model.py`) across symmetric AND asymmetric
+  poses. Report the sampled range and the worst errors.
 - Derive COM relative to the contact/axle geometry, including the wheel radius.
   The robot's measured balance angle differs from the CAD prediction (the
   firmware compensates a fore/aft CoM offset), so treat CAD mass properties as

@@ -68,10 +68,9 @@ class LegPlant {
     Points p{};
     const double hip = hip_cad0_ + q;
     const double upper = hip, lower = hip + k + geo::knee_zero_rebase_rad;
-    const Pt hip_pt{geo::origins[0].x, geo::origins[0].z};
     p.com[0] = {geo::parts[0].x + dx_, geo::parts[0].z};
-    const Pt knee_pt = add(hip_pt, rot({geo::origins[1].x, geo::origins[1].z}, upper));
-    p.com[1] = add(hip_pt, rot({geo::parts[1].x, geo::parts[1].z}, upper));
+    const Pt knee_pt = rot({geo::origins[1].x, geo::origins[1].z}, upper);
+    p.com[1] = rot({geo::parts[1].x, geo::parts[1].z}, upper);
     p.com[2] = add(knee_pt, rot({geo::parts[2].x, geo::parts[2].z}, lower));
     p.axle = add(knee_pt, rot({geo::origins[2].x, geo::origins[2].z}, lower));
     p.com[3] = add(p.axle, rot({geo::parts[3].x, geo::parts[3].z}, lower));

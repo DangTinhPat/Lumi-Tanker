@@ -1,8 +1,6 @@
-# Firmware v3.5.2 — POS, con lắc ngược hai bánh với điều khiển phân tầng
+# Firmware v3.3beta — POS baseline, con lắc ngược hai bánh với điều khiển phân tầng
 
-`v3.5.2` tách từ `v3.5` tại `c757ff1` (`base 17:58`), đổi bốn khớp chân sang POS
-để không cần Kt/Iq ở phía firmware. Chi tiết cấu hình và mức bằng chứng:
-[`V3.5.2_POS.md`](../docs/V3.5.2_POS.md). Bản này giữ hình học GIM6010-8
+`v3.3beta` giữ đường điều khiển vị trí POS của V3.3 và dùng hình học GIM6010-8
 từ `ROBOT (GIM6010-8).STEP`. Khối lượng, COM và mô-men quán tính là ước lượng
 theo mô hình khối lượng đã gán; xem `docs/GIM_SIM_PHYSICS_SPEC.md`.
 
@@ -18,21 +16,10 @@ Build/nạp: `pio run -e esp32-s3-v3 [-t upload --upload-port /dev/ttyUSBx]`. Đ
 (tự kết nối, log ở `~/tap_logs/`; mở cổng serial reset ESP32 và mất mọi `SET` chạy). Không dùng BLE khi điều khiển
 bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`) đã gỡ ngày 08/10/2026 (mã, test, tài liệu); `esp32-s3-v3` là môi trường mặc định và duy nhất, còn lịch sử trong git.
 
-## Baseline UART bánh mới
-
-Nhánh v3.5 (bao gồm v3.5.1) dùng mặc định hai bus half-duplex một dây:
-trái GPIO15/UART2/ID2/sign +1; phải GPIO17/UART1/ID1/sign -1.
-GPIO16/18 để input floating; TX nhả DATA ngay khi hardware idle.
-Chi tiết cơ chế, log beta và giới hạn xác minh của port v3.5:
-[`WHEEL_UART_BASELINE_20261013.md`](../docs/WHEEL_UART_BASELINE_20261013.md).
-
 ## Tổng quan
 
-- **Cả bốn khớp chân chạy POS của GDS68** (`Set_Controller_Mode(position=3, passthrough=1)` +
-  `Set_Input_Pos` / `0x00C`, khoảng 333 Hz). Góc gửi bằng vòng rotor, tỉ số truyền 8:1 và chiều driver giữ nguyên.
-  Driver tự đóng vòng vị trí/tốc độ; torque feed-forward luôn bằng 0, không dùng Kt hoặc bù chênh lệch Iq.
-  Mỗi lần engage gửi giới hạn `8 A` và `20 rev/s` trước closed loop. Không cần phát `Get_Iq` để START/cân bằng;
-  vẫn bắt buộc encoder `0x009`, heartbeat, IMU và encoder bánh còn mới.
+- **Cả bốn khớp chân chạy chế độ vị trí (POS) của driver GDS68** (`Set_Controller_Mode(position, passthrough)` +
+  `Set_Input_Pos`, 250–333 Hz). Không còn VMC/MIT ở gối (đã gỡ 04/10); `LEGMODE MIT` chỉ còn là chế độ dự phòng.
 - Người vận hành xếp chân (duỗi tự nhiên theo trọng lực) **trước khi cấp nguồn motor**; encoder mỗi GDS68 bằng 0 tại lúc cấp
   nguồn nên tư thế đó là mốc 0. Chiều cao, tầng 2 và roll cộng offset lên mốc này (`LegLock::setOffsets/setSideOffsets`).
 - Tầng 1 (bánh): `LqrBalancer` trên **góc con lắc ảo** θv = pitch + góc đường trục bánh–CoM đo từ hông/gối − góc ở tư thế treo.
@@ -75,22 +62,17 @@ Chi tiết cơ chế, log beta và giới hạn xác minh của port v3.5:
 ## Lệnh console
 
 `START`, `GO`, `GO NOW`, `TILTTEST`, `BALANCE`, `BALANCE CLEAR`, `DISABLE`, `ESTOP`, `CLEAR_ESTOP`, `STOP`, `DRIVE f y`, `HMOVE ±1`,
-`GET` (in các dòng `V3 TUNE …`), `SET <khóa> <giá trị>`.
+`GET` (in các dòng `V3 TUNE …`), `LEGMODE POS|MIT` (khi Idle), `SET <khóa> <giá trị>`.
 
 `SET` theo nhóm (khóa chính xác nằm trong `handleSet` của `AppV3.cpp`; `GET` in giá trị đang dùng):
 - **Bánh/LQR:** `algo` (0 LQR+tầng, 1 PID, 2 whole-body; chỉ khi Idle), `accel`, `amax`, `trim_gain|trim_max|trim|margin|pitch_scale`,
-  `lqrpredict 0|1`, `lqrdelay|lqrlag <s>` (dự đoán trễ lệnh, mặc định tắt; GIM sim bật),
   `balance` (lưu góc cân bằng), `dbc|dbe` (bù vùng chết bánh), `lqrlead <s>` (ghim lead cố định, tắt thích ứng), `lqradapt 0|1`,
   `lqrleadtall|lqrleadlow`, `ttrimacc 0|1`, `ttrimtau`, `leash` (neo vị trí khi lái), `sleash|sret` (neo đứng, mặc định tắt),
   `hcap` (trần tốc độ bánh khi bị giữ), `wpred|wbpred|wpdelay|wptau|wpmeas` (bộ dự đoán bánh).
 - **Tầng 2:** `vpitch` (chỉ khi không Balancing), `trunk`, `tshare|tlead|tleadexp|tmax|trate`, `texp|texpt` (số mũ phần hông gánh ở
   độ cao thấp/cao), `tvg|tvglow` (trọng số tốc độ khớp trong θv_rate), `tbdamp` (giảm chấn thân), `tbdlpf` (lọc gyro cho giảm chấn, Hz, boot 4,5; 0 = gyro thô), `tcarrier`, `tadapt`,
   `legacy 0|1` (đưa tầng 2 về như `b4b6d4a`), `tlsrc 0|1` (lead lấy gyro), `tgate|tglo|tghi|tgllo|tglhi|tgrel` (cổng sự kiện phản xạ),
-  `tginertia 0|1` (khi tgate bật: mở theo gyro/gia tốc, không mở riêng vì lean tĩnh; mặc định tắt),
   `tdb` (vùng chết), `tsatm`, `tprev|tpacc|tpjerk|tpvmax|tpt` (preview), `tlvl|tlevel|tltau|tlvmax` (vòng level), `tplanfull`,
-  `tgov 0|1` (mặc định 0: chừa mô-men cân bằng trong kế hoạch gia tốc), `tgreserve` (phần mô-men khả dụng chừa lại, mặc định 0.45),
-  `tgtorque <Nm>` (mô-men liên tục mỗi bánh, mặc định 0.13; không dùng peak đứng dậy). Bản SIM bật `tgov`, lead hông 0 s,
-  kế hoạch 0.9 m/s², jerk 10 m/s³; đây là tuning cho mô hình mô-men hiện tại, chưa phải tuning xác nhận trên robot. Xem `docs/DYNAMIC_BALANCE.md`.
   `tenv|tenvlean`, `khold|wbkhold`, `kfhz|kfrate` (gối bù độ cao của IK qua lọc Hz + giới hạn rad/s, boot 1.0/0.6, `kfhz 0` = tức thì), `cdx <mm>` (lệch CoM thân), `timu`.
 - **Chiều cao/gối:** `height <mm>`, `hrate <mm/s>`, `haccel <mm/s²>`, `hjerk <mm/s³>`, `hff`, `tsus 0|1`, `tsusad 0|1`, `tsusk`,
   `tsusdelay`, `tsusg`, `tsusmax <mm>`.
@@ -98,9 +80,7 @@ Chi tiết cơ chế, log beta và giới hạn xác minh của port v3.5:
   `rolltgt` (ghim mốc ngang, tắt học), `rollcal` (học lại mốc), `rolllearn|rollpre|rolldamp|rolllatch|rollgimbal`. TR: `rref`, `rm`.
 - **Khởi động:** `imm`, `auto`, `armgo`, `stillms`, `stillspan`.
 - **Whole-body (thử nghiệm):** `wbarm|wbgive|wbsoft|wbenv|wbff|wbslack|wbbg`.
-- POS dùng gain vị trí/tốc độ bên trong GDS68 (`pos_gain`, `vel_gain`, `vel_integrator_gain`).
-  `SET leg_kp|leg_kd|iqcomp` bị từ chối rõ ràng trong POS; chúng chỉ dành cho đường torque cũ được chọn qua cấu hình mã nguồn.
-  Profile gain mô-men khi nhảy không áp dụng trong POS; nhảy vẫn tắt khi boot và chưa được xác nhận cho bản này.
+- `leg_kp|leg_kd` chỉ cho `LEGMODE MIT`.
 
 Chiều cao boot dùng 15 mm/s, 50 mm/s², jerk 200 mm/s³ (mặc định của struct: 25 / 70 / 500); planner giới hạn giật và tự hãm
 trước đích.
@@ -125,15 +105,11 @@ batch ~333 Hz (deadline 3 ms trên tick 2 ms); lệnh bánh gửi trước việ
 
 ## Kiểm chứng (test host)
 
-Các kết quả mô tả dưới đây là bằng chứng lịch sử của các model tương ứng,
-không phải lần chạy xác nhận bản POS v3.5.2. Mức bằng chứng của bản này nằm
-trong [`V3.5.2_POS.md`](../docs/V3.5.2_POS.md).
-
 Build: `cmake -S . -B <dir> -DBUILD_TESTING=ON -DTAP_BUILD_SIMULATOR=OFF`.
 - `v3_physics_tests`: con lắc bánh-thân (Lagrange, khối lượng CAD), servo bánh trễ 80/120 ms, lực đặc trưng tại IMU qua đúng
   `ImuStateEstimator`: cấu hình gốc ngã; cấu hình Balancing đứng vững với góc cân bằng ±0.1 rad, seed lệch ±2°/±4.6°, bias trôi, đẩy 1 N,
   dốc 0.03 rad; θ_b về đúng góc thật (< 0.001 rad), robot về chỗ thả (< 3 mm).
-- `v3_tests`: POS frame mặc định, torque/current frame khi chọn cấu hình cũ, giới hạn GDS68, ramp về 0, resend, IDLE; trình tự Idle→Locking→Balancing/Fault, cân bằng vòng
+- `v3_tests`: frame khóa chân (vị trí, ramp về 0, resend, IDLE; MIT dự phòng), trình tự Idle→Locking→Balancing/Fault, cân bằng vòng
   kín trên mô hình con lắc bánh-trên-chân cứng (servo bánh 40 ms, nhiễu cảm biến, điểm cân bằng lệch, tay lệch ±2°).
 - `v3_tier_tests`: sim hai vật thể (thân + chân nối bằng servo vị trí hông fit từ `HIPTEST`), chạy từng bài theo biến môi trường
   `TIER_*` (xem HANDOFF mục 7). Mặc định dừng ở assertion V14 đã có từ trước.

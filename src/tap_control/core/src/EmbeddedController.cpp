@@ -877,7 +877,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
         state.joints.position_rad[left_hip], state.joints.position_rad[left_knee]);
     const auto right = WholeBodyModel::legHeight(
         state.joints.position_rad[right_hip], state.joints.position_rad[right_knee]);
-    float current_height = geometry::wheel_radius_m - geometry::origins[0].z -
+    float current_height = geometry::wheel_radius_m -
         0.5F * (left.height_m + right.height_m);
     float seed_hip = 0.5F *
         (state.joints.position_rad[left_hip] + state.joints.position_rad[right_hip]);
@@ -887,8 +887,7 @@ MotorCommand EmbeddedController::update(const RobotState& input_state,
       seed_hip = height_motion_last_hip_rad_;
       seed_knee = height_motion_last_knee_rad_;
       const auto planned = WholeBodyModel::legHeight(seed_hip, seed_knee);
-      current_height = geometry::wheel_radius_m - geometry::origins[0].z -
-          planned.height_m;
+      current_height = geometry::wheel_radius_m - planned.height_m;
     }
     // Solve each named height on the canonical CAD branch, not from the
     // previous endpoint.  Seeding natural from deep squat otherwise keeps
