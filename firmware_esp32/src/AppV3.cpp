@@ -135,6 +135,10 @@ AppV3::AppV3() noexcept
     : transport_(can_.port(), uart1_.port(), uart2_.port()),
       ctrl_(tap_fw::v3::defaultV3Config()) {
   ctrl_.config().jump.enabled = false;  // v3.5.2 has no jump skills
+  // Wheel command-to-speed lag measured on the robot is ~85-120 ms (the sim's delay 50 ms + lag 75 ms model);
+  // without the actuation predictor the sim falls once delay + lag grow to 100 + 120 ms. Boot ON, as in the sim
+  // runner; SET lqrpredict 0 turns it off.
+  ctrl_.config().lqr_prediction.enabled = true;
 }
 
 bool AppV3::begin() noexcept {
