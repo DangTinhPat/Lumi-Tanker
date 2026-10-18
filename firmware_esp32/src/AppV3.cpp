@@ -298,7 +298,8 @@ void AppV3::controlTaskEntry(void* arg) noexcept {
 }
 
 void AppV3::step(bool task) noexcept {
-  const std::uint64_t now_us = nowUs();
+  const std::uint64_t step_start_us = nowUs();
+  std::uint64_t now_us = step_start_us;
   if (task) {
     // Command lines the loop task queued: handled here, so every state
     // change happens in this task.
@@ -310,10 +311,14 @@ void AppV3::step(bool task) noexcept {
   const std::uint64_t t_serial = nowUs();
   pollBle(now_us);
   const std::uint64_t t_ble = nowUs();
+  // Command handling (SET bursts, TUNE printing) can outlast the 20 ms wheel freshness limit. Stamp newly
+  // drained feedback and run the controller at the time AFTER it, otherwise a fresh UART reply inherits
+  // the tick start and looks stale.
+  now_us = t_ble;
   can_.service(now_us);
   drainFeedback(now_us);
   const std::uint64_t t_bus = nowUs();
-  pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - now_us));
+  pre_serial_max_us_ = std::max(pre_serial_max_us_, static_cast<std::uint32_t>(t_serial - step_start_us));
   pre_ble_max_us_ = std::max(pre_ble_max_us_, static_cast<std::uint32_t>(t_ble - t_serial));
   pre_bus_max_us_ = std::max(pre_bus_max_us_, static_cast<std::uint32_t>(t_bus - t_ble));
   constexpr std::uint64_t kPeriod = tap_fw::board::kControlPeriodUs;
