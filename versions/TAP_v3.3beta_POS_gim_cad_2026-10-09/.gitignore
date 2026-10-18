@@ -1,0 +1,15 @@
+build/
+.pio/
+log/
+__pycache__/
+
+# Large CAD/mesh binaries. Kept out of git deliberately: the STEP assembly is
+# 111 MB (over GitHub's hard 100 MB per-file limit, so a push containing it is
+# rejected outright) and the MuJoCo STL assets add another 97 MB, which would
+# grow this repo from 8 MB to ~210 MB permanently - undoing that needs a
+# history rewrite. Track them with git-lfs if they need to be versioned.
+*.stp
+*.STP
+*.rar
+src/tap_sim/model/assets/*.stl
+src/tap_sim/model/assets/*.STL
