@@ -1097,7 +1097,9 @@ float AppV3::legTargetRad(std::size_t leg) const noexcept {
   const auto binding = tap_fw::board::MotorIds{}.leg_can[leg];
   const auto& pose = ctrl_.legPose();
   const bool knee = binding.joint_index == 1U || binding.joint_index == 4U;
-  return (knee ? pose.knee_offset_rad : pose.hip_offset_rad) * binding.driver_sign;
+  // Raw encoder frame (zero = the pose the motor supply was switched on in), like legJointRad(): the controller
+  // pose is in the CAD frame, so take the home offset off.
+  return (knee ? pose.knee_offset_rad - homeKnee() : pose.hip_offset_rad - homeHip()) * binding.driver_sign;
 }
 
 float AppV3::legChainRad() const noexcept {
