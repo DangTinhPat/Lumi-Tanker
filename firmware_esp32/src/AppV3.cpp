@@ -143,7 +143,7 @@ void applyBalanceProfile(tap_fw::v3::V3Controller::Config& config, bool plain) n
   config.tier.level = plain ? false : layered.tier.level;
   config.tier.suspension = plain ? false : layered.tier.suspension;
   config.tier.preview = plain ? false : layered.tier.preview;
-  config.lqr_lead_adaptive = plain ? false : layered.lqr_lead_adaptive;
+  config.lqr_lead_adaptive = !plain;  // the shipped layered configuration runs the height-adaptive lead
 }
 
 // Default controller config with the legs starting fully extended (see AppV3::kStraightKneeRad).
@@ -224,7 +224,8 @@ bool AppV3::begin() noexcept {
   ctrl_.config().roll.gimbal_link = true;  // roll = lateral axis of the gimbal (Tier::level)
   // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
   // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
-  ctrl_.config().lqr_lead_adaptive = true;
+  // The plain straight-leg balance (default start) keeps the fixed lead; SET lying 1 switches it on.
+  ctrl_.config().lqr_lead_adaptive = lying_start_;
   ctrl_.config().lqr_lead_tall_s = 0.05F;
   ctrl_.config().lqr_lead_low_s = 0.09F;
   // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
