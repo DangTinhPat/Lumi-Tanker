@@ -48,6 +48,9 @@ constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
 // Full stick. Forward stays 0.25 m/s under the 0.8 m/s balancer cap: catching
 // a forward lean needs the wheels to run faster than the drive speed.
 constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
+// Serial/GUI DRIVE ceiling [m/s] (19/10: opened to 4.0 at the operator's request, who sets the speed on the GUI slider).
+// The BLE stick keeps its 0.55 full-stick scale. The wheel command itself clamps at 1000 rpm = 4.19 m/s.
+constexpr float kSerialDriveSpeedMS = 4.0F;
 constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
 
 std::atomic<int> g_v3_ble_links{0};
@@ -194,7 +197,11 @@ bool AppV3::begin() noexcept {
   // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
   // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
   ctrl_.config().lqr_lead_adaptive = true;
-  ctrl_.config().lqr_lead_tall_s = 0.05F;
+  // 19/10: tall 0.05 -> 0.09 s (the low-pose value). The 19/10 drive logs used a 51-58 ms lead at every height
+  // while the wheel speed followed the command ~120 ms late (TR cross-correlation, 25 Hz), and driving showed a
+  // 2.4 Hz speed pulse of 0.7 x the command; at 2.4 Hz 58 ms of lead leaves ~60 deg of that lag uncompensated.
+  // SET lqrleadtall 0.05 restores it.
+  ctrl_.config().lqr_lead_tall_s = 0.09F;
   ctrl_.config().lqr_lead_low_s = 0.09F;
   // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
   // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
@@ -215,6 +222,12 @@ bool AppV3::begin() noexcept {
   // lead drives a 6-8 Hz hip limit cycle once the hip lags +30 ms or more (robot logs 07/10,
   // sim V42: gyro >5 Hz 0.14 -> 0.05 rad/s at +40 ms, quiet to +60 ms). SET tbdlpf 0 = raw gyro (HANDOFF 5.50).
   ctrl_.config().tier.body_damp_lpf_hz = 4.5F;
+  // Reflex share 1.0 -> 0.6 (19/10, operator: the hips over-react while driving). Fit of the 19/10 14:19 drive log
+  // (R2 0.95): dynamic hip = 0.94 x (theta_v - ref) + 0.065 s x theta_v_rate; theta_v and its rate both contain the
+  // hips' own measured motion (theta_v_rate std 0.29 rad/s against 0.07 for the body gyro), so the reflex partly
+  // answers its own swing. The share scales the lean and lead terms (not the planned lean, the gyro damping or the
+  // level loop): about 40 % less hip swing, at the cost of a little more body pitch. SET tdshare 1 restores it.
+  ctrl_.config().tier.disturbance_share = 0.6F;
   // Height changes at 15 mm/s, 50 mm/s2 with a 200 mm/s3 jerk limit: the biggest
   // body kicks came when the legs STOP. SET hrate 25 / haccel 70 / hjerk 500
   // restores the faster profile.
@@ -441,7 +454,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   } else if (std::strncmp(line, "DRIVE ", 6U) == 0) {
     float f = 0.0F, y = 0.0F;
     if (std::sscanf(line + 6, "%f %f", &f, &y) == 2) {
-      drive_forward_ = std::clamp(f, -kBleDriveSpeedMS, kBleDriveSpeedMS);
+      drive_forward_ = std::clamp(f, -kSerialDriveSpeedMS, kSerialDriveSpeedMS);
       drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
     }
   } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
@@ -569,6 +582,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().tier.trunk = v >= 0.5F;
     }
     else if (!std::strcmp(key, "tshare")) ctrl_.config().tier.lean_share = std::clamp(v, 0.0F, 1.0F);
+    else if (!std::strcmp(key, "tdshare")) ctrl_.config().tier.disturbance_share = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tlead")) ctrl_.config().tier.lead_s = std::clamp(v, 0.0F, 0.15F);
     else if (!std::strcmp(key, "tleadexp")) ctrl_.config().tier.lead_exp = std::clamp(v, 0.0F, 2.0F);
     else if (!std::strcmp(key, "tlsrc")) ctrl_.config().tier.lead_gyro_only = v >= 0.5F;
@@ -606,7 +620,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tprev")) ctrl_.config().tier.preview = v >= 0.5F;
     else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 1.0F);
     else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
-    else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 0.8F);
+    else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 4.0F);
     else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
     // Static level loop (needs trunk): body pitch target and its limits.
     else if (!std::strcmp(key, "tlvl")) ctrl_.config().tier.level = v >= 0.5F;

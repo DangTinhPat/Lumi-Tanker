@@ -359,10 +359,17 @@ class V3Controller {
     float preview_s = 0.12F;
     float plan_accel_m_s2 = 0.3F;
     float plan_jerk_m_s3 = 1.0F;
-    // Planned speed cap (0.55 m/s = the BLE full stick). Cruising within
-    // 0.05 m/s of the 0.8 m/s wheel cap leaves no headroom to stand the lean back
-    // up; 0.55 held every plant variant (v3_tier_tests V15).
-    float plan_vmax_m_s = 0.55F;
+    // Planned speed cap. Cruising within 0.05 m/s of the wheel cap leaves no headroom to stand the lean back
+    // up; 0.55 m/s under a 0.8 m/s cap held every plant variant (v3_tier_tests V15). 1.0 m/s under the 1.2 m/s
+    // wheel cap keeps 0.2 m/s of headroom. 19/10: opened to 4.0 m/s at the operator's request (wheel cap 4.19 m/s =
+    // the 1000 rpm command clamp), so near the cap there is almost no headroom to stand the lean back up, and the
+    // rated 0.13 N.m only holds to 400 rpm = 1.67 m/s. Not tried on the robot (the fastest run so far was 0.34 m/s).
+    float plan_vmax_m_s = 4.0F;
+    // Above plan_scale_from_m_s the plan's acceleration and jerk grow with the speed, up to plan_scale_max times
+    // (0.3 m/s^2 / 1 m/s^3 to 1.0 m/s would take 3.3 s; scaled 1.8x it takes about 2 s). The scale follows the larger of
+    // the target and the planned speed, so a stop from speed brakes with the same budget that built it.
+    float plan_scale_from_m_s = 0.55F;
+    float plan_scale_max = 1.8F;
     // Motion envelope from the pendulum at the current height (SET tenv): the
     // planned speed cap becomes the wheel cap minus env_catch_rad * sqrt(g l)
     // (capture point: catching a lean theta needs about theta * sqrt(g l) of wheel
@@ -978,6 +985,7 @@ class V3Controller {
   bool ga_init_ = false;
   float reflex_w_ = 0.0F, gate_rate_lp_ = 0.0F; // reflex gate weight, |gyro| low-pass
   float plan_v_ = 0.0F, plan_a_ = 0.0F, plan_j_ = 0.0F, plan_dt_ = 0.002F;
+  float plan_scale_ = 1.0F;  // latched speed scale of the plan budget (Tier::plan_scale_*)
   bool plan_init_ = false;
   std::array<PlanSample, 128> plan_buf_{};
   std::size_t plan_head_ = 0U, plan_n_ = 0U;

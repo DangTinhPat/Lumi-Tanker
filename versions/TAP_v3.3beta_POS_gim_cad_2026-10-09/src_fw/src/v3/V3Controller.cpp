@@ -1914,13 +1914,24 @@ void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   if (reset || !plan_init_) {
     plan_v_ = reset ? 0.0F : target_v;
     plan_a_ = plan_j_ = 0.0F;
+    plan_scale_ = 1.0F;
     plan_n_ = 0U;
     plan_init_ = true;
   }
-  const float amax = envelopeOn() && wholeBody()
+  float amax = envelopeOn() && wholeBody()
       ? std::max(9.80665F * std::tan(std::clamp(t.env_lean_rad, 0.0F, 0.3F)), 0.05F)
       : std::max(t.plan_accel_m_s2, 0.05F);
   float jmax = std::max(t.plan_jerk_m_s3, 0.1F);
+  // Higher speeds get a proportionally larger acceleration/jerk budget (Tier::plan_scale_*); at or below
+  // plan_scale_from_m_s nothing changes.
+  // The scale is latched while the plan moves, so a stop brakes with the budget that built the speed, and drops
+  // back to 1 once the plan is at rest.
+  const float scale_from = std::max(t.plan_scale_from_m_s, 0.05F);
+  const float demand = std::clamp(std::max(std::abs(target_v), std::abs(plan_v_)) / scale_from, 1.0F,
+                                  std::max(t.plan_scale_max, 1.0F));
+  plan_scale_ = std::abs(plan_v_) < 0.02F && std::abs(target_v) < 0.02F ? 1.0F : std::max(plan_scale_, demand);
+  amax *= plan_scale_;
+  jmax *= plan_scale_;
   if (envelopeOn()) {
     jmax *= std::sqrt(std::max(com_reference_m_, 0.01F) /
                        std::max(pose_.com_above_axle_m, 0.01F));
@@ -2235,7 +2246,7 @@ V3Controller::Config defaultV3Config() {
   cfg.lqr.balance_trim_max_rad = 0.20F;
   cfg.lqr.balance_trim_pitch_gate_rad = 0.25F;
   cfg.lqr.command_velocity_tracking_margin_m_s = 0.25F;
-  cfg.lqr.max_ground_velocity_m_s = 0.8F;
+  cfg.lqr.max_ground_velocity_m_s = 4.19F;  // 1000 rpm, the wheel command clamp (rated torque only to 400 rpm = 1.67 m/s)
   // Demo turning: 1.5 rad/s (~86 deg/s) = 0.23 m/s per wheel at the 0.1545 m
   // half track; the default 0.8 capped the BLE stick well below that.
   cfg.lqr.max_yaw_rate_rad_s = 1.5F;
