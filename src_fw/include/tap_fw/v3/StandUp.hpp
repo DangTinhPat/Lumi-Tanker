@@ -58,6 +58,14 @@ class StandUp {
     // lean held at -0.1..0 while B4 accelerates back to -0.7 m/s).
     // Core opt-in; SET standwheelref 0 restores the zero-lean wheel target.
     bool catch_wheel_speed_lean = false;
+    // Robot logs 20261019: B4 holds lean +0.03..+0.05 (model) for 1.5-2 s while the speed keeps
+    // growing, -0.44 -> -0.58 m/s. With the P-only speed->lean target the drift settles at
+    // v = -g*bias/catch_speed_gain: bias 0.06 rad (model lean minus true lean, ~2.7 mm of COM x)
+    // and gain 1/s give -0.59 m/s, the observed value. This bounded integral of ground speed is
+    // added to the stopping lean target so any such offset (up to the bound) is absorbed.
+    // 1/s^2; 0 = off. SET standspdi / standspdimax.
+    float catch_speed_integral_gain = 0.0F;
+    float catch_speed_integral_max_rad = 0.08F;
     float catch_speed_filter_s = 0.10F;
     float catch_speed_lean_max_rad = 0.12F;
     float fold_rate_rad_s = 0.35F;
@@ -296,6 +304,7 @@ class StandUp {
     float wheel_lean_ref_rad = 0.0F;  // wheel lean target (0 unless catch_wheel_speed_lean)
     float speed_feedback_accel_m_s2 = 0.0F;
     float speed_filtered_m_s = 0.0F;
+    float speed_integral_rad = 0.0F;   // integral part of the stopping lean target
     bool wheel_prediction_valid = false;
     bool wheel_measured_preview = false;
     bool wheel_prediction_capped = false;
@@ -381,6 +390,8 @@ class StandUp {
     su.catch_wheel_speed_lean = true;
     su.catch_posture_capture_guard = true;
     su.floor_guard_in_support = false;
+    su.catch_speed_integral_gain = 1.0F;
+    su.catch_speed_integral_max_rad = 0.08F;
     // Robot logs 20261019 (7 trials): the B4 hip rises only 0.19-0.25 rad and stops at about -0.5 rad
     // when lean crosses 0, because the posture (head-level) term arms only after 0.25 rad of hip rise.
     // The head then drops back (pitch .34 -> .48) and the floor guard faults at B4 ~0.6 s needing
@@ -429,7 +440,7 @@ class StandUp {
     hip_start_rad_ = hip_cmd_ = std::isfinite(hip_rad) ? hip_rad : 0.0F;
     flip_start_hip_rad_ = catch_start_hip_rad_ = hip_cmd_;
     knee_cmd_ = std::isfinite(knee_rad) ? knee_rad : 0.0F;
-    speed_filtered_m_s_ = 0.0F;
+    speed_filtered_m_s_ = speed_integral_rad_ = 0.0F;
     hip_rate_cmd_ = wheel_velocity_m_s_ = 0.0F;
     catch_leveling_ = true;
     catch_stall_s_ = 0.0F;
@@ -466,6 +477,7 @@ class StandUp {
     wheel_predictor_.reset();
     wheel_prediction_armed_ = false;
     wheel_prediction_weight_ = 0.0F;
+    speed_integral_rad_ = 0.0F;
     lift_s_ = b4_clear_s_ = knee_rate_cmd_ = lift_hip_weight_ = 0.0F;
     lift_done_ = false;
   }
@@ -535,10 +547,15 @@ class StandUp {
       const float alpha = config_.catch_speed_filter_s > 0.0F
           ? std::clamp(dt / config_.catch_speed_filter_s, 0.0F, 1.0F) : 1.0F;
       speed_filtered_m_s_ += alpha * (in.ground_speed_m_s - speed_filtered_m_s_);
+      if (phase_ == Phase::Catching && config_.coordinated_speed && config_.catch_speed_integral_gain > 0.0F)
+        speed_integral_rad_ = std::clamp(speed_integral_rad_ -
+            config_.catch_speed_integral_gain * speed_filtered_m_s_ / 9.80665F * dt,
+            -config_.catch_speed_integral_max_rad, config_.catch_speed_integral_max_rad);
     } else {
       speed_filtered_m_s_ = in.ground_speed_m_s;
     }
     out.speed_filtered_m_s = speed_filtered_m_s_;
+    out.speed_integral_rad = speed_integral_rad_;
     elapsed_s_ += dt;
     const bool catching_back = (phase_ == Phase::Catching || phase_ == Phase::Support) &&
         in.pitch_rad < 0.0F && config_.back_pitch_limit_rad > 0.0F;
@@ -1113,7 +1130,7 @@ class StandUp {
  private:
   // Speed error -> CoM lean target, atan(a/g) with a = -catch_speed_gain*v.
   float speedLeanRef() const noexcept {
-    return std::clamp(std::atan(-config_.catch_speed_gain * speed_filtered_m_s_ / 9.80665F),
+    return std::clamp(std::atan(-config_.catch_speed_gain * speed_filtered_m_s_ / 9.80665F) + speed_integral_rad_,
         -config_.catch_speed_lean_max_rad, config_.catch_speed_lean_max_rad);
   }
 
@@ -1211,7 +1228,8 @@ class StandUp {
          config_.catch_tracking_margin_m_s, config_.catch_lean_tol_rad, config_.catch_capture_tol_rad,
          config_.catch_body_tol_rad, config_.catch_rate_tol_rad_s, config_.catch_speed_tol_m_s,
          config_.catch_settle_s, config_.pitch_limit_rad, config_.back_pitch_limit_rad,
-         config_.rolling_handoff_speed_m_s, config_.body_level_arm_hip_rad,
+         config_.rolling_handoff_speed_m_s, config_.catch_speed_integral_gain,
+         config_.catch_speed_integral_max_rad, config_.body_level_arm_hip_rad,
          config_.body_level_arm_clearance_m, config_.lift_hip_rate_min_rad_s,
          config_.lift_hip_min_travel_rad, config_.lift_hip_accel_rad_s2, config_.lift_hip_release_s,
          config_.lift_hip_travel_rad, config_.lift_max_s, config_.lift_target_clearance_m,
@@ -1268,7 +1286,7 @@ class StandUp {
   bool lift_done_ = false;
   float lift_s_ = 0.0F, b4_clear_s_ = 0.0F, knee_rate_cmd_ = 0.0F, knee_start_rad_ = 0.0F;
   float lift_hip_weight_ = 0.0F;
-  float speed_filtered_m_s_ = 0.0F;
+  float speed_filtered_m_s_ = 0.0F, speed_integral_rad_ = 0.0F;
   bool flip_pitch_initialized_ = false, catch_overlap_ = false;
   float flip_start_pitch_rad_ = 0.0F, lift_clear_s_ = 0.0F, catch_entry_rate_ = 0.0F;
   float catch_stall_s_ = 0.0F;

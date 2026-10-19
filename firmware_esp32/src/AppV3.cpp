@@ -636,6 +636,24 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 standarmclr=%.1f mm (B4 posture/leveling also needs this modelled clearance; 8 = previous)\n",
                   ctrl_.config().standup.body_level_arm_clearance_m * 1000.0F);
     }
+    else if (!std::strcmp(key, "standspdi")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standspdi refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_speed_integral_gain = std::clamp(v, 0.0F, 4.0F);
+      out_.printf("V3 standspdi=%.2f 1/s^2 (B4 ground-speed integral added to the stopping lean target; 0 = off)\n",
+                  ctrl_.config().standup.catch_speed_integral_gain);
+    }
+    else if (!std::strcmp(key, "standspdimax")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standspdimax refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_speed_integral_max_rad = std::clamp(v, 0.0F, 0.12F);
+      out_.printf("V3 standspdimax=%.3f rad (bound of that integral)\n",
+                  ctrl_.config().standup.catch_speed_integral_max_rad);
+    }
     else if (!std::strcmp(key, "standfloorsup")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET standfloorsup refused: DISABLE first");
@@ -1259,6 +1277,9 @@ void AppV3::printTunables() noexcept {
     out_.printf("V3 TUNE standarmhip=%.3f rad (SET standarmhip) standarmclr=%.1f mm (SET standarmclr): "
                 "B4 posture/leveling arming (level_weight in SC rises once armed)\n",
                 su.body_level_arm_hip_rad, su.body_level_arm_clearance_m * 1000.0F);
+    out_.printf("V3 TUNE standspdi=%.2f 1/s^2 (SET standspdi) standspdimax=%.3f rad (SET standspdimax): "
+                "B4 ground-speed integral on the stopping lean target (speed_i in SU)\n",
+                su.catch_speed_integral_gain, su.catch_speed_integral_max_rad);
     out_.printf("V3 TUNE standfloorsup=%d (SET standfloorsup): floor guard after the LQR handoff (Support)\n",
                 su.floor_guard_in_support ? 1 : 0);
     out_.printf("V3 TUNE standbodygain=%.2f (SET standbodygain) standbodymax=%.2f rad/s (SET standbodymax): "
@@ -1882,6 +1903,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
               out.state == V3Controller::State::StandUp ? "catch" : "stopped")
           .str(" lean_ref=").fix(su.capture_lean_target_rad, 3, true)
           .str(" wheel_ref=").fix(su.wheel_lean_ref_rad, 3, true)
+          .str(" speed_i=").fix(su.speed_integral_rad, 3, true)
           .str(" speed_f=").fix(su.speed_filtered_m_s, 3, true)
           .str(" knee_tgt=").fix(su.knee_target_rad, 3)
           .str(" elapsed=").fix(su.phase_elapsed_s, 3)

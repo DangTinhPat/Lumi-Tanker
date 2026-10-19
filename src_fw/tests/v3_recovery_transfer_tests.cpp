@@ -173,6 +173,35 @@ void wheelLoopBrakesTowardStoppingLean() {
   assert(!old.support && (old.failed || old.speed < -.5F));
 }
 
+// Log 20261019: lean held at +0.04 (model) while still rolling back at -0.55 m/s. P-only speed feedback
+// (gain 1/s) targets only atan(0.55/g)=0.056 rad; the bounded integral raises the stopping lean target
+// until the offset is absorbed, and stays inside its bound.
+void speedIntegralRaisesBoundedStoppingLean() {
+  Fixture f(true, -.55F);
+  f.centered();
+  f.in.capture_lean_rad = .04F; f.in.capture_rate_rad_s = 0.0F;
+  f.in.pitch_rad = .05F; f.in.pitch_rate_rad_s = 0.0F;
+  const float gain = f.controller.config().catch_speed_integral_gain;
+  const float bound = f.controller.config().catch_speed_integral_max_rad;
+  assert(gain > 0.0F && bound > 0.0F);
+  float previous = f.out.speed_integral_rad;
+  for (int i = 0; i < 1000; ++i) {
+    f.tick();
+    if (f.out.phase != StandUp::Phase::Catching) break;
+    assert(f.out.speed_integral_rad >= previous - 1e-6F && f.out.speed_integral_rad <= bound + 1e-6F);
+    previous = f.out.speed_integral_rad;
+  }
+  assert(previous > 0.5F * bound);
+  const float proportional = std::atan(f.controller.config().catch_speed_gain * 0.55F / 9.80665F);
+  assert(f.out.capture_lean_target_rad > std::min(proportional + 0.02F, 0.12F) - 1e-3F ||
+         f.out.capture_lean_target_rad >= f.controller.config().catch_speed_lean_max_rad - 1e-3F);
+  Fixture off(true, -.55F);
+  off.controller.config().catch_speed_integral_gain = 0.0F;  // the lift already ran with the default gain
+  const float frozen = off.out.speed_integral_rad;
+  off.centered(); off.run(300);
+  assert(off.out.speed_integral_rad == frozen);
+}
+
 void aCrossingOrShortWindowDoesNotTransfer() {
   Fixture f(true); f.centered();
   f.run(10); // 20 ms < the 40 ms confirmation
@@ -272,6 +301,7 @@ int main() {
   initialLiftIsUnchanged();
   capturedRollingStateTransfers();
   fastRollingStateDoesNotTransfer();
+  speedIntegralRaisesBoundedStoppingLean();
   wheelLoopBrakesTowardStoppingLean();
   aCrossingOrShortWindowDoesNotTransfer();
   existingGuardsStillBlockTransfer();
