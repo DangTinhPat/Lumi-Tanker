@@ -184,6 +184,9 @@ class AppV3 {
   //  - REC [s]: record only (pushes, bumps, turns).
   enum class RecKind : std::uint8_t { None, HipStand, KneeStand, KneeFloor, Free };
   RecKind rec_kind_ = RecKind::None;
+  // Start a free 8 s / 250 Hz REC at every stand-up handoff into Balancing, to identify the wheel
+  // command-to-speed response (wL, wR, wcmd) in the real operating regime. SET recbal 0/1.
+  bool rec_balance_auto_ = true;
   bool rec_active_ = false;
   bool rec_dumping_ = false;
   bool rec_aborted_ = false;

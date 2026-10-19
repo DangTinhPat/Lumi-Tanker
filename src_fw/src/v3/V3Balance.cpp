@@ -370,16 +370,25 @@ std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd
       const float acc_raw = (ga_v1_ - ga_prev_) / dt;
       ga_prev_ = ga_v1_;
       ga_f_ += std::clamp(2.0F * 3.14159265F * 0.7F * dt, 0.0F, 1.0F) * (acc_raw - ga_f_);
-      if (std::abs(ga_f_) < config_.trim_acc_max_a_m_s2 && std::abs(in.pitch_rate_rad_s) < 0.3F) {
+      // Stand-up handoff: use every sample (the centre of the oscillation), not only the quiet turning
+      // points the gate keeps (StandUp::Config::balance_trim_ungated_tau_s).
+      const bool ungated = trim_window_on_ && config_.standup.balance_trim_ungated_tau_s > 0.0F;
+      if (ungated || (std::abs(ga_f_) < config_.trim_acc_max_a_m_s2 && std::abs(in.pitch_rate_rad_s) < 0.3F)) {
         const float target = in.pitch_rad - std::atan(ga_f_ / 9.80665F) - ffPitch();
         const float cur = lqr_.balanceTrim();
-        lqr_.setBalanceTrim(cur + std::clamp(dt / std::max(config_.trim_acc_tau_s, 0.2F), 0.0F, 1.0F) *
-                                      (target - cur));
+        const float tau = ungated ? std::max(config_.standup.balance_trim_ungated_tau_s, 0.2F)
+                                  : std::max(config_.trim_acc_tau_s, 0.2F);
+        lqr_.setBalanceTrim(cur + std::clamp(dt / tau, 0.0F, 1.0F) * (target - cur));
       }
     } else {
       ga_init_ = false;
     }
     updateLearnedTrim(in, ex_station, lqr_.balanceTrim() + ffPitch());
+  }
+  if (trim_window_on_) {
+    // Stand-up handoff: the adaptive trim may refine the seed but not wander off it.
+    const float w = std::max(config_.standup.balance_trim_window_rad, 0.0F);
+    lqr_.setBalanceTrim(std::clamp(lqr_.balanceTrim(), trim_window_center_ - w, trim_window_center_ + w));
   }
   lqr_.reanchorPosition(lqr_x_target_m_ + stand_give_m_);
 

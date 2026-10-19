@@ -144,6 +144,13 @@ AppV3::AppV3() noexcept
   // the motor supply on in the home pose.
   ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(ctrl_.config().lqr_prediction.lag_s);
   ctrl_.config().standup.enabled = true;
+  // 19/10 REC fit (3 recordings, 8.5 s at 250 Hz, both wheels): wheel command-to-speed response is a ~30 ms
+  // delay plus a ~130 ms lag (delay 20-40 ms, lag 100-170 ms within 3 % of the best fit; rmse 4.6-4.8 rad/s
+  // against 5.2-5.5 for the previous 50 ms / 75 ms). Applied AFTER tunedRecovery() so the B4 catch lead
+  // (which takes the lag as its argument) is unchanged. SET lqrdelay 0.05 / SET lqrlag 0.075 restore the
+  // previous prediction; SET lqrlag is clamped to 0.12, so the 0.13 default is only reachable from here.
+  ctrl_.config().lqr_prediction.delay_s = 0.03F;
+  ctrl_.config().lqr_prediction.lag_s = 0.13F;
 }
 
 bool AppV3::begin() noexcept {
@@ -635,6 +642,29 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().standup.body_level_arm_clearance_m = std::clamp(v, 0.0F, 8.0F) * 0.001F;
       out_.printf("V3 standarmclr=%.1f mm (B4 posture/leveling also needs this modelled clearance; 8 = previous)\n",
                   ctrl_.config().standup.body_level_arm_clearance_m * 1000.0F);
+    }
+    else if (!std::strcmp(key, "recbal")) {
+      rec_balance_auto_ = v >= 0.5F;
+      out_.printf("V3 recbal=%d (1 record 8 s at 250 Hz when Balancing starts, then dump RC lines)\n",
+                  rec_balance_auto_ ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "trimtau")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET trimtau refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.balance_trim_ungated_tau_s = v <= 0.0F ? 0.0F : std::clamp(v, 0.3F, 10.0F);
+      out_.printf("V3 trimtau=%.2f s (after a stand-up handoff the trim follows theta_v - atan(a/g) from ALL samples with this tau; 0 = old gated estimate)\n",
+                  ctrl_.config().standup.balance_trim_ungated_tau_s);
+    }
+    else if (!std::strcmp(key, "trimwin")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET trimwin refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.balance_trim_window_rad = std::clamp(v, 0.0F, 0.2F);
+      out_.printf("V3 trimwin=%.3f rad (after a stand-up handoff the LQR trim stays within +-this of its seed; 0 = off)\n",
+                  ctrl_.config().standup.balance_trim_window_rad);
     }
     else if (!std::strcmp(key, "standspdi")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1277,6 +1307,12 @@ void AppV3::printTunables() noexcept {
     out_.printf("V3 TUNE standarmhip=%.3f rad (SET standarmhip) standarmclr=%.1f mm (SET standarmclr): "
                 "B4 posture/leveling arming (level_weight in SC rises once armed)\n",
                 su.body_level_arm_hip_rad, su.body_level_arm_clearance_m * 1000.0F);
+    out_.printf("V3 TUNE recbal=%d (SET recbal): auto REC 8 s at 250 Hz on entering Balancing (wL wR wcmd pitch prate)\n",
+                rec_balance_auto_ ? 1 : 0);
+    out_.printf("V3 TUNE trimtau=%.2f s (SET trimtau): ungated balance-angle observer after a stand-up handoff (0 = gated)\n",
+                su.balance_trim_ungated_tau_s);
+    out_.printf("V3 TUNE trimwin=%.3f rad (SET trimwin): LQR trim window around its seed after a stand-up handoff\n",
+                su.balance_trim_window_rad);
     out_.printf("V3 TUNE standspdi=%.2f 1/s^2 (SET standspdi) standspdimax=%.3f rad (SET standspdimax): "
                 "B4 ground-speed integral on the stopping lean target (speed_i in SU)\n",
                 su.catch_speed_integral_gain, su.catch_speed_integral_max_rad);
@@ -1800,6 +1836,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     if (out.state == V3Controller::State::Balancing) {
       out_.printf("RELEASE pitch=%+.4f seeded_trim=%+.4f estimator=%s\n", imu_.pitch_rad,
                     ctrl_.balanceRef(), floor_balance ? "gyro-dominant" : "base");
+      if (rec_balance_auto_ && !rec_active_ && !rec_dumping_) {
+        startRecording(RecKind::Free, 0.0F, 8.0F, now_us);
+        out_.println("V3 REC auto-start at Balancing: 8 s at 250 Hz (SET recbal 0 disables)");
+      }
     }
   }
   digitalWrite(tap_fw::board::kLed2Gpio, out.legs_locked ? HIGH : LOW);

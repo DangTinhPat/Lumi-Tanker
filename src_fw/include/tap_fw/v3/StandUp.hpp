@@ -65,6 +65,20 @@ class StandUp {
     // added to the stopping lean target so any such offset (up to the bound) is absorbed.
     // 1/s^2; 0 = off. SET standspdi / standspdimax.
     float catch_speed_integral_gain = 0.0F;
+    // After the handoff to the wheel LQR, keep its adaptive balance trim within +-this of the seed
+    // (0 = no window). Robot log 20261019: in a 16 s balance the trim wandered -0.148 .. +0.10 rad
+    // (the trim_acc estimate follows the pitch whenever acceleration is small) while the real
+    // equilibrium sat near -0.05; at trim +0.098 the robot stood at pitch +0.03 and fell forward.
+    // SET trimwin. Does not touch B4.
+    float balance_trim_window_rad = 0.0F;
+    // Balance-angle observer for the handoff: the trim_acc estimate is only updated while
+    // |pitch rate| < 0.3 rad/s and |ground accel| < 0.8 m/s^2. During a large pitch oscillation that
+    // keeps just 8-17 % of the samples, all of them near the turning points, so the gated estimate swings
+    // (REC fits 19/10: gated -0.20 .. +0.06 per run) while the all-samples mean of theta_v - atan(a/g)
+    // is stable (-0.03 .. +0.015, std of the signal 0.23). A positive tau uses every sample with this time
+    // constant [s] (centre of the oscillation = equilibrium) instead of the gate. 0 = previous behaviour.
+    // SET trimtau. Applies only after a stand-up handoff (together with balance_trim_window_rad).
+    float balance_trim_ungated_tau_s = 0.0F;
     float catch_speed_integral_max_rad = 0.08F;
     float catch_speed_filter_s = 0.10F;
     float catch_speed_lean_max_rad = 0.12F;
@@ -391,6 +405,8 @@ class StandUp {
     su.catch_posture_capture_guard = true;
     su.floor_guard_in_support = false;
     su.catch_speed_integral_gain = 1.0F;
+    su.balance_trim_window_rad = 0.06F;
+    su.balance_trim_ungated_tau_s = 2.0F;
     su.catch_speed_integral_max_rad = 0.08F;
     // Robot logs 20261019 (7 trials): the B4 hip rises only 0.19-0.25 rad and stops at about -0.5 rad
     // when lean crosses 0, because the posture (head-level) term arms only after 0.25 rad of hip rise.

@@ -899,6 +899,8 @@ class V3Controller {
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
   bool recovery_pose_held_ = false;
+  bool trim_window_on_ = false;       // recovery handoff: clamp the learned trim near its seed
+  float trim_window_center_ = 0.0F;
   [[nodiscard]] StandUp::Input recoveryInput(const Input& raw) const;
   OscillationGuard guard_{};
   OscillationGuard::Output guard_out_{};

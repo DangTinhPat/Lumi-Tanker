@@ -396,6 +396,8 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
         const float recovery_trim = config_.standup.catch_capture_velocity
             ? standup_state_.capture_equilibrium_rad : 0.0F;
         engageBalance(in, recovery_trim - com_line_hang_, true);
+        trim_window_on_ = config_.standup.balance_trim_window_rad > 0.0F;
+        trim_window_center_ = lqr_.balanceTrim();
         recovery_pose_held_ = config_.standup.capture_first;
         if (recovery_pose_held_) dknee_ = 0.0F;
         lqr_.seedForwardVelocity(ground_v_);
@@ -605,6 +607,7 @@ void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_tr
 
 void V3Controller::engageBalance(const Input& in, float seed, bool preserve_wheel_history) {
   recovery_pose_held_ = false;
+  trim_window_on_ = false;
   if (!preserve_wheel_history) lqr_prediction_.reset();
   resetGuard();
   state_ = State::Balancing;
