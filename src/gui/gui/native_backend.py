@@ -90,6 +90,10 @@ class NativeBackend:
             # the V3 start-up sequence only knows the extended spawn pose)
             if os.environ.get("TAP_SIM_START"):
                 command += ["--start-key", os.environ["TAP_SIM_START"]]
+            # TAP_SIM_ARGS="--standup-set lift=1": extra runner options for A/B trials (shell-split).
+            if os.environ.get("TAP_SIM_ARGS"):
+                import shlex
+                command += shlex.split(os.environ["TAP_SIM_ARGS"])
             self.process = subprocess.Popen(
                 command,
                 cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

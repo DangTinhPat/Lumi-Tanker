@@ -34,6 +34,12 @@ class StandUp {
     // Geometry adapter supplies common-hip rate bounds from IMU + encoders.
     // SET standfloor 0 restores the previous recovery law on the next run.
     bool floor_guard = false;
+    // Keep the floor guard (and its fault) alive after the wheel LQR owns balance (Support).
+    // Robot log 20261019 (two Balancing entries): the guard faulted 0.6 s after handoff with
+    // 19-29 mm of modelled clearance, predicted 4-6 mm, because it demanded 2.1-2.5 rad/s of hip
+    // that the acceleration bound forbids. false = guard only during B4 (Catching).
+    // Core default true (unchanged); tunedRecovery false. SET standfloorsup 1 restores it.
+    bool floor_guard_in_support = true;
     // Opt-in: approach a feasible floor rate at bounded acceleration while
     // predicted clearance is still ABOVE the configured shell margin.
     bool floor_accel_grace = false;
@@ -99,6 +105,65 @@ class StandUp {
     // hip motion away from a COM that is still outside the capture centre.
     // Core opt-in; floor/acceleration/travel constraints remain downstream.
     bool catch_posture_capture_guard = false;
+    // v3.7 B4 lift-then-sweep (operator's plan). Hip rotation lifts the knees
+    // off the floor and its reaction raises the head; when the hip stalls the
+    // head drops back and the shell touches down again (logs 204830: pitch
+    // .34 -> .47, clearance -2.5 mm at B4 0.37 s). While lifting, the hip keeps
+    // a minimum rate (it is not braked by lean) and the knee opens gradually to
+    // raise the whole body (about 100 mm/rad vs 11 mm/rad for the hip, CAD).
+    // Once the modelled clearance is reached, or the capture point passes
+    // lift_cp_max, the usual signed COM law sweeps the hip back. Knee never
+    // refolds. Core opt-in; SET standlift 0 restores the fixed-knee B4.
+    bool catch_lift = false;
+    float lift_hip_rate_min_rad_s = 1.0F;
+    float lift_hip_min_travel_rad = 0.0F;  // hip floor is kept at least until the hip rose this far (0 = off)
+    float lift_hip_accel_rad_s2 = 12.0F;   // hip accel limit while the floor is active (sim: 20-30 rad/s^2 + 1.5-2 rad/s floor pitch the head past the limit by B4 0.4 s)
+    float lift_hip_release_s = 0.15F;
+    // Hip motion pitches the head up by angular-momentum exchange about the axle.
+    // lift_head_rate_limit: scale the hip request down once the head rises faster
+    // than this (rad/s, 0 = off). lift_hip_delay_s: hold the hip this long so the
+    // wheels can spin up first (0 = off).
+    float lift_head_rate_limit_rad_s = 0.0F;
+    // Planted-leg kinematics (sim and log 204830): pitch ~ const - hip - knee, so hip
+    // and knee opening both tilt the head up and the knee also pushes the COM behind
+    // the axle (d lean/d knee ~ -0.7, d lean/d hip ~ -0.06). Pitch-neutral extension:
+    // add -lift_pitch_neutral * knee_rate to the hip request (1 = hip cancels the knee).
+    float lift_pitch_neutral = 0.0F;
+    // Wheel assist (operator): while the hip lifts, accelerate the wheels BACKWARD by
+    // lift_wheel_assist [m/s^2 per rad/s of hip rate]. A backward wheel torque reacts as a
+    // nose-down torque on the body, opposing the head-up reaction of the hip. 0 = off.
+    float lift_wheel_assist = 0.0F;
+    // Signed posture (head level) authority already in B4: the leveling term is one-sided
+    // (it may only lift the hip) until Support, so nothing opposes a head that goes up.
+    // lift_signed_posture lets it also push the hip down while the head is above level.
+    bool lift_signed_posture = false;
+    float lift_hip_delay_s = 0.0F;      // the floor fades out over this time (no on/off jerk)
+    float lift_hip_travel_rad = 0.6F;      // hip floor ends once the hip rose this far
+    float lift_cp_max_rad = 0.10F;         // ... or the capture point passes this
+    float lift_max_s = 0.8F;               // ... or after this long
+    float lift_target_clearance_m = 0.020F;  // modelled clearance that completes the lift
+    // Knee opening target: 0.643 rad = dashboard body height 130 mm (hip-to-axle 98.3 mm,
+    // LegHeight::forHeight). With lift_knee_full the knee opens all the way regardless
+    // of the clearance reached; otherwise it stops once lift_target_clearance_m is met.
+    float lift_knee_max_rad = 0.643F;
+    bool lift_knee_full = true;
+    // Two-stage opening: past lift_knee_stage1_rad the knee only keeps opening while the
+    // COM is near the axle (lean > lift_knee_lean_gate_rad). Knee extension pitches the
+    // head up; doing it with the COM still far behind the axle flips the body (sim).
+    // stage1 = 0 disables the gate.
+    float lift_knee_stage1_rad = 0.0F;
+    float lift_knee_lean_gate_rad = -0.06F;
+    // Pause knee opening while the head is above this pitch (negative = nose up):
+    // knee extension also pitches the head up (sim: flips past the limit). Off at -10.
+    float lift_knee_pitch_stop_rad = -10.0F;
+    float lift_knee_rate_rad_s = 1.5F;
+    float lift_knee_accel_rad_s2 = 15.0F;
+    float lift_knee_tracking_max_rad = 0.20F;
+    // Posture (head level) term arms once the hip has risen this far AND the modelled
+    // clearance is at least this much. Logs 204830: the hip stalls at -0.50 rad (rise
+    // 0.247 < 0.25) with the posture term still disarmed. SET/--standup-set arm_hip, arm_clearance.
+    float body_level_arm_hip_rad = 0.25F;
+    float body_level_arm_clearance_m = 0.008F;
     float recovery_body_gain = 2.5F;
     float recovery_body_damping_s = 0.35F;
     float recovery_body_rate_max_rad_s = 1.0F;
@@ -177,6 +242,7 @@ class StandUp {
     float hip_jacobian = 1.0F;
     float hip_measured_rad = 0.0F;
     float hip_measured_rate_rad_s = 0.0F;
+    float knee_measured_rad = 0.0F;     // mean knee encoder (core offset, >= 0)
     std::array<float, 2> wheel_measured_rad_s{};  // native +Y on both sides
     float carrier_rate_rad_s = 0.0F;    // body + hip + knee angular velocity
     float ground_speed_m_s = 0.0F;      // encoders + carrier, assumes rolling support
@@ -209,6 +275,8 @@ class StandUp {
     float body_level_rate_rad_s = 0.0F;
     float body_rate_filtered_rad_s = 0.0F;
     float hip_rate_rad_s = 0.0F;
+    float knee_rate_rad_s = 0.0F;
+    int lift_state = 0;                // 0 off, 1 lifting (hip floor), 2 knee/clearance only, 3 done
     float phase_elapsed_s = 0.0F;
     float body_clearance_m = 0.0F;
     bool body_clearance_valid = false;
@@ -312,6 +380,17 @@ class StandUp {
     su.rolling_handoff_speed_m_s = 0.30F;
     su.catch_wheel_speed_lean = true;
     su.catch_posture_capture_guard = true;
+    su.floor_guard_in_support = false;
+    // Robot logs 20261019 (7 trials): the B4 hip rises only 0.19-0.25 rad and stops at about -0.5 rad
+    // when lean crosses 0, because the posture (head-level) term arms only after 0.25 rad of hip rise.
+    // The head then drops back (pitch .34 -> .48) and the floor guard faults at B4 ~0.6 s needing
+    // 1.0-1.4 rad/s of hip. Arm the posture term from the start and let it ask for up to 1.5 rad/s
+    // (4 rad/s per rad of pitch; one-sided: it only raises the hip while the head is down).
+    // Rollback: SET standarmhip 0.25, standarmclr 8, standbodygain 2.5, standbodymax 1.
+    su.body_level_arm_hip_rad = 0.0F;
+    su.body_level_arm_clearance_m = 0.0F;
+    su.recovery_body_gain = 4.0F;
+    su.recovery_body_rate_max_rad_s = 1.5F;
     su.catch_hip_rate_max_rad_s = 2.0F;
     // Log 201044: encoders reach -18..-19 rad/s while B4 requests only -16;
     // COM remains behind the axle and falls back again. Operator requests
@@ -364,6 +443,9 @@ class StandUp {
     wheel_predictor_.reset();
     wheel_prediction_armed_ = false;
     wheel_prediction_weight_ = 0.0F;
+    lift_s_ = b4_clear_s_ = knee_rate_cmd_ = lift_hip_weight_ = 0.0F;
+    lift_done_ = false;
+    knee_start_rad_ = knee_cmd_;
     flip_pitch_initialized_ = catch_overlap_ = false;
     lift_clear_s_ = catch_entry_rate_ = 0.0F;
     floor_armed_ = false;
@@ -384,6 +466,8 @@ class StandUp {
     wheel_predictor_.reset();
     wheel_prediction_armed_ = false;
     wheel_prediction_weight_ = 0.0F;
+    lift_s_ = b4_clear_s_ = knee_rate_cmd_ = lift_hip_weight_ = 0.0F;
+    lift_done_ = false;
   }
 
   bool advanceFromKneeling() noexcept {
@@ -604,8 +688,8 @@ class StandUp {
         // existing gimbal layer (V3.3_HANDOFF section 2). Robot log 185251:
         // B4 dives before Support, so waiting for Support alone is too late.
         // Encoder progress + modeled clearance are NOT contact detection.
-        if (out.body_clearance_valid && in.body_clearance_m >= 0.008F &&
-            in.hip_measured_rad - catch_start_hip_rad_ >= 0.25F)
+        if (out.body_clearance_valid && in.body_clearance_m >= config_.body_level_arm_clearance_m &&
+            in.hip_measured_rad - catch_start_hip_rad_ >= config_.body_level_arm_hip_rad)
           body_level_armed_ = true;
         if (body_level_armed_)
           body_level_weight_ = std::min(1.0F, body_level_weight_ + dt / 0.08F);
@@ -616,7 +700,8 @@ class StandUp {
           body_support_weight_ = std::min(1.0F, body_support_weight_ + dt / 0.25F);
         const float posture_rate = config_.recovery_body_gain * in.pitch_rad +
             config_.recovery_body_damping_s * body_rate_filtered_;
-        const float signed_weight = std::max(body_support_weight_, transfer_weight_);
+        const float signed_weight = (config_.catch_lift && config_.lift_signed_posture)
+            ? 1.0F : std::max(body_support_weight_, transfer_weight_);
         body_rate = body_level_weight_ * std::clamp(posture_rate,
             -config_.recovery_body_rate_max_rad_s * signed_weight,
             config_.recovery_body_rate_max_rad_s);
@@ -654,6 +739,53 @@ class StandUp {
         feedback_rate *= 1.0F - weight;
         out.posture_capture_limited = weight > 0.0F;
       }
+      float hip_accel = config_.catch_hip_accel_rad_s2;
+      if (config_.catch_lift && phase_ == Phase::Catching) {
+        lift_s_ += dt;
+        const bool cleared = out.body_clearance_valid &&
+            in.body_clearance_m >= config_.lift_target_clearance_m;
+        b4_clear_s_ = cleared ? b4_clear_s_ + dt : 0.0F;
+        if (b4_clear_s_ >= 0.03F) lift_done_ = true;
+        const bool timed = lift_s_ < config_.lift_max_s;
+        const float hip_rise = in.hip_measured_rad - catch_start_hip_rad_;
+        const bool hip_floor = timed && hip_rise < config_.lift_hip_travel_rad &&
+            out.capture_point_rad < config_.lift_cp_max_rad &&
+            !(lift_done_ && hip_rise >= config_.lift_hip_min_travel_rad);
+        const float lift_blend = catchBlend();
+        // Fade the floor in and out instead of switching it: no rate jerk.
+        const float fade = config_.lift_hip_release_s > 0.0F ? dt / config_.lift_hip_release_s : 1.0F;
+        lift_hip_weight_ = std::clamp(lift_hip_weight_ + (hip_floor ? fade : -fade), 0.0F, 1.0F);
+        if (lift_hip_weight_ > 0.0F) {
+          feedback_rate = std::max(feedback_rate,
+              config_.lift_hip_rate_min_rad_s * lift_blend * lift_hip_weight_);
+          hip_accel = config_.lift_hip_accel_rad_s2;
+        }
+        // Knee: open while the modelled clearance is short; never refold.
+        const bool open_knee = (timed || config_.lift_knee_full) && (!cleared || config_.lift_knee_full) &&
+            in.pitch_rad > config_.lift_knee_pitch_stop_rad &&
+            (config_.lift_knee_stage1_rad <= 0.0F ||
+             knee_cmd_ < knee_start_rad_ + config_.lift_knee_stage1_rad ||
+             in.capture_lean_rad > config_.lift_knee_lean_gate_rad) &&
+            knee_cmd_ < knee_start_rad_ + config_.lift_knee_max_rad - 1.0e-4F;
+        const float knee_target = open_knee ? config_.lift_knee_rate_rad_s * lift_blend : 0.0F;
+        knee_rate_cmd_ += std::clamp(knee_target - knee_rate_cmd_,
+            -config_.lift_knee_accel_rad_s2 * dt, config_.lift_knee_accel_rad_s2 * dt);
+        const float knee_lower = std::max(knee_start_rad_,
+            in.knee_measured_rad - config_.lift_knee_tracking_max_rad);
+        const float knee_upper = std::min(knee_start_rad_ + config_.lift_knee_max_rad,
+            in.knee_measured_rad + config_.lift_knee_tracking_max_rad);
+        const float knee_next = std::clamp(knee_cmd_ + knee_rate_cmd_ * dt,
+            knee_lower, std::max(knee_lower, knee_upper));
+        if (knee_next != knee_cmd_ + knee_rate_cmd_ * dt) knee_rate_cmd_ = 0.0F;  // no windup
+        knee_cmd_ = knee_next;
+        if (config_.lift_head_rate_limit_rad_s > 0.0F && in.pitch_rate_rad_s < -config_.lift_head_rate_limit_rad_s)
+          feedback_rate *= std::max(0.0F, 1.0F - (-in.pitch_rate_rad_s - config_.lift_head_rate_limit_rad_s) /
+              config_.lift_head_rate_limit_rad_s);
+        if (lift_s_ < config_.lift_hip_delay_s) feedback_rate = 0.0F;
+        feedback_rate -= config_.lift_pitch_neutral * knee_rate_cmd_;
+        out.lift_state = hip_floor ? 1 : lift_done_ ? 3 : 2;
+      }
+      out.knee_rate_rad_s = knee_rate_cmd_;
       out.hip_feedback_rate_rad_s = feedback_rate;
       const float blend = catchBlend();
       // Continue the ongoing lift velocity while capture progressively takes
@@ -662,7 +794,7 @@ class StandUp {
       const float rate = (1.0F - blend) * catch_entry_rate_ + blend * feedback_rate;
       const float previous_hip_rate = hip_rate_cmd_;
       hip_rate_cmd_ += std::clamp(rate - hip_rate_cmd_,
-          -config_.catch_hip_accel_rad_s2 * dt, config_.catch_hip_accel_rad_s2 * dt);
+          -hip_accel * dt, hip_accel * dt);
       // Intersect travel and tracking bounds; never wind up against a stall
       // or silently extend the allowed travel when encoder tracking is lost.
       const float lower = std::max(catch_start_hip_rad_ - config_.catch_hip_travel_rad,
@@ -676,7 +808,7 @@ class StandUp {
       }
       const float requested_hip = hip_cmd_ + hip_rate_cmd_ * dt;
       float filtered_hip = requested_hip;
-      if (config_.floor_guard) {
+      if (config_.floor_guard && (!supported_hip || config_.floor_guard_in_support)) {
         out.floor_bounds_valid = in.floor_bounds_valid;
         out.floor_clearance_rate_m_s = in.floor_clearance_rate_m_s;
         out.floor_predicted_clearance_m = in.floor_predicted_clearance_m;
@@ -699,9 +831,9 @@ class StandUp {
           const float position_rate_upper = std::min(config_.catch_hip_rate_max_rad_s,
               (upper - hip_cmd_) / dt);
           const float actuator_lower = std::max(position_rate_lower,
-              previous_hip_rate - config_.catch_hip_accel_rad_s2 * dt);
+              previous_hip_rate - hip_accel * dt);
           const float actuator_upper = std::min(position_rate_upper,
-              previous_hip_rate + config_.catch_hip_accel_rad_s2 * dt);
+              previous_hip_rate + hip_accel * dt);
           const float rate_lower = std::max(actuator_lower, in.floor_hip_rate_lower_rad_s);
           const float rate_upper = std::min(actuator_upper, in.floor_hip_rate_upper_rad_s);
           out.floor_hip_rate_lower_rad_s = rate_lower;
@@ -868,7 +1000,10 @@ class StandUp {
         servo_accel = std::clamp(9.80665F * std::sin(theta) +
             length / config_.catch_wheel_lag_s * (wheel_rate + omega * (theta - wheel_lean_ref)),
             -config_.catch_accel_max, config_.catch_accel_max);
-      const float accel = (1.0F - servo_weight) * legacy_accel + servo_weight * servo_accel;
+      float accel = (1.0F - servo_weight) * legacy_accel + servo_weight * servo_accel;
+      if (config_.catch_lift && config_.lift_wheel_assist != 0.0F && lift_hip_weight_ > 0.0F)
+        accel = std::clamp(accel - config_.lift_wheel_assist * lift_hip_weight_ * std::max(hip_rate_cmd_, 0.0F),
+            -config_.catch_accel_max, config_.catch_accel_max);
       out.wheel_accel_m_s2 = accel;
       const float vmax = config_.catch_wheel_max_rad_s * in.wheel_radius_m;
       // Bounds remain ordered even if the robot is rolling faster than vmax.
@@ -1017,6 +1152,11 @@ class StandUp {
          config_.catch_wheel_delay_s > 0.15F || !std::isfinite(config_.catch_wheel_lag_s) ||
          config_.catch_wheel_lag_s < 0.015F || config_.catch_wheel_lag_s > 0.12F ||
          config_.catch_wheel_delay_s + config_.catch_wheel_lag_s > 0.25F)) return false;
+    if (config_.catch_lift &&
+        (!std::isfinite(in.knee_measured_rad) || !std::isfinite(config_.lift_cp_max_rad) ||
+         config_.lift_knee_max_rad > 0.8F || config_.lift_knee_rate_rad_s > 3.0F ||
+         config_.lift_knee_accel_rad_s2 <= 0.0F || config_.lift_knee_accel_rad_s2 > 60.0F || config_.lift_hip_rate_min_rad_s >
+             config_.catch_hip_rate_max_rad_s)) return false;
     if (config_.catch_capture_point_hip &&
         (!std::isfinite(config_.catch_capture_rate_filter_s) || config_.catch_capture_rate_filter_s < 0.0F))
       return false;
@@ -1071,7 +1211,12 @@ class StandUp {
          config_.catch_tracking_margin_m_s, config_.catch_lean_tol_rad, config_.catch_capture_tol_rad,
          config_.catch_body_tol_rad, config_.catch_rate_tol_rad_s, config_.catch_speed_tol_m_s,
          config_.catch_settle_s, config_.pitch_limit_rad, config_.back_pitch_limit_rad,
-         config_.rolling_handoff_speed_m_s,
+         config_.rolling_handoff_speed_m_s, config_.body_level_arm_hip_rad,
+         config_.body_level_arm_clearance_m, config_.lift_hip_rate_min_rad_s,
+         config_.lift_hip_min_travel_rad, config_.lift_hip_accel_rad_s2, config_.lift_hip_release_s,
+         config_.lift_hip_travel_rad, config_.lift_max_s, config_.lift_target_clearance_m,
+         config_.lift_knee_max_rad, config_.lift_knee_rate_rad_s,
+         config_.lift_knee_accel_rad_s2, config_.lift_knee_tracking_max_rad,
          config_.timeout_s}) {
       if (!std::isfinite(v) || v < 0.0F) return false;
     }
@@ -1120,6 +1265,9 @@ class StandUp {
   float hip_capture_rate_filtered_ = 0.0F;
   bool floor_armed_ = false;
   float floor_arm_s_ = 0.0F;
+  bool lift_done_ = false;
+  float lift_s_ = 0.0F, b4_clear_s_ = 0.0F, knee_rate_cmd_ = 0.0F, knee_start_rad_ = 0.0F;
+  float lift_hip_weight_ = 0.0F;
   float speed_filtered_m_s_ = 0.0F;
   bool flip_pitch_initialized_ = false, catch_overlap_ = false;
   float flip_start_pitch_rad_ = 0.0F, lift_clear_s_ = 0.0F, catch_entry_rate_ = 0.0F;

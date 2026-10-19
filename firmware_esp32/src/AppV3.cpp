@@ -618,6 +618,53 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 standpostguard=%d (B4 posture cannot add outward hip motion while COM/CP remain off-centre)\n",
                   ctrl_.config().standup.catch_posture_capture_guard ? 1 : 0);
     }
+    else if (!std::strcmp(key, "standarmhip")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standarmhip refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.body_level_arm_hip_rad = std::clamp(v, 0.0F, 0.25F);
+      out_.printf("V3 standarmhip=%.3f rad (B4 posture/leveling arms once the hip rose this far; 0.25 = previous)\n",
+                  ctrl_.config().standup.body_level_arm_hip_rad);
+    }
+    else if (!std::strcmp(key, "standarmclr")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standarmclr refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.body_level_arm_clearance_m = std::clamp(v, 0.0F, 8.0F) * 0.001F;
+      out_.printf("V3 standarmclr=%.1f mm (B4 posture/leveling also needs this modelled clearance; 8 = previous)\n",
+                  ctrl_.config().standup.body_level_arm_clearance_m * 1000.0F);
+    }
+    else if (!std::strcmp(key, "standfloorsup")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standfloorsup refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.floor_guard_in_support = v >= 0.5F;
+      out_.printf("V3 standfloorsup=%d (1 floor guard also after the LQR handoff, 0 guard only in B4)\n",
+                  ctrl_.config().standup.floor_guard_in_support ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standbodygain")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standbodygain refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.recovery_body_gain = std::clamp(v, 0.5F, 8.0F);
+      out_.printf("V3 standbodygain=%.2f (hip rate per rad of body pitch in the B4 posture term; 2.5 = previous)\n",
+                  ctrl_.config().standup.recovery_body_gain);
+    }
+    else if (!std::strcmp(key, "standbodymax")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standbodymax refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.recovery_body_rate_max_rad_s =
+          std::clamp(v, 0.2F, ctrl_.config().standup.catch_hip_rate_max_rad_s);
+      out_.printf("V3 standbodymax=%.2f rad/s (cap of the B4 posture hip rate; 1.0 = previous; <= hip cap %.1f)\n",
+                  ctrl_.config().standup.recovery_body_rate_max_rad_s,
+                  ctrl_.config().standup.catch_hip_rate_max_rad_s);
+    }
     else if (!std::strcmp(key, "standhandoff")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET standhandoff refused: DISABLE first");
@@ -1209,6 +1256,14 @@ void AppV3::printTunables() noexcept {
                 "standhospeed=%.2f m/s (SET standhospeed, 0 = cap+margin)\n",
                 su.catch_wheel_speed_lean ? 1 : 0, su.catch_speed_gain, su.catch_speed_lean_max_rad,
                 su.rolling_handoff_speed_m_s);
+    out_.printf("V3 TUNE standarmhip=%.3f rad (SET standarmhip) standarmclr=%.1f mm (SET standarmclr): "
+                "B4 posture/leveling arming (level_weight in SC rises once armed)\n",
+                su.body_level_arm_hip_rad, su.body_level_arm_clearance_m * 1000.0F);
+    out_.printf("V3 TUNE standfloorsup=%d (SET standfloorsup): floor guard after the LQR handoff (Support)\n",
+                su.floor_guard_in_support ? 1 : 0);
+    out_.printf("V3 TUNE standbodygain=%.2f (SET standbodygain) standbodymax=%.2f rad/s (SET standbodymax): "
+                "B4 posture term hip_rate=clamp(gain*pitch+damping*gyro_f, +-max) once armed\n",
+                su.recovery_body_gain, su.recovery_body_rate_max_rad_s);
     out_.printf("V3 TUNE standpostguard=%d (SET standpostguard): B4 transfer posture projection, "
                 "COM/CP same side, lean fade=0.015..0.030 rad; initial lift and Support unchanged\n",
                 su.catch_posture_capture_guard ? 1 : 0);

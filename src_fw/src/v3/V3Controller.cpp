@@ -36,6 +36,7 @@ StandUp::Input V3Controller::recoveryInput(const Input& raw) const {
   si.hip_jacobian = capture.d_hip;
   si.hip_measured_rad = hip_meas_;
   si.hip_measured_rate_rad_s = hip_rate_meas_;
+  si.knee_measured_rad = knee_meas_;
   si.wheel_measured_rad_s = raw.wheel_rad_s;
   si.carrier_rate_rad_s = raw.pitch_rate_rad_s + hip_rate_meas_ + knee_rate_meas_;
   si.ground_speed_m_s = ground_v_;

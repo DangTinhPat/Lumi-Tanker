@@ -53,6 +53,7 @@ struct Options {
   std::string start_key = "spawn_extended";   // --start-key NAME: the MJCF keyframe the robot starts in ("home" = the lying pose)
   double wheel_torque = 0.13;   // regular/rated cap; --wheel-torque overrides every phase [N.m]
   bool wheel_torque_override = false;
+  bool wheel_torque_whatif = false;   // --wheel-torque-whatif: allow > 0.20 N.m for hypothetical (non-hardware) trials
   // --leg-actuator pos|delta_i: how the four leg joints are driven. pos (default, v3.5.2) models the GDS68
   // position loop the firmware commands with Set_Input_Pos (no Kt, no Iq feedback, no gravity model in the
   // controller); delta_i models the older current-compensated torque path.
@@ -64,6 +65,8 @@ struct Options {
   // faster, overlapping recovery tuned in this simulator.
   bool standup_sim_profile = true;
   bool standup_skip_pitching = true;   // --standup-skip-pitching 0: keep the separate pitch-to-level flip
+  // --standup-set key=value[,key=value]: override StandUp::Config fields for A/B runs (lift, lift_hip_min, ...).
+  std::vector<std::pair<std::string, double>> standup_overrides;
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -118,6 +121,7 @@ Options parseOptions(int argc, char** argv) {
       out.wheel_torque = number(next(), "--wheel-torque");
       out.wheel_torque_override = true;
     }
+    else if (arg == "--wheel-torque-whatif") out.wheel_torque_whatif = true;
     else if (arg == "--leg-actuator") {
       const std::string kind = next();
       if (kind != "pos" && kind != "delta_i") throw std::invalid_argument("--leg-actuator must be pos or delta_i");
@@ -125,6 +129,15 @@ Options parseOptions(int argc, char** argv) {
     }
     else if (arg == "--standup-skip-pitching") out.standup_skip_pitching = number(next(), "--standup-skip-pitching") != 0.0;
     else if (arg == "--standup-profile") out.standup_sim_profile = std::string(next()) != "fw";
+    else if (arg == "--standup-set") {
+      std::stringstream list(next());
+      std::string item;
+      while (std::getline(list, item, ',')) {
+        const auto eq = item.find('=');
+        if (eq == std::string::npos) throw std::invalid_argument("--standup-set expects key=value");
+        out.standup_overrides.emplace_back(item.substr(0, eq), number(item.substr(eq + 1).c_str(), "--standup-set"));
+      }
+    }
     else if (arg == "--plain-balance") out.plain_balance = number(next(), "--plain-balance") != 0.0;
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--at") {
@@ -152,7 +165,7 @@ Options parseOptions(int argc, char** argv) {
       out.sensor_hz <= 0.0 || out.sensor_hz > out.physics_hz || out.run_for_s < 0.0 ||
       out.state_hz <= 0.0 || out.state_hz > out.sensor_hz ||
       out.wheel_delay_s < 0 || out.wheel_delay_s > .1 || out.wheel_lag_s < 0 || out.wheel_lag_s > .12 ||
-      out.wheel_torque <= 0.0 || out.wheel_torque > 0.20)
+      out.wheel_torque <= 0.0 || out.wheel_torque > (out.wheel_torque_whatif ? 2.0 : 0.20))
     throw std::invalid_argument("invalid simulation rate or duration");
   return out;
 }
@@ -171,7 +184,11 @@ class GimV3Runner {
     // Base cap 0.13 N.m; recovery can request a bounded 0.20 N.m window.
     // --wheel-torque explicitly overrides both base and recovery phases.
     for (std::size_t side = 0; side < wheels_.size(); ++side) {
-      wheels_[side] = robot_control::SimBl4012Wheel({static_cast<std::uint8_t>(side + 1), static_cast<float>(options_.wheel_torque)});
+      robot_control::SimBl4012Wheel::Config wheel_config{static_cast<std::uint8_t>(side + 1),
+                                                         static_cast<float>(options_.wheel_torque)};
+      // What-if: no torque fall-off above the rated 400 rpm either (flat torque up to the 1000 rpm cap).
+      if (options_.wheel_torque_whatif) wheel_config.rated_speed_rad_s = wheel_config.max_speed_rad_s;
+      wheels_[side] = robot_control::SimBl4012Wheel(wheel_config);
     }
     bindModel();
     wheel_delay_ticks_ = static_cast<std::size_t>(std::lround(options_.wheel_delay_s * options_.sensor_hz));
@@ -266,6 +283,46 @@ class GimV3Runner {
         config.standup = tap_fw::v3::StandUp::tunedRecovery(static_cast<float>(options.wheel_lag_s));
         config.standup.skip_pitching = options.standup_skip_pitching;
       }
+      for (const auto& [key, v] : options.standup_overrides) {
+        auto& su = config.standup;
+        const auto f = static_cast<float>(v);
+        if (key == "lift") su.catch_lift = v >= 0.5;
+        else if (key == "lift_hip_min") su.lift_hip_rate_min_rad_s = f;
+        else if (key == "lift_hip_travel") su.lift_hip_travel_rad = f;
+        else if (key == "lift_hip_mintravel") su.lift_hip_min_travel_rad = f;
+        else if (key == "lift_hip_accel") su.lift_hip_accel_rad_s2 = f;
+        else if (key == "lift_hip_release") su.lift_hip_release_s = f;
+        else if (key == "lift_cp") su.lift_cp_max_rad = f;
+        else if (key == "lift_s") su.lift_max_s = f;
+        else if (key == "lift_clearance") su.lift_target_clearance_m = f;
+        else if (key == "knee_max") su.lift_knee_max_rad = f;
+        else if (key == "knee_rate") su.lift_knee_rate_rad_s = f;
+        else if (key == "knee_accel") su.lift_knee_accel_rad_s2 = f;
+        else if (key == "knee_track") su.lift_knee_tracking_max_rad = f;
+        else if (key == "knee_full") su.lift_knee_full = v >= 0.5;
+        else if (key == "arm_hip") su.body_level_arm_hip_rad = f;
+        else if (key == "arm_clearance") su.body_level_arm_clearance_m = f;
+        else if (key == "accel_max") su.catch_accel_max = f;
+        else if (key == "hip_accel") { su.catch_hip_accel_rad_s2 = f; su.lift_hip_accel_rad_s2 = f; }
+        else if (key == "hip_rate_max") su.catch_hip_rate_max_rad_s = f;
+        else if (key == "signed_posture") su.lift_signed_posture = v >= 0.5;
+        else if (key == "body_gain") su.recovery_body_gain = f;
+        else if (key == "body_damp") su.recovery_body_damping_s = f;
+        else if (key == "body_rate_max") su.recovery_body_rate_max_rad_s = f;
+        else if (key == "level") su.catch_body_leveling = v >= 0.5;
+        else if (key == "wheel_assist") su.lift_wheel_assist = f;
+        else if (key == "pitch_neutral") su.lift_pitch_neutral = f;
+        else if (key == "knee_stage1") su.lift_knee_stage1_rad = f;
+        else if (key == "knee_gate") su.lift_knee_lean_gate_rad = f;
+        else if (key == "fold") su.fold_travel_rad = f;
+        else if (key == "head_rate") su.lift_head_rate_limit_rad_s = f;
+        else if (key == "hip_delay") su.lift_hip_delay_s = f;
+        else if (key == "knee_pitch_stop") su.lift_knee_pitch_stop_rad = f;
+        else if (key == "hip_gain") su.catch_hip_gain = f;
+        else if (key == "wheel_max") su.catch_wheel_max_rad_s = f;
+        else if (key == "floor") su.floor_guard = v >= 0.5;
+        else throw std::invalid_argument("unknown --standup-set key: " + key);
+      }
       config.standup.enabled = true;
       config.standup.hold_at_kneel = false;
       config.standup.hold_after_flip = false;
@@ -338,6 +395,12 @@ class GimV3Runner {
       joint.position_sensor = id(model_, mjOBJ_SENSOR, pos[i]);
       joint.velocity_sensor = id(model_, mjOBJ_SENSOR, vel[i]);
       joint.actuator = id(model_, mjOBJ_ACTUATOR, act[i]);
+      // gim_dynamic.xml clamps each wheel motor to its MJCF ctrlrange (+-0.13 N.m): the runner's 0.20 N.m
+      // "peak" is only a command and never reached the plant. A what-if run widens the range to the cap.
+      if ((i == 2 || i == 5) && options_.wheel_torque_whatif) {
+        model_->actuator_ctrlrange[2 * joint.actuator] = -options_.wheel_torque;
+        model_->actuator_ctrlrange[2 * joint.actuator + 1] = options_.wheel_torque;
+      }
       for (const auto binding : {std::pair<int, int>{joint.position_sensor, mjSENS_JOINTPOS},
                                  {joint.velocity_sensor, mjSENS_JOINTVEL}}) {
         if (model_->sensor_type[binding.first] != binding.second ||
@@ -747,7 +810,7 @@ class GimV3Runner {
       const bool recovery_peak = output_.state == V3Controller::State::StandUp &&
           controller_.standupState().wheel_peak_requested && !options_.wheel_torque_override;
       const float torque_cap = recovery_peak ? 0.20F : static_cast<float>(options_.wheel_torque);
-      wheel.setMaxTorqueNm(torque_cap);
+      wheel.setMaxTorqueNm(torque_cap, options_.wheel_torque_whatif ? 2.0F : 0.20F);
       // Reported wheel lag is speed-response lag, not motor-current lag.
       const double alpha = options_.wheel_lag_s > 0 ? dt / (options_.wheel_lag_s + dt) : 1;
       if (active && output_.wheels_enabled) {
@@ -830,6 +893,7 @@ class GimV3Runner {
               << "|leg_iq_lk=" << leg_measured_current_[1]
               << "|wheel_tq_l=" << data_->ctrl[joints_[2].actuator]
               << "|wheel_tq_r=" << data_->ctrl[joints_[5].actuator]
+              << "|wheel_force_l=" << data_->actuator_force[joints_[2].actuator]
               << "|sus_dz=" << controller_.suspensionOffset()
               << "|sus_db=" << controller_.suspensionDeadband()
               << "|roll_est=" << controller_.rollEstimate()
@@ -840,6 +904,8 @@ class GimV3Runner {
               << "|su_lean=" << controller_.standupLean()
               << "|su_hip=" << controller_.standupState().hip_target_rad
               << "|su_wheel=" << controller_.standupState().wheel_rad_s
+              << "|su_lift=" << controller_.standupState().lift_state
+              << "|su_knee_rate=" << controller_.standupState().knee_rate_rad_s
               << "|guard_risk=" << controller_.guardRisk()
               << "|guard_amp=" << controller_.guardAmplitude()
               << "|guard_raise=" << controller_.guardRaise()

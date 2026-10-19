@@ -326,8 +326,9 @@ class SimBl4012Wheel {
   float targetSpeedRadS() const { return target_speed_rad_s_; }
   bool settling() const { return settle_remaining_s_ > 0.0F; }
   std::uint8_t motorId() const { return cfg_.motor_id; }
-  void setMaxTorqueNm(float value) noexcept {
-    cfg_.max_torque_nm = std::clamp(value, 0.0F, 0.20F);
+  // The hardware bound is 0.20 N.m; a what-if run may lift the ceiling (and Config::rated_speed_rad_s) beyond it.
+  void setMaxTorqueNm(float value, float ceiling_nm = 0.20F) noexcept {
+    cfg_.max_torque_nm = std::clamp(value, 0.0F, ceiling_nm);
   }
 
  private:
