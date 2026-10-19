@@ -79,6 +79,11 @@ class StandUp {
     // constant [s] (centre of the oscillation = equilibrium) instead of the gate. 0 = previous behaviour.
     // SET trimtau. Applies only after a stand-up handoff (together with balance_trim_window_rad).
     float balance_trim_ungated_tau_s = 0.0F;
+    // The handoff seed (recovery_trim - com_line_hang) sat 0.034 rad behind the oscillation centre of
+    // theta_v - atan(a/g) in the 19/10 REC runs (seed -0.041, centre -0.007): the LQR starts away from its
+    // balance angle and falls backward before the observer converges. Added to the seed; the trim window
+    // is centred on the shifted seed. SET trimseed.
+    float balance_trim_seed_offset_rad = 0.0F;
     float catch_speed_integral_max_rad = 0.08F;
     float catch_speed_filter_s = 0.10F;
     float catch_speed_lean_max_rad = 0.12F;
@@ -407,6 +412,7 @@ class StandUp {
     su.catch_speed_integral_gain = 1.0F;
     su.balance_trim_window_rad = 0.06F;
     su.balance_trim_ungated_tau_s = 2.0F;
+    su.balance_trim_seed_offset_rad = 0.034F;
     su.catch_speed_integral_max_rad = 0.08F;
     // Robot logs 20261019 (7 trials): the B4 hip rises only 0.19-0.25 rad and stops at about -0.5 rad
     // when lean crosses 0, because the posture (head-level) term arms only after 0.25 rad of hip rise.

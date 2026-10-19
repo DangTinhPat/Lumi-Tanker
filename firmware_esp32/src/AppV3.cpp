@@ -149,6 +149,8 @@ AppV3::AppV3() noexcept
   // against 5.2-5.5 for the previous 50 ms / 75 ms). Applied AFTER tunedRecovery() so the B4 catch lead
   // (which takes the lag as its argument) is unchanged. SET lqrdelay 0.05 / SET lqrlag 0.075 restore the
   // previous prediction; SET lqrlag is clamped to 0.12, so the 0.13 default is only reachable from here.
+  // A 70 ms / 80 ms prediction (chosen from sim, 19/10 13:29 robot log) could not hold balance: it diverged
+  // within 4-8 s in all four attempts, against 38 s at rest with this 30 ms / 130 ms.
   ctrl_.config().lqr_prediction.delay_s = 0.03F;
   ctrl_.config().lqr_prediction.lag_s = 0.13F;
 }
@@ -656,6 +658,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().standup.balance_trim_ungated_tau_s = v <= 0.0F ? 0.0F : std::clamp(v, 0.3F, 10.0F);
       out_.printf("V3 trimtau=%.2f s (after a stand-up handoff the trim follows theta_v - atan(a/g) from ALL samples with this tau; 0 = old gated estimate)\n",
                   ctrl_.config().standup.balance_trim_ungated_tau_s);
+    }
+    else if (!std::strcmp(key, "trimseed")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET trimseed refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.balance_trim_seed_offset_rad = std::clamp(v, -0.1F, 0.1F);
+      out_.printf("V3 trimseed=%.3f rad (added to the LQR trim seed at the stand-up handoff)\n",
+                  ctrl_.config().standup.balance_trim_seed_offset_rad);
     }
     else if (!std::strcmp(key, "trimwin")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1311,6 +1322,8 @@ void AppV3::printTunables() noexcept {
                 rec_balance_auto_ ? 1 : 0);
     out_.printf("V3 TUNE trimtau=%.2f s (SET trimtau): ungated balance-angle observer after a stand-up handoff (0 = gated)\n",
                 su.balance_trim_ungated_tau_s);
+    out_.printf("V3 TUNE trimseed=%.3f rad (SET trimseed): offset added to the LQR trim seed at the stand-up handoff\n",
+                su.balance_trim_seed_offset_rad);
     out_.printf("V3 TUNE trimwin=%.3f rad (SET trimwin): LQR trim window around its seed after a stand-up handoff\n",
                 su.balance_trim_window_rad);
     out_.printf("V3 TUNE standspdi=%.2f 1/s^2 (SET standspdi) standspdimax=%.3f rad (SET standspdimax): "

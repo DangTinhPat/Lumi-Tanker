@@ -364,6 +364,16 @@ class GimV3Runner {
       else if (key == "carrier") config.tier.wheel_carrier_gain = v;
       else if (key == "wheel_lead") config.lqr_lead_s = v;
       else if (key == "trim_gain") config.lqr_trim_gain = v;
+      else if (key == "lqr_dbc") config.lqr_deadband_comp_rad_s = v;
+      else if (key == "dshare") config.tier.disturbance_share = v;
+      else if (key == "hdb") config.tier.hip_deadband_rad = v;
+      else if (key == "gate") config.tier.reflex_gate = v >= .5;
+      else if (key == "hip_rate") config.tier.rate_rad_s = v;
+      else if (key == "hip_max") config.tier.max_rad = v;
+      else if (key == "lean_share") config.tier.lean_share = v;
+      else if (key == "pred_delay") config.lqr_prediction.delay_s = v;
+      else if (key == "pred_lag") config.lqr_prediction.lag_s = v;
+      else if (key == "lead_adaptive") config.lqr_lead_adaptive = v >= .5;
       else throw std::invalid_argument("unknown --control key: " + key);
     }
     return config;
@@ -667,6 +677,9 @@ class GimV3Runner {
       in.hip_rate_rad_s[side] = static_cast<float>(sensor(joints_[hip].velocity_sensor)) + sensorNoise(.01F);
       in.knee_rate_rad_s[side] = static_cast<float>(sensor(joints_[knee].velocity_sensor)) + sensorNoise(.01F);
       in.wheel_rad_s[side] = static_cast<float>(sensor(joints_[wheel].velocity_sensor)) + sensorNoise(.03F);
+      if (wheel_quant_rad_s_ > 0.0F) {  // experiment: the BL4012 reports speed in ~7 rpm steps
+        in.wheel_rad_s[side] = std::round(in.wheel_rad_s[side] / wheel_quant_rad_s_) * wheel_quant_rad_s_;
+      }
       in.wheel_pos_rad[side] = static_cast<float>(sensor(joints_[wheel].position_sensor)) + sensorNoise(.0005F);
       in.leg_chain_rad += 0.5F * (in.hip_rad[side] + in.knee_rad[side]);
     }
@@ -761,6 +774,9 @@ class GimV3Runner {
       if (wheel_delay_ticks_ > 0) {
         physical_speed = wheel_command_history_[wheel_history_index_][side];
         wheel_command_history_[wheel_history_index_][side] = output_.wheel_cmd_rad_s[side];
+      }
+      if (wheel_deadband_rad_s_ > 0.0F) {  // experiment: the driver ignores the first rad/s of the command
+        physical_speed = std::copysign(std::max(std::abs(physical_speed) - wheel_deadband_rad_s_, 0.0F), physical_speed);
       }
       wheel_target_rad_s_[side] = physical_speed;
     }
@@ -963,6 +979,8 @@ class GimV3Runner {
       robot_control::SimBl4012Wheel({1}), robot_control::SimBl4012Wheel({2})}};
   std::array<std::array<float, 2>, 400> wheel_command_history_{};
   std::size_t wheel_history_index_ = 0, wheel_delay_ticks_ = 0;
+  float wheel_quant_rad_s_ = std::getenv("TAP_SIM_WHEEL_QUANT") ? static_cast<float>(std::atof(std::getenv("TAP_SIM_WHEEL_QUANT"))) : 0.0F;
+  float wheel_deadband_rad_s_ = std::getenv("TAP_SIM_WHEEL_DEADBAND") ? static_cast<float>(std::atof(std::getenv("TAP_SIM_WHEEL_DEADBAND"))) : 0.0F;
   double wheel_enable_elapsed_s_ = 0;
   std::array<float, 2> wheel_target_rad_s_{}, wheel_speed_reference_rad_s_{};
   std::array<Joint, 6> joints_{};

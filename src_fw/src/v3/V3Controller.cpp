@@ -397,6 +397,9 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
             ? standup_state_.capture_equilibrium_rad : 0.0F;
         engageBalance(in, recovery_trim - com_line_hang_, true);
         trim_window_on_ = config_.standup.balance_trim_window_rad > 0.0F;
+        if (trim_window_on_) {
+          lqr_.setBalanceTrim(lqr_.balanceTrim() + config_.standup.balance_trim_seed_offset_rad);
+        }
         trim_window_center_ = lqr_.balanceTrim();
         recovery_pose_held_ = config_.standup.capture_first;
         if (recovery_pose_held_) dknee_ = 0.0F;
