@@ -934,6 +934,13 @@ class V3Controller {
   }
   // com_line angle [rad] and its partials by hip/knee at core leg offsets.
   struct ComLine { float angle, d_hip, d_knee, height_m, pitch_inertia_at_axle; };
+  struct ComCache {
+    float hip = 0.0F, knee = 0.0F, dx = 0.0F;
+    ComLine value{};
+    bool valid = false;
+  };
+  mutable std::array<ComCache, 4> com_cache_{};
+  mutable std::size_t com_cache_next_ = 0U;
   void resetReadyStill() noexcept;
   [[nodiscard]] bool readyStill(const Input& in, float body_pitch, float body_rate) noexcept;
   [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;

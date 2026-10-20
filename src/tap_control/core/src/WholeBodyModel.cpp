@@ -1,4 +1,5 @@
 #include "robot_control/WholeBodyModel.hpp"
+#include "robot_control/HotPath.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,18 +9,18 @@ namespace robot_control {
 namespace {
 struct Point { float x, z; };
 struct Rotation { float c, s; };
-Rotation rotation(float angle) {return {std::cos(angle),std::sin(angle)};}
-Point rotate(Point p, Rotation r) {
+TAP_HOT Rotation rotation(float angle) {return {std::cos(angle),std::sin(angle)};}
+TAP_HOT Point rotate(Point p, Rotation r) {
   return {r.c*p.x+r.s*p.z, -r.s*p.x+r.c*p.z};
 }
-Point add(Point a, Point b) { return {a.x+b.x, a.z+b.z}; }
-Point derivative(Point p, Rotation r) {
+TAP_HOT Point add(Point a, Point b) { return {a.x+b.x, a.z+b.z}; }
+TAP_HOT Point derivative(Point p, Rotation r) {
   const Point rotated = rotate(p, r);
   return {rotated.z, -rotated.x};
 }
 }
 
-WholeBodyModel::Result WholeBodyModel::compute(float lh, float lk,
+TAP_HOT WholeBodyModel::Result WholeBodyModel::compute(float lh, float lk,
                                                float rh, float rk) const {
   const std::array<float, 2> hips{lh, rh}, knees{lk, rk};
   std::array<Point, 7> com{};
@@ -65,7 +66,7 @@ WholeBodyModel::Result WholeBodyModel::compute(float lh, float lk,
   return out;
 }
 
-WholeBodyModel::LegHeight WholeBodyModel::legHeight(float hip,
+TAP_HOT WholeBodyModel::LegHeight WholeBodyModel::legHeight(float hip,
                                                     float knee) noexcept {
   // Thigh (origins[1]) and shin (origins[2]) x,z offsets are identical for
   // both sides under native +Y axes (see header) - use the left-leg indices
@@ -94,7 +95,7 @@ WholeBodyModel::LegHeight WholeBodyModel::legHeight(float hip,
   return out;
 }
 
-WholeBodyModel::PlanarVelocity WholeBodyModel::imuVelocityThroughLeg(
+TAP_HOT WholeBodyModel::PlanarVelocity WholeBodyModel::imuVelocityThroughLeg(
     float pitch, float pitch_rate, float hip, float knee, float hip_rate,
     float knee_rate, float wheel_rate, float wheel_radius_m) noexcept {
   const auto leg = legHeight(hip, knee);
@@ -112,7 +113,7 @@ WholeBodyModel::PlanarVelocity WholeBodyModel::imuVelocityThroughLeg(
           pitch_rate * swing.z + stretch.z};
 }
 
-WholeBodyModel::SymmetricComJacobian
+TAP_HOT WholeBodyModel::SymmetricComJacobian
 WholeBodyModel::symmetricComOffsetJacobian(float hip, float knee) noexcept {
   SymmetricComJacobian out{};
   if (!std::isfinite(hip) || !std::isfinite(knee)) return out;
@@ -240,7 +241,7 @@ WholeBodyModel::LegGravityTorque WholeBodyModel::bodySupportTorque(
   return out;
 }
 
-float WholeBodyModel::equilibriumPitch(const Result& r) noexcept {
+TAP_HOT float WholeBodyModel::equilibriumPitch(const Result& r) noexcept {
   // Base pitch rotates COM about the axle, not the ground contact point.
   return std::atan2(-r.com_offset_x_m, std::max(r.com_above_axle_m, 0.01F));
 }

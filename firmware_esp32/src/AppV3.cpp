@@ -656,6 +656,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 standgate=%d (B4 handoff lean/capture gates measured from the learned stopping lean target)\n",
                   ctrl_.config().standup.handoff_gate_from_lean_ref ? 1 : 0);
     }
+    else if (!std::strcmp(key, "standrisepost")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standrisepost refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_rise_posture_rate_rad_s = std::clamp(v, 0.0F, 1.5F);
+      out_.printf("V3 standrisepost=%.2f rad/s (B4 levels the body through the hip during/after the knee rise; 0 = off)\n",
+                  ctrl_.config().standup.catch_rise_posture_rate_rad_s);
+    }
     else if (!std::strcmp(key, "standcknee")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET standcknee refused: DISABLE first");
@@ -1391,6 +1400,8 @@ void AppV3::printTunables() noexcept {
                 su.rise_min_quality, su.rise_delay_s, su.rise_wait_max_s);
     out_.printf("V3 TUNE trimseed=%.3f rad (SET trimseed): offset added to the LQR trim seed at the stand-up handoff\n",
                 su.balance_trim_seed_offset_rad);
+    out_.printf("V3 TUNE standrisepost=%.2f rad/s (SET standrisepost): signed body leveling by the hip during/after the B4 knee rise\n",
+                su.catch_rise_posture_rate_rad_s);
     out_.printf("V3 TUNE standhiprel=%.2f rad/s (SET standhiprel): hip walk-back rate after the recovery pose release\n",
                 su.release_hip_rate_rad_s);
     out_.printf("V3 TUNE standheight=%.1f mm (SET standheight): hip-axle height after a stand-up; 0 = full supported %.1f mm\n",
@@ -1984,7 +1995,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" rm=").i32(ctrl_.rollMode())
         .str(" suhold=").i32(ctrl_.recoveryPoseHeld() ? 1 : 0);
     out_.println(b);
-    {
+    // The 15:20 balance build printed only TR and SENS; the WT diagnostic at the TR rate cost
+    // ~0.3 ms of formatting per tick on the control core, so it drops to 1 Hz while balancing.
+    static std::uint32_t wt_div = 0U;
+    if (out.state != V3Controller::State::Balancing || (++wt_div % 28U) == 0U) {
       const auto left = uart1_.diagnostics();
       const auto right = uart2_.diagnostics();
       const auto wheels = tap_fw::board::MotorIds{}.wheel_uart;
@@ -2316,16 +2330,20 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" hipv_rms=").fix(hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F, 3)
       .str(" prof=[").u32(prof_max_[0]).chr(' ').u32(prof_max_[1]).chr(' ').u32(prof_max_[2]).chr(' ')
       .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
+      .str(" heap=").u32(ESP.getFreeHeap()).chr('/').u32(ESP.getMinFreeHeap())
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(b);
   // Bounded transport evidence, separate from requested wcmd and controller
   // snapshots. No motor requests or parameter writes are issued here.
-  tap_fw::DeferredLine left(line, sizeof line);
-  uart1_.format(left);
-  out_.println(left);
-  tap_fw::DeferredLine right(line, sizeof line);
-  uart2_.format(right);
-  out_.println(right);
+  static std::uint32_t wbus_div = 0U;
+  if (ctrl_.state() != V3Controller::State::Balancing || (++wbus_div % 5U) == 0U) {
+    tap_fw::DeferredLine left(line, sizeof line);
+    uart1_.format(left);
+    out_.println(left);
+    tap_fw::DeferredLine right(line, sizeof line);
+    uart2_.format(right);
+    out_.println(right);
+  }
   prof_max_.fill(0U);
   prof_upd_sum_ = 0U;
   prof_upd_n_ = 0U;

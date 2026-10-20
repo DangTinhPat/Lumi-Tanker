@@ -1,4 +1,5 @@
 #include "tap_fw/v3/LegHeight.hpp"
+#include "robot_control/HotPath.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -12,7 +13,7 @@ namespace {
 using robot_control::WholeBodyModel;
 
 // CAD hip angle that puts the axle straight below the hip for a knee angle.
-float hipForAxleBelow(float knee_cad) noexcept {
+TAP_HOT float hipForAxleBelow(float knee_cad) noexcept {
   // The hip rotates the entire two-link vector. Its argument gives the
   // exact downward solution; no iterative FK inside the 500 Hz loop.
   const auto leg = WholeBodyModel::legHeight(0.0F, knee_cad);
@@ -36,7 +37,7 @@ Reference hangReference() noexcept {
 
 }  // namespace
 
-LegPose LegHeight::forKnee(float knee_offset_rad) noexcept {
+TAP_HOT LegPose LegHeight::forKnee(float knee_offset_rad) noexcept {
   LegPose out{};
   if (!std::isfinite(knee_offset_rad)) return out;
   static const Reference ref = hangReference();
@@ -54,12 +55,12 @@ LegPose LegHeight::forKnee(float knee_offset_rad) noexcept {
   return out;
 }
 
-float LegHeight::hangHipCad() noexcept {
+TAP_HOT float LegHeight::hangHipCad() noexcept {
   static const Reference ref = hangReference();
   return ref.hip_cad;
 }
 
-LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
+TAP_HOT LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
                                       float body_pitch_rad) noexcept {
   LegAxleTarget out{};
   if (!std::isfinite(x_world_m) || !std::isfinite(depth_world_m) ||
@@ -91,7 +92,7 @@ LegAxleTarget LegHeight::forAxleOnPlane(float x_world_m, float depth_world_m,
   return out;
 }
 
-float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
+TAP_HOT float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
                                float body_pitch_rad) noexcept {
   const float knee = std::clamp(knee_offset_rad, kKneeMinRad, kKneeMaxRad);
   const auto zero_hip = WholeBodyModel::legHeight(0.0F, knee);
@@ -104,11 +105,11 @@ float LegHeight::hipForKneeAtX(float knee_offset_rad, float x_world_m,
 
 // Constant for the model: computed once (they were a full forKnee each call,
 // several times per control tick).
-float LegHeight::maxHeight() noexcept {
+TAP_HOT float LegHeight::maxHeight() noexcept {
   static const float h = forKnee(kKneeMaxRad).axle_below_hip_m;
   return h;
 }
-float LegHeight::minHeight() noexcept {
+TAP_HOT float LegHeight::minHeight() noexcept {
   static const float h = forKnee(kKneeMinRad).axle_below_hip_m;
   return h;
 }

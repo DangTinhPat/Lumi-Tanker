@@ -1,4 +1,5 @@
 #include "tap_fw/v3/V3Controller.hpp"
+#include "robot_control/HotPath.hpp"
 
 #include "robot_control/BodyClearance.hpp"
 
@@ -102,7 +103,7 @@ V3Controller::Output V3Controller::fault(const char* reason, const Output& base)
   return out;
 }
 
-V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_in) {
+TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_in) {
   wheel_carrier_rad_s_.fill(0.0F);
   bool recovery_roll_updated = false;
   bool recovery_just_engaged = false;
@@ -593,7 +594,7 @@ V3Controller::Output V3Controller::update(const Input& raw, const Command& cmd_i
   return out;
 }
 
-void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_trim_rad) {
+TAP_HOT void V3Controller::updateLearnedTrim(const Input& in, float ex, float current_trim_rad) {
   // Only while genuinely free, calm and standing (not driving): that is
   // exactly when the current trim IS the true balance angle, not just a
   // transient guess. tierVirtual() gate: without the virtual pendulum the
@@ -855,7 +856,7 @@ std::array<float, 2> V3Controller::pidUpdate(const Input& in, const Command& cmd
   return {comp(sign * (sent - yaw) / radius), comp(sign * (sent + yaw) / radius)};
 }
 
-float V3Controller::lqrInertiaLength() noexcept {
+TAP_HOT float V3Controller::lqrInertiaLength() noexcept {
   // I_axle / (m l) of the whole robot at the commanded pose (CAD masses and
   // inertia; wheels roll with the axle). Recomputed only when the pose moves.
   // A captured recovery pose can have a substantial hip offset from the
@@ -877,7 +878,7 @@ float V3Controller::lqrInertiaLength() noexcept {
   return lqr_leff_m_;
 }
 
-std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd) {
+TAP_HOT std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Command& cmd) {
   const Pid& p = config_.pid;  // shared held/lifted thresholds and deadband comp
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
   // Retaining the recovery pose must not suddenly unlock the driving limits.
@@ -1508,7 +1509,7 @@ std::array<float, 2> V3Controller::wbUpdate(const Input& in, const Command& cmd)
   return {cap(sign * (wb_cmd_v_ - yaw) / radius), cap(sign * (wb_cmd_v_ + yaw) / radius)};
 }
 
-void V3Controller::resetReadyStill() noexcept {
+TAP_HOT void V3Controller::resetReadyStill() noexcept {
   still_since_us_ = ready_last_us_ = 0U;
   still_quiet_us_ = still_bad_us_ = still_bad_run_us_ = ready_tip_us_ = 0U;
   still_sum_ = 0.0F;
@@ -1516,7 +1517,7 @@ void V3Controller::resetReadyStill() noexcept {
   still_quiet_ = false;
 }
 
-bool V3Controller::readyStill(const Input& in, float body_pitch, float body_rate) noexcept {
+TAP_HOT bool V3Controller::readyStill(const Input& in, float body_pitch, float body_rate) noexcept {
   const auto& e = config_.engage;
   const float enter = e.still_rate_rad_s;
   const float exit = 1.5F * enter;
@@ -1567,7 +1568,11 @@ bool V3Controller::readyStill(const Input& in, float body_pitch, float body_rate
   return still_quiet_ && still_quiet_us_ >= e.still_us && still_n_ > 0;
 }
 
-V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
+TAP_HOT V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset) const noexcept {
+  for (const auto& entry : com_cache_) {
+    if (entry.valid && entry.hip == hip_offset && entry.knee == knee_offset &&
+        entry.dx == config_.tier.body_com_dx_m) return entry.value;
+  }
   namespace geo = robot_control::geometry;
   const float hip = LegHeight::hangHipCad() + hip_offset;
   const float knee = knee_offset;
@@ -1577,13 +1582,16 @@ V3Controller::ComLine V3Controller::comLine(float hip_offset, float knee_offset)
       geo::parts[0].mass * config_.tier.body_com_dx_m / geo::total_mass_kg;
   const float cz = std::max(body.com_above_axle_m, 0.01F);
   const float den = cx * cx + cz * cz;
-  return {std::atan2(cx, cz),
+  const ComLine result{std::atan2(cx, cz),
           (cz * jac.d_com_offset_x_d_hip - cx * jac.d_com_above_axle_d_hip) / den,
           (cz * jac.d_com_offset_x_d_knee - cx * jac.d_com_above_axle_d_knee) / den, cz,
           body.pitch_inertia_at_axle_kg_m2};
+  com_cache_[com_cache_next_] = {hip_offset, knee_offset, config_.tier.body_com_dx_m, result, true};
+  com_cache_next_ = (com_cache_next_ + 1U) % com_cache_.size();
+  return result;
 }
 
-float V3Controller::legModelError() const noexcept {
+TAP_HOT float V3Controller::legModelError() const noexcept {
   // The sign guard/trace needs only the angle, not a second full Jacobian.
   namespace geo = robot_control::geometry;
   const float hip = LegHeight::hangHipCad() + hipCommand(), knee = kneeCommand();
@@ -1593,7 +1601,7 @@ float V3Controller::legModelError() const noexcept {
   return c_meas_ - std::atan2(x, std::max(model.com_above_axle_m, 0.01F));
 }
 
-void V3Controller::updateVirtualPitch(const Input& in) {
+TAP_HOT void V3Controller::updateVirtualPitch(const Input& in) {
   theta_v_ = in.pitch_rad;
   theta_v_rate_ = in.pitch_rate_rad_s;
   if (!config_.tier.virtual_pitch && !config_.tier.trunk) return;
@@ -1632,7 +1640,7 @@ void V3Controller::updateVirtualPitch(const Input& in) {
       (c.d_hip * hip_rate_meas_ + c.d_knee * knee_rate_meas_);
 }
 
-void V3Controller::updateImuVelocity(const Input& raw, bool free) {
+TAP_HOT void V3Controller::updateImuVelocity(const Input& raw, bool free) {
   imu_velocity_ = ImuVelocity{};
   // Whole-body too: without it the pitch estimate read every acceleration
   // as tilt and kept ~0.026 rad of it seconds into the cruise (gyro-
@@ -1657,7 +1665,7 @@ void V3Controller::updateImuVelocity(const Input& raw, bool free) {
                                                          std::isfinite(v.vertical_m_s)};
 }
 
-void V3Controller::updateWheelLegCoordination(const Input& in) noexcept {
+TAP_HOT void V3Controller::updateWheelLegCoordination(const Input& in) noexcept {
   // A commanded height change already has a paired hip/knee trajectory
   // and balance feed-forward. Do not classify its own carrier motion as a
   // new external push. Use the existing tier law during that transition,
@@ -1734,7 +1742,7 @@ void V3Controller::updateShock(const Input&, bool, float, float) {
 
 #endif
 
-void V3Controller::updateLegLayers(const Input& in, bool active,
+TAP_HOT void V3Controller::updateLegLayers(const Input& in, bool active,
                                   std::array<float,2> wheel_cmd) {
 #ifndef TAP_SPLIT_HOST_PROTOTYPE
   updateTrunk(in,active,wheel_cmd);
@@ -1770,7 +1778,7 @@ void V3Controller::updateLegLayers(const Input& in, bool active,
 #endif
 }
 
-void V3Controller::updateTrunk(const Input& in, bool active,
+TAP_HOT void V3Controller::updateTrunk(const Input& in, bool active,
                                std::array<float, 2> wheel_cmd_rad_s) {
   const Tier& t = config_.tier;
   // Settle after engage and again after every held/lifted spell: the
@@ -1941,7 +1949,7 @@ void V3Controller::updateTrunk(const Input& in, bool active,
   dhip_ += std::clamp(want - dhip_, -step, step);
 }
 
-void V3Controller::predictWheels(const Input& raw, float* rate, float* pos) noexcept {
+TAP_HOT void V3Controller::predictWheels(const Input& raw, float* rate, float* pos) noexcept {
   const WheelPredict& w = config_.wheel_pred;
   const float dt = std::max(raw.dt_s, 1.0e-4F);
   auto ticks = [&](float s) {
@@ -1963,7 +1971,7 @@ void V3Controller::predictWheels(const Input& raw, float* rate, float* pos) noex
   *pos += wp_p_model_ - wp_p_[old];
 }
 
-void V3Controller::updateRoll(const Input& in, bool active) {
+TAP_HOT void V3Controller::updateRoll(const Input& in, bool active) {
   const Roll& r = config_.roll;
   // Body roll against GRAVITY: gyro, pulled toward the accelerometer with
   // the turn's centripetal pull (measured ground speed x measured yaw rate)
@@ -2117,7 +2125,7 @@ void V3Controller::updateRoll(const Input& in, bool active) {
   roll_hip_ = hip;
 }
 
-void V3Controller::coordinateTrunkAxle(float dt_s) noexcept {
+TAP_HOT void V3Controller::coordinateTrunkAxle(float dt_s) noexcept {
   axle_hip_correction_ = 0.0F;
   axle_limited_ = false;
   axle_limit_direction_ = 0.0F;
@@ -2174,7 +2182,7 @@ void V3Controller::coordinateTrunkAxle(float dt_s) noexcept {
   axle_limit_direction_ = target.x_world_m - requested_x;
 }
 
-float V3Controller::kneeHold(float dhip) noexcept {
+TAP_HOT float V3Controller::kneeHold(float dhip) noexcept {
   if (!kneeHoldOn() || dhip == 0.0F) {
     knee_hold_ = 0.0F;
     return 0.0F;
@@ -2194,14 +2202,14 @@ float V3Controller::kneeHold(float dhip) noexcept {
   return knee_hold_;
 }
 
-float V3Controller::planCap(float vmax) const noexcept {
+TAP_HOT float V3Controller::planCap(float vmax) const noexcept {
   const Tier& t = config_.tier;
   if (!envelopeOn()) return std::clamp(t.plan_vmax_m_s, 0.05F, vmax);
   const float l = std::max(pose_.com_above_axle_m, 0.01F);
   return std::clamp(vmax - t.env_catch_rad * std::sqrt(9.80665F * l), 0.05F, vmax);
 }
 
-void V3Controller::updatePlan(float target_v, float dt, bool reset) {
+TAP_HOT void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   const Tier& t = config_.tier;
   if (reset || !plan_init_) {
     plan_v_ = reset ? 0.0F : target_v;
@@ -2253,7 +2261,7 @@ V3Controller::PlanSample V3Controller::planDelayed() const noexcept {
   return planAt(config_.tier.preview_s);
 }
 
-V3Controller::PlanSample V3Controller::planAt(float delay_s) const noexcept {
+TAP_HOT V3Controller::PlanSample V3Controller::planAt(float delay_s) const noexcept {
   const float dt = std::max(plan_dt_, 1.0e-4F);
   std::size_t lag = static_cast<std::size_t>(std::lround(std::max(delay_s, 0.0F) / dt));
   lag = std::min({lag, plan_buf_.size() - 1U, plan_n_ > 0U ? plan_n_ - 1U : 0U});
@@ -2304,7 +2312,7 @@ float V3Controller::heightStopTarget() const noexcept {
   return std::clamp(current + direction * distance, LegHeight::minHeight(), hmax);
 }
 
-void V3Controller::updateHeight(const Input& in, const Command& cmd) {
+TAP_HOT void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   const Height& h = config_.height;
   // A straight knee has no height-preserving fore/aft workspace. Reserve
   // the existing 12 mm for paired trunk motion even if roll is switched off.
@@ -2420,7 +2428,7 @@ void V3Controller::updateHeight(const Input& in, const Command& cmd) {
   legs_moved_us_ = in.now_us;
 }
 
-void V3Controller::updateSuspension(const Input& in) {
+TAP_HOT void V3Controller::updateSuspension(const Input& in) {
   const Tier& t = config_.tier;
   // Specific force along gravity at the IMU (hip origin): its slow mean is
   // gravity (and the accelerometer's scale/bias), the rest is the body's
@@ -2497,7 +2505,7 @@ void V3Controller::updateSuspension(const Input& in) {
       : LegHeight::forHeight(target_height).knee_offset_rad - knee_cmd_rad_;
 }
 
-void V3Controller::applyPoseOffsets(const Input& in) {
+TAP_HOT void V3Controller::applyPoseOffsets(const Input& in) {
   updateSuspension(in);
   const float dk = knee_excite_rad_ + sus_dk_;
   if (dk == 0.0F) {

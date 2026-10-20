@@ -115,7 +115,13 @@ class StandUp {
     // capture errors smaller than this; the wheels keep regulating speed. 0 = off. SET standhipdb.
     float catch_hip_lean_deadband_rad = 0.0F;
     float catch_hip_deadband_after_rad = 0.4F;
-    float catch_rise_handoff_speed_m_s = 0.05F;  // after the rise, hand off only once this slow (filtered)
+    float catch_rise_handoff_speed_m_s = 0.08F;  // after the rise, hand off only once this slow (filtered)
+    // Opening the knee under B4 rotates the body backwards (20/10 14:57: pitch +0.18 -> -0.30 at 0.640 rad, -0.67 at
+    // 0.903 rad, hip offset 0.4-0.8 rad at the hand-over) while the one-sided anti-dive posture only acts for a forward
+    // pitch. During and after the rise the posture term becomes signed and levels the body through the hip at up to
+    // this rate [rad/s]; the hip barely moves the CoM lean (-0.06 lean/rad), so the capture loop is not disturbed.
+    // 0 = off. SET standrisepost.
+    float catch_rise_posture_rate_rad_s = 0.0F;
     bool post_handoff_rise = false;
     float rise_max_pitch_error_rad = 0.30F;
     float rise_max_pitch_rate_rad_s = 3.0F;
@@ -465,6 +471,7 @@ class StandUp {
     su.balance_trim_seed_offset_rad = 0.034F;
     su.balance_trim_seed_measured = true;
     su.release_hip_rate_rad_s = 0.15F;
+    su.catch_rise_posture_rate_rad_s = 0.3F;
     su.rise_wait_max_s = 1.0F;
     su.post_handoff_rise = true;
     su.catch_rise = true;
@@ -805,9 +812,13 @@ class StandUp {
             config_.recovery_body_damping_s * body_rate_filtered_;
         const float signed_weight = (config_.catch_lift && config_.lift_signed_posture)
             ? 1.0F : std::max(body_support_weight_, transfer_weight_);
-        body_rate = body_level_weight_ * std::clamp(posture_rate,
-            -config_.recovery_body_rate_max_rad_s * signed_weight,
-            config_.recovery_body_rate_max_rad_s);
+        float posture_lo = -config_.recovery_body_rate_max_rad_s * signed_weight;
+        float posture_hi = config_.recovery_body_rate_max_rad_s;
+        if (config_.catch_rise && config_.catch_rise_posture_rate_rad_s > 0.0F && (rise_started_ || rise_done_)) {
+          posture_lo = -config_.catch_rise_posture_rate_rad_s;
+          posture_hi = std::min(posture_hi, config_.catch_rise_posture_rate_rad_s);
+        }
+        body_rate = body_level_weight_ * std::clamp(posture_rate, posture_lo, posture_hi);
         out.body_level_weight = body_level_weight_;
         out.body_level_rate_rad_s = body_rate;
         out.body_rate_filtered_rad_s = body_rate_filtered_;
@@ -1365,6 +1376,8 @@ class StandUp {
         if (!std::isfinite(v) || v < 0.0F) return false;
       }
     }
+    if (!std::isfinite(config_.catch_rise_posture_rate_rad_s) || config_.catch_rise_posture_rate_rad_s < 0.0F ||
+        config_.catch_rise_posture_rate_rad_s > 1.5F) return false;
     if (config_.catch_rise &&
         (!std::isfinite(config_.catch_rise_knee_rad) || config_.catch_rise_knee_rad < 0.0F ||
          config_.catch_rise_knee_rad > 2.0F || !std::isfinite(config_.catch_rise_rate_rad_s) ||

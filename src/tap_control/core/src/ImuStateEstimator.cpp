@@ -1,4 +1,5 @@
 #include "robot_control/ImuStateEstimator.hpp"
+#include "robot_control/HotPath.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +30,7 @@ void ImuStateEstimator::reset() noexcept {
   kinematic_initialized_ = false;
 }
 
-ImuStateEstimator::Output ImuStateEstimator::update(
+TAP_HOT ImuStateEstimator::Output ImuStateEstimator::update(
     const std::array<float, 3>& accel, const std::array<float, 3>& gyro,
     float dt_s, float now_s, float commanded_accel, bool pose_changing,
     bool quiet_hint, KinematicVelocity imu_velocity) noexcept {

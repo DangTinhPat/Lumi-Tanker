@@ -1,4 +1,5 @@
 #include "robot_control/LqrBalancer.hpp"
+#include "robot_control/HotPath.hpp"
 
 #include <algorithm>
 #include <array>
@@ -117,11 +118,11 @@ LqrBalancer::LqrBalancer(Config config) : config_(config) {
   reset();
 }
 
-float LqrBalancer::clampFinite(float value, float lo, float hi) noexcept {
+TAP_HOT float LqrBalancer::clampFinite(float value, float lo, float hi) noexcept {
   return std::isfinite(value) ? std::clamp(value, lo, hi) : 0.0F;
 }
 
-void LqrBalancer::rebuildGain() {
+TAP_HOT void LqrBalancer::rebuildGain() {
   if (!table_ready_) {
     solveGainsAt(active_length_m_, gain_, station_gain_, posture_station_gain_);
     ++online_solves_;
@@ -148,7 +149,7 @@ void LqrBalancer::rebuildGain() {
   }
 }
 
-bool LqrBalancer::buildGainTableStep(unsigned points) {
+TAP_HOT bool LqrBalancer::buildGainTableStep(unsigned points) {
   if (table_ready_) return true;
   points = std::clamp(points, 2U, kMaxGainTablePoints);
   if (table_points_ != points) {
@@ -245,7 +246,7 @@ void LqrBalancer::solveGainsAt(float length_m, GainVec& gain,
       config_.station_pitch_rate_cost_scale, config_.station_input_cost_scale);
 }
 
-void LqrBalancer::setComHeight(float com_height_m) {
+TAP_HOT void LqrBalancer::setComHeight(float com_height_m) {
   const float target = std::clamp(
       config_.pendulum_length_per_com_height * std::max(com_height_m, 0.02F),
       config_.min_pendulum_length_m, config_.max_pendulum_length_m);
@@ -270,7 +271,7 @@ void LqrBalancer::reset(float ground_position_m, bool /*floor_contact*/) {
   last_debug_.riccati_iterations = config_.riccati_iterations;
 }
 
-void LqrBalancer::reanchorPosition(float ground_position_m) noexcept {
+TAP_HOT void LqrBalancer::reanchorPosition(float ground_position_m) noexcept {
   if (!std::isfinite(ground_position_m)) return;
   ground_position_target_m_ = ground_position_m;
   station_origin_position_m_ = ground_position_m;
@@ -295,7 +296,7 @@ void LqrBalancer::setStationVelocityReference(float velocity_m_s) noexcept {
   }
 }
 
-float LqrBalancer::adaptiveStationGain(float capture_distance) const noexcept {
+TAP_HOT float LqrBalancer::adaptiveStationGain(float capture_distance) const noexcept {
   const float full = std::max(config_.station_adaptive_full_capture_distance_m,
                               1.0e-4F);
   const float fraction = std::clamp(capture_distance / full, 0.0F, 1.0F);
@@ -303,7 +304,7 @@ float LqrBalancer::adaptiveStationGain(float capture_distance) const noexcept {
   return quiet + (1.0F - quiet) * (1.0F - fraction);
 }
 
-float LqrBalancer::stationReturnVelocity(const RobotState& state,
+TAP_HOT float LqrBalancer::stationReturnVelocity(const RobotState& state,
                                           float pitch_error,
                                           float pitch_rate,
                                           bool hold_station,
@@ -351,7 +352,7 @@ float LqrBalancer::stationReturnVelocity(const RobotState& state,
                      config_.max_ground_velocity_m_s);
 }
 
-float LqrBalancer::solveGroundAcceleration(
+TAP_HOT float LqrBalancer::solveGroundAcceleration(
     const StateVec& state, float station_gain_blend) const noexcept {
   float sum = 0.0F;
   const float blend = std::clamp(station_gain_blend, 0.0F, 1.0F);
@@ -364,7 +365,7 @@ float LqrBalancer::solveGroundAcceleration(
   return -sum;
 }
 
-float LqrBalancer::stationGainBlend(float pitch_error, float pitch_rate,
+TAP_HOT float LqrBalancer::stationGainBlend(float pitch_error, float pitch_rate,
                                     bool hold_station, float dt_s) noexcept {
   if (!hold_station) {
     station_gain_quiet_elapsed_s_ = 0.0F;
@@ -400,7 +401,7 @@ float LqrBalancer::stationGainBlend(float pitch_error, float pitch_rate,
   return station_gain_blend_;
 }
 
-LqrBalancer::Output LqrBalancer::update(const RobotState& state,
+TAP_HOT LqrBalancer::Output LqrBalancer::update(const RobotState& state,
                                         const ControlCommand& command,
                                         bool integrate,
                                         float balance_pitch_ref_rad,
