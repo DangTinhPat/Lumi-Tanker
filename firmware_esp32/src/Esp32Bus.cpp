@@ -260,9 +260,21 @@ bool Esp32UartPort::begin(std::uint32_t baud) noexcept {
   baud_ = baud;
   response_queue_ = xQueueCreate(8U, sizeof(Response));
   if (response_queue_ == nullptr) return false;
-  // The UART is installed inside the worker so its interrupt lives on core 0,
-  // away from the control task and the CAN driver on core 1.
-  if (xTaskCreatePinnedToCore(&Esp32UartPort::taskEntry, name_, 4096U, this, 5, &task_, 0) != pdPASS) {
+  // The UART is installed inside the worker so its interrupt lives on that core.
+  // Default: core 0, away from the control task and the CAN driver on core 1.
+  // TAP_WIFI build: the Wi-Fi stack also runs on core 0 (sdkconfig, not movable) and stalled it for
+  // seconds when the wheels started at Catching, so the wheel bus did not get its commands out
+  // (logs 20/10 19:17-20:00). That build puts the workers on core 1 ABOVE the control task's
+  // priority (21): a 5-priority worker on core 1 was starved by the 18 ms first STANDUP tick and
+  // the wheel feedback went stale ("sensor feedback lost during the stand-up", 19:33). The workers
+  // sleep on a task notification / the UART ISR, so they only take the core for a transaction.
+#ifndef TAP_WHEEL_CORE
+#define TAP_WHEEL_CORE 0
+#endif
+#ifndef TAP_WHEEL_PRIO
+#define TAP_WHEEL_PRIO 5
+#endif
+  if (xTaskCreatePinnedToCore(&Esp32UartPort::taskEntry, name_, 4096U, this, TAP_WHEEL_PRIO, &task_, TAP_WHEEL_CORE) != pdPASS) {
     task_ = nullptr;
     return false;
   }

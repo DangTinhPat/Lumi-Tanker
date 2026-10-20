@@ -93,6 +93,11 @@ class OutSink {
         payload_size_ = 0U;
         // Bound work even when a record cannot be rendered.
         if (text_size_ == 0U) break;
+        // Second consumer (Wi-Fi task): a whole record or nothing, never blocking.
+        if (tee_ != nullptr && !teeSkips()) {
+          if (xStreamBufferSpacesAvailable(tee_) >= text_size_) (void)xStreamBufferSend(tee_, text_, text_size_, 0);
+          else ++tee_dropped_;
+        }
       }
       const auto want = std::min(text_size_ - text_pos_, static_cast<std::size_t>(room));
       const auto sent = out.write(reinterpret_cast<const std::uint8_t*>(text_ + text_pos_), want);
@@ -101,9 +106,22 @@ class OutSink {
       if (sent == 0U) break;
     }
   }
+  void setTee(StreamBufferHandle_t tee) noexcept { tee_ = tee; }
+  // While the robot stands up or balances the Wi-Fi copy carries less: no WT/WBUS diagnostics and
+  // every other SU/SC/SW/SV/SF snapshot (the UART copy is unchanged). Less radio traffic means
+  // fewer Wi-Fi task and interrupt slices on the core that runs the wheel bus workers.
+  void setTeeQuiet(bool quiet) noexcept { tee_quiet_.store(quiet, std::memory_order_relaxed); }
+  [[nodiscard]] std::uint32_t teeDropped() const noexcept { return tee_dropped_; }
   [[nodiscard]] std::uint32_t dropped() const noexcept { return dropped_.load(std::memory_order_relaxed); }
 
  private:
+  bool teeSkips() noexcept {
+    if (!tee_quiet_.load(std::memory_order_relaxed) || text_size_ < 3U) return false;
+    const char a = text_[0], b = text_[1];
+    if ((a == 'W' && b == 'T' && text_[2] == ' ') || (a == 'W' && b == 'B' && text_size_ > 4U && text_[2] == 'U')) return true;
+    if (a == 'S' && (b == 'U' || b == 'C' || b == 'W' || b == 'V' || b == 'F') && text_[2] == ' ') return (tee_snapshot_++ & 1U) != 0U;
+    return false;
+  }
   bool enqueue(const char* data, std::size_t n, std::uint8_t kind) noexcept {
     if (n == 0U) return true;
     if (n > sizeof payload_ || (kind == 0U && n > sizeof text_) ||
@@ -119,6 +137,10 @@ class OutSink {
     return true;
   }
   StreamBufferHandle_t sb_ = nullptr;
+  StreamBufferHandle_t tee_ = nullptr;
+  std::atomic<bool> tee_quiet_{false};
+  std::uint32_t tee_snapshot_ = 0U;
+  std::uint32_t tee_dropped_ = 0U;
   std::atomic<std::uint32_t> dropped_{0U};
   char payload_[1536]{}, text_[1024]{};
   std::size_t payload_size_ = 0U, text_size_ = 0U, text_pos_ = 0U;

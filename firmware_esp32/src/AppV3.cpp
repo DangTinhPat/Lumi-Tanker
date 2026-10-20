@@ -6,6 +6,18 @@
 
 #include <atomic>
 
+#ifndef TAP_WIFI
+#define TAP_WIFI 0
+#endif
+#if TAP_WIFI
+#include <ESPmDNS.h>
+#include <WiFi.h>
+#include <lwip/sockets.h>
+#include <cerrno>
+#if __has_include("tap_hw/WifiSecrets.hpp")
+#include "tap_hw/WifiSecrets.hpp"
+#endif
+#endif
 #include <BLEDevice.h>
 #include <DabbleESP32.h>
 
@@ -35,6 +47,7 @@ constexpr float kTwoPi = 6.28318530717958647692F;
 constexpr std::uint64_t kReportUs = 200'000U;
 constexpr std::uint64_t kTraceUs = 40'000U;
 constexpr std::uint64_t kLeaseUs = 500'000U;        // serial silence while active
+constexpr std::uint64_t kWifiLeaseUs = 1'500'000U;   // same, when the commands arrive over Wi-Fi
 constexpr std::uint64_t kLegFreshUs = 100'000U;     // 0x009 at ~100 Hz
 constexpr std::uint64_t kClosedLoopGraceUs = 500'000U;
 constexpr std::uint64_t kLockTimeoutUs = 5'000'000U;
@@ -75,7 +88,7 @@ constexpr std::array<const char*, 4> kLegNames{"LH", "LK", "RH", "RK"};
 // Joint-test / REC recorder: 250 Hz, 19 int16 channels with fixed scales
 // (printed in the RC BEGIN header), 2000 samples = 8 s, ~88 KB.
 constexpr std::uint64_t kRecPeriodUs = 4'000U;
-constexpr std::size_t kRecMaxSamples = 2000U;
+constexpr std::size_t kRecMaxSamples = 1500U;  // 6 s; 2000 left 1 KB of heap with Wi-Fi up
 constexpr std::size_t kRecChannels = 19U;
 constexpr float kRecScale[kRecChannels] = {
     1e-4F,                                    // cmd: excitation [rad]
@@ -172,10 +185,16 @@ bool AppV3::begin() noexcept {
                  "(that pose is zero). Press START (legs lock, READY), put it on the "
                  "floor and hold it roughly still ~0.5 s until ARMED; it balances 0.5 s "
                  "later or as soon as it tips. DISABLE / ESTOP stop everything.");
+#if TAP_WIFI
+  // The Wi-Fi stack and the Bluedroid BLE stack do not both fit in the internal heap next to the
+  // IRAM-resident control code, so the phone gamepad is off in this build.
+  out_.println("BLE: off (TAP_WIFI build); console over USB serial and Wi-Fi AP TAP-RB, TCP 8023");
+#else
   Dabble.begin("TAP-RB");
   BLEDevice::setCustomGattsHandler(onV3GattsEvent);
   out_.println("BLE: Dabble GamePad as TAP-RB (joystick drive, Start=START, Select=GO, "
                  "Triangle/Cross hold = raise/lower); USB serial GUI also works");
+#endif
   // Shipped configuration: struct defaults (V3Controller.hpp) plus the overrides
   // below. Each override names the SET key that reverts it and the HANDOFF
   // section holding the evidence.
@@ -268,6 +287,15 @@ bool AppV3::begin() noexcept {
                                   &comms_task_, 0) != pdPASS) {
         comms_task_ = nullptr;
       }
+#if TAP_WIFI
+      if (comms_task_ != nullptr) {
+        net_sb_ = xStreamBufferCreate(8192U, 1);
+        if (net_sb_ != nullptr &&
+            xTaskCreatePinnedToCore(&AppV3::netTaskEntry, "v3net", 6144, this, 2, &net_task_, 0) == pdPASS) {
+          out_.setTee(net_sb_);
+        }
+      }
+#endif
     }
   }
 #endif
@@ -299,6 +327,101 @@ void AppV3::commsTaskEntry(void* arg) noexcept {
     vTaskDelay(1);
   }
 }
+
+void AppV3::netTaskEntry(void* arg) noexcept {
+  static_cast<AppV3*>(arg)->netTask();
+  vTaskDelete(nullptr);
+}
+
+#if TAP_WIFI
+// Console over Wi-Fi: the laptop joins the robot's own access point and opens TCP 8023. Lines in
+// go to the same queue as the UART's (so HEARTBEAT keeps the 0.5 s session lease and a lost link
+// disables the robot exactly as unplugging USB does); every output record is copied to the
+// client through net_sb_. One client; a new connection replaces the old one.
+void AppV3::netTask() noexcept {
+  constexpr char kSsid[] = "TAP-RB";
+  constexpr char kPass[] = "taprobot123";
+  WiFi.persistent(false);
+  bool sta = false;
+#ifdef TAP_WIFI_STA_SSID
+  // Join the shared network first (laptop and robot on the same router); the own access point
+  // below is the fallback when it is not reachable within 10 s.
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // modem sleep would add up to ~100 ms to every command
+  WiFi.setAutoReconnect(true);
+  WiFi.setHostname("tap-rb");
+  WiFi.begin(TAP_WIFI_STA_SSID, TAP_WIFI_STA_PASS);
+  for (int i = 0; i < 100 && WiFi.status() != WL_CONNECTED; ++i) vTaskDelay(pdMS_TO_TICKS(100));
+  sta = WiFi.status() == WL_CONNECTED;
+  if (sta && MDNS.begin("tap-rb")) MDNS.addService("tap", "tcp", 8023);
+#endif
+  bool ap = false;
+  if (!sta) {
+    WiFi.mode(WIFI_AP);
+    ap = WiFi.softAP(kSsid, kPass, 6, 0, 1);
+  }
+  WiFiServer server(8023, 1);
+  server.begin();
+  server.setNoDelay(true);
+  char where[96];
+  if (sta) std::snprintf(where, sizeof where, "STA %s ip %s rssi %d tap-rb.local", TAP_WIFI_STA_SSID,
+                         WiFi.localIP().toString().c_str(), static_cast<int>(WiFi.RSSI()));
+  else std::snprintf(where, sizeof where, "AP %s pass %s ip %s", kSsid, kPass, WiFi.softAPIP().toString().c_str());
+  Serial.printf("WIFI %s tcp 8023 ok=%d heap=%u\n", where, (sta || ap) ? 1 : 0,
+                static_cast<unsigned>(ESP.getFreeHeap()));
+  WiFiClient client;
+  char text[sizeof(LineItem::text)];
+  std::size_t text_len = 0U;
+  std::uint8_t pending[512];
+  std::size_t pending_size = 0U, pending_pos = 0U;
+  for (;;) {
+    if (!client || !client.connected()) {
+      if (client) client.stop();
+      WiFiClient incoming = server.accept();
+      if (incoming) {
+        client = incoming;
+        client.setNoDelay(true);
+        client.setTimeout(1);
+        xStreamBufferReset(net_sb_);
+        pending_size = pending_pos = text_len = 0U;
+        client.printf("WIFI client connected, %s\r\n", where);
+      }
+    }
+    if (client && client.connected()) {
+      for (int budget = 128; budget > 0 && client.available() > 0; --budget) {
+        net_rx_ms_.store(millis(), std::memory_order_relaxed);
+        const int c = client.read();
+        if (c < 0 || c == '\r') continue;
+        if (c != '\n') {
+          if (text_len + 1U < sizeof(text)) text[text_len++] = static_cast<char>(c);
+          continue;
+        }
+        text[text_len] = '\0';
+        if (text_len != 0U && rtos_) {
+          LineItem item;
+          std::memcpy(item.text, text, text_len + 1U);
+          if (xQueueSend(line_q_, &item, 0) != pdTRUE) ++lines_dropped_;
+        }
+        text_len = 0U;
+      }
+      if (pending_pos == pending_size) {
+        pending_size = xStreamBufferReceive(net_sb_, pending, sizeof pending, 0);
+        pending_pos = 0U;
+      }
+      if (pending_pos < pending_size) {
+        // Never block here: a blocking write stalls the reads, the heartbeat stops arriving
+        // and the session lease disables the robot (seen 2026-10-20 during STANDUP).
+        const int sent = ::send(client.fd(), pending + pending_pos, pending_size - pending_pos, MSG_DONTWAIT);
+        if (sent > 0) pending_pos += static_cast<std::size_t>(sent);
+        else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) client.stop();
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));  // heartbeat arrives every 200 ms; 5 ms keeps the radio task calm
+  }
+}
+#else
+void AppV3::netTask() noexcept {}
+#endif
 
 void AppV3::controlTaskEntry(void* arg) noexcept {
   static_assert(configTICK_RATE_HZ >= 500, "the 2 ms control period needs a >= 500 Hz RTOS tick");
@@ -373,6 +496,8 @@ void AppV3::controlPart(std::uint64_t now_us) noexcept {
   updateImu(now_us);
   const std::uint64_t t_imu = nowUs();
   controlTick(now_us);
+  out_.setTeeQuiet(ctrl_.state() == V3Controller::State::StandUp ||
+                   ctrl_.state() == V3Controller::State::Balancing);
   const std::uint64_t t_ctrl = nowUs();
   report(now_us);
   const std::uint64_t t_end = nowUs();
@@ -1526,6 +1651,10 @@ void AppV3::setHeightMove(int dir, std::uint64_t now_us) noexcept {
 }
 
 void AppV3::pollBle(std::uint64_t now_us) noexcept {
+#if TAP_WIFI
+  (void)now_us;
+  return;
+#else
   if (now_us < next_ble_poll_us_) return;
   next_ble_poll_us_ = now_us + kBlePollUs;
   // Bytes waiting from the phone = a Dabble packet (kept for diagnostics).
@@ -1606,6 +1735,7 @@ void AppV3::pollBle(std::uint64_t now_us) noexcept {
     drive_forward_ = drive_yaw_ = 0.0F;
     ble_driving_ = false;
   }
+#endif
 }
 
 void AppV3::freezeHeight() noexcept {
@@ -1660,9 +1790,17 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   }
   cmd.height_m = height_request_m_;
   cmd.disable = disable_pending_ || estop_;
-  if (active && now_us - last_rx_us_ > kLeaseUs) {
+  // Over Wi-Fi the heartbeat jitters by hundreds of ms (router): a session whose lines come from
+  // the TCP client gets 1.5 s instead of 0.5 s before the lease disables it.
+  const bool via_wifi = TAP_WIFI && millis() - net_rx_ms_.load(std::memory_order_relaxed) < 2000U;
+  const std::uint64_t lease_us = via_wifi ? kWifiLeaseUs : kLeaseUs;
+  // STANDUP is autonomous (no command is needed from Folding to the handoff), and over Wi-Fi the
+  // link stalled for 3-8 s every time the wheels started at Catching (logs 20/10 19:17-19:47):
+  // the lease would drop the robot mid-stand-up. It applies again once the robot balances.
+  const bool autonomous = ctrl_.state() == V3Controller::State::StandUp;
+  if (active && !autonomous && now_us - last_rx_us_ > lease_us) {
     cmd.disable = true;
-    out_.println("V3 serial lease expired (no command for 0.5 s): disabled");
+    out_.printf("V3 serial lease expired (no command for %.1f s): disabled\n", lease_us * 1.0e-6);
   }
 
   // START checks that need the hardware: every leg near its power-up pose.
@@ -2330,6 +2468,9 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" hipv_rms=").fix(hip_vel_n_ > 0U ? std::sqrt(hip_vel_sq_ / static_cast<float>(hip_vel_n_)) : 0.0F, 3)
       .str(" prof=[").u32(prof_max_[0]).chr(' ').u32(prof_max_[1]).chr(' ').u32(prof_max_[2]).chr(' ')
       .u32(prof_max_[3]).str("] upd_avg=").u32(prof_upd_n_ ? prof_upd_sum_ / prof_upd_n_ : 0U)
+      #if TAP_WIFI
+      .str(" rssi=").i32(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0)
+#endif
       .str(" heap=").u32(ESP.getFreeHeap()).chr('/').u32(ESP.getMinFreeHeap())
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(b);

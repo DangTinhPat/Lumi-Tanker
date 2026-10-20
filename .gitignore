@@ -13,3 +13,4 @@ __pycache__/
 *.rar
 src/tap_sim/model/assets/*.stl
 src/tap_sim/model/assets/*.STL
+firmware_esp32/include/tap_hw/WifiSecrets.hpp

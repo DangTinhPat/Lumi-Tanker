@@ -16,6 +16,7 @@ import math
 import os
 import queue
 import re
+import socket
 import sys
 import threading
 import time
@@ -44,6 +45,10 @@ BAUD = 921600  # firmware v3 AppV3 (was 115200: the link saturated)
 # so a second tool can read the robot log without opening the serial port.
 LOG_DIR = os.path.expanduser("~/tap_logs")
 HEARTBEAT_S = 0.20
+# Telemetry lines that are logged to the file but not drawn in the window.
+TELEMETRY_PREFIXES = ("TR ", "SU ", "SC ", "SW ", "SV ", "SF ", "WT ", "WBUS ", "SENS ")
+WIFI_HOST = "10.10.60.68"  # robot on the LUMI network (DHCP address shown in its WIFI boot line); tap-rb.local if mDNS works, its own AP TAP-RB is 192.168.4.1
+WIFI_PORT = 8023
 HMOVE_REPEAT_S = 0.10   # firmware stops a height move not refreshed in 0.3 s
 JOY_SIZE = 180          # joystick canvas [px]
 JOY_KNOB = 18           # knob radius [px]
@@ -63,6 +68,55 @@ AXLE_X_RE = re.compile(r"\baxle_x=([+-]?[\d.]+)")
 HEIGHT_RE = re.compile(r"\bh=([0-9.]+).*?\bhtgt=([0-9.]+)")
 WHEEL_POS_RE = re.compile(
     r"\bwheel_lx=([+-]?[\d.]+)\s+wheel_rx=([+-]?[\d.]+)")
+
+
+class _TcpPort:
+    """Minimal serial.Serial look-alike over a TCP socket (the robot's Wi-Fi console)."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self._sock = socket.create_connection((host, port), timeout=3.0)
+        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._sock.settimeout(0.15)
+        self._buf = bytearray()
+        self.is_open = True
+
+    def write(self, data: bytes) -> int:
+        self._sock.settimeout(0.3)
+        self._sock.sendall(data)
+        self._sock.settimeout(0.15)
+        return len(data)
+
+    def readline(self) -> bytes:
+        while True:
+            end = self._buf.find(b"\n")
+            if end >= 0:
+                line = bytes(self._buf[:end + 1])
+                del self._buf[:end + 1]
+                return line
+            try:
+                chunk = self._sock.recv(4096)
+            except socket.timeout:
+                return b""
+            if not chunk:
+                raise ConnectionError("robot closed the Wi-Fi connection")
+            self._buf += chunk
+
+    def close(self) -> None:
+        self.is_open = False
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def parse_tcp_target(device: str) -> tuple[str, int] | None:
+    """'tcp://192.168.4.1:8023' (or 'wifi') -> (host, port); None for a serial device."""
+    if device == "wifi":
+        return WIFI_HOST, WIFI_PORT
+    if not device.startswith("tcp://"):
+        return None
+    host, _, port = device[6:].partition(":")
+    return host or WIFI_HOST, int(port) if port else WIFI_PORT
 
 
 class SerialLink:
@@ -99,16 +153,20 @@ class SerialLink:
         return self.connected
 
     def open(self, device: str) -> None:
-        if serial is None:
-            raise RuntimeError("Thiếu pyserial. Cài bằng: python3 -m pip install pyserial")
-        port = serial.Serial(port=None, baudrate=BAUD, timeout=0.15,
-                             write_timeout=0.3)
-        # Keep the CP2102 reset lines inactive when opening the GUI.
-        port.dtr = False
-        port.rts = False
-        port.port = device
-        port.open()
-        self.port = port
+        target = parse_tcp_target(device)
+        if target is not None:
+            self.port = _TcpPort(*target)
+        else:
+            if serial is None:
+                raise RuntimeError("Thiếu pyserial. Cài bằng: python3 -m pip install pyserial")
+            port = serial.Serial(port=None, baudrate=BAUD, timeout=0.15,
+                                 write_timeout=0.3)
+            # Keep the CP2102 reset lines inactive when opening the GUI.
+            port.dtr = False
+            port.rts = False
+            port.port = device
+            port.open()
+            self.port = port
         os.makedirs(LOG_DIR, exist_ok=True)
         path = os.path.join(LOG_DIR, time.strftime("tap_%Y%m%d_%H%M%S.log"))
         self.log_file = open(path, "a", buffering=1, encoding="utf-8")
@@ -129,7 +187,7 @@ class SerialLink:
                 if command != "HEARTBEAT":
                     self._log(f">> {command}")
                 return True
-            except (OSError, serial.SerialException) as exc:
+            except OSError as exc:  # serial.SerialException is an OSError too
                 self.incoming.put(f"[serial write error] {exc}")
                 return False
 
@@ -165,7 +223,7 @@ class SerialLink:
         while not self.stop_event.is_set():
             try:
                 raw = port.readline()
-            except (OSError, serial.SerialException, TypeError) as exc:
+            except (OSError, TypeError) as exc:
                 # TypeError: pyserial reading a port that close() just shut.
                 if not self.stop_event.is_set():
                     self.incoming.put(f"[serial read error] {exc}")
@@ -438,14 +496,21 @@ class TapSerialControlApp:
         if not ports:
             ports = sorted(glob.glob("/dev/serial/by-id/*CP210*") +
                            glob.glob("/dev/ttyUSB*"))
+        ports += [f"tcp://{WIFI_HOST}:{WIFI_PORT}", f"tcp://tap-rb.local:{WIFI_PORT}"]
         self.port_box["values"] = ports
         if self.port_var.get() not in ports:
-            self.port_var.set(ports[0] if ports else "")
+            self.port_var.set(ports[0])
         if serial is None:
             self._append_log("Cần pyserial: python3 -m pip install pyserial")
 
     def _auto_connect(self) -> None:
-        if self.link.connected or serial is None:
+        if self.link.connected:
+            return
+        if "--port" in sys.argv[:-1]:  # --port /dev/ttyUSBn | tcp://host:8023 | wifi
+            self.port_var.set(sys.argv[sys.argv.index("--port") + 1])
+            self.connect()
+            return
+        if serial is None:
             return
         by_id = sorted(glob.glob("/dev/serial/by-id/*CP210*"))
         if by_id:
@@ -988,18 +1053,34 @@ class TapSerialControlApp:
                     with self.pending_voice_lock:
                         self.pending_voice.pop(command_id, None)
                 response.put_nowait({"status": "rejected", "message": str(exc)})
-        while True:
+        # Telemetry arrives at 150-250 lines/s (more over Wi-Fi, in bursts). Rendering each line
+        # in the Text widget and running a dozen regexes on every TR kept this Tk thread busy for
+        # seconds: clicks answered late, HEARTBEAT late, and the reader thread starved of the GIL.
+        # The log file (reader thread) keeps every line; here only the newest TR/SENS is parsed,
+        # the high-rate telemetry is not drawn, and a tick stops after a time budget.
+        shown: list[str] = []
+        newest: dict[str, str] = {}
+        deadline = time.monotonic() + 0.012
+        while time.monotonic() < deadline:
             try:
                 line = self.incoming.get_nowait()
             except queue.Empty:
                 break
+            if line.startswith(TELEMETRY_PREFIXES):
+                if line.startswith(("TR ", "SENS ")):
+                    newest[line[:2]] = line
+                continue
             self._parse_status(line)
             # Recording dumps (thousands of RC/HT samples) go to the log file
             # only; the window shows their BEGIN/END lines.
             if (line.startswith("RC ") or line.startswith("HT ")) and \
                     "BEGIN" not in line and "END" not in line:
                 continue
-            self._append_log(line)
+            shown.append(line)
+        for line in newest.values():
+            self._parse_status(line)
+        if shown:
+            self._append_log("\n".join(shown))
 
         now = time.monotonic()
         if self.link.connected:
@@ -1068,6 +1149,12 @@ class TapSerialControlApp:
                 self.stop_vision("Vision: dừng vì robot không còn Balance")
         if match := ALGO_RE.search(line):
             self.algorithm_var.set(match.group(1))
+        if line.startswith("SENS ") and (state := re.search(r"\bstate=(\w+)", line)):
+            # The CONTROL line is printed only when the state changes, so a client that joins later
+            # (Wi-Fi, no reset on connect) would show no mode; SENS carries it 5 times a second.
+            if state.group(1) != self.mode_var.get():
+                self._parse_status(f"CONTROL mode={state.group(1)} "
+                                   f"enable={0 if state.group(1) in ('Idle', 'Fault') else 1}")
         if match := SENS_RE.search(line):
             if not self.firmware_ready:
                 self.firmware_ready = True

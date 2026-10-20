@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 #include <Arduino.h>
@@ -19,6 +20,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/stream_buffer.h>
 #include <freertos/task.h>
 
 namespace tap_hw {
@@ -48,6 +50,12 @@ class AppV3 {
   // lease disabled the robot right after engage (hardware 2026-10-01).
   static void commsTaskEntry(void* arg) noexcept;
   TaskHandle_t comms_task_ = nullptr;
+  // Wi-Fi access point + one TCP client (TAP_WIFI): the same console as the UART, on core 0.
+  static void netTaskEntry(void* arg) noexcept;
+  TaskHandle_t net_task_ = nullptr;
+  StreamBufferHandle_t net_sb_ = nullptr;
+  std::atomic<std::uint32_t> net_rx_ms_{0U};  // millis() of the last byte from the Wi-Fi client
+  void netTask() noexcept;
   void step(bool task) noexcept;
   void controlPart(std::uint64_t now_us) noexcept;
   struct LineItem { char text[96]; };
