@@ -5,11 +5,9 @@
 #include <cstdint>
 
 #include "robot_control/ImuStateEstimator.hpp"
-#include "robot_control/LqrActuationPredictor.hpp"
 #include "robot_control/LqrBalancer.hpp"
-#include "tap_fw/v3/OscillationGuard.hpp"
-#include "tap_fw/v3/StandUp.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
+#include "tap_fw/v3/StandUp.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
 namespace tap_fw::v3 {
@@ -26,7 +24,6 @@ namespace tap_fw::v3 {
 // (ARMED) -> it engages after Engage::armed_go_s or at the first tip (or on GO).
 class V3Controller {
  public:
-  // StandUp: fold, level the body, then hand off to V3 balance for COM capture (from the lying pose).
   enum class State { Idle, Locking, Ready, Balancing, Fault, StandUp };
 
   // Lqr (SET algo 0) with the tiers is the shipped balancer. Pid (SET algo 1) is the
@@ -84,24 +81,6 @@ class V3Controller {
   // on the side height difference through the leg IK. The roll estimate is
   // against gravity (gyro, pulled to the accelerometer with the turn's
   // centripetal pull removed). Boot: OFF (SET roll 1; AppV3.cpp).
-  // Growing-oscillation guard (SET guard 0/1/2): OscillationGuard measures the pitch swings; at risk it cuts the
-  // pitch feedback gain, stretches the actuation prediction (and switches it on), slows a height descent to a stop and,
-  // if the risk stays high, raises the body (a taller pendulum has more delay margin). 0 = off, 1 = measure and
-  // log only, 2 = act. Boot is 1: on the robot (18/10) the acting mode did not damp the swings - two runs oscillated
-  // 0.2-0.3 rad for 14 s and fell after 4.8 s, against 125-152 s calm runs of the same build with the guard absent.
-  struct Guard {
-    int mode = 1;
-    OscillationGuard::Config detect{};
-    float gain_cut = 0.20F;       // pitch feedback scale lowered by up to this fraction at risk 1
-    float lag_boost_s = 0.04F;    // prediction lag stretched by up to this at risk 1
-    float predict_risk = 0.30F;   // above this the prediction runs even with SET lqrpredict 0
-    float hold_risk = 0.35F;      // a height descent slows to zero as the risk rises from 0 to this
-    float raise_risk = 0.70F;     // risk above this raises the body
-    float raise_max_m = 0.015F;   // largest guard raise
-    float raise_rate_m_s = 0.005F;
-    float release_rate_m_s = 0.001F;
-  };
-
   struct Roll {
     bool enabled = false;
     float est_tau_s = 0.5F;     // accelerometer correction of the roll estimate
@@ -381,10 +360,17 @@ class V3Controller {
     float preview_s = 0.12F;
     float plan_accel_m_s2 = 0.3F;
     float plan_jerk_m_s3 = 1.0F;
-    // Planned speed cap (0.55 m/s = the BLE full stick). Cruising within
-    // 0.05 m/s of the 0.8 m/s wheel cap leaves no headroom to stand the lean back
-    // up; 0.55 held every plant variant (v3_tier_tests V15).
-    float plan_vmax_m_s = 4.1888F;
+    // Planned speed cap. Cruising within 0.05 m/s of the wheel cap leaves no headroom to stand the lean back
+    // up; 0.55 m/s under a 0.8 m/s cap held every plant variant (v3_tier_tests V15). 1.0 m/s under the 1.2 m/s
+    // wheel cap keeps 0.2 m/s of headroom. 19/10: opened to 4.0 m/s at the operator's request (wheel cap 4.19 m/s =
+    // the 1000 rpm command clamp), so near the cap there is almost no headroom to stand the lean back up, and the
+    // rated 0.13 N.m only holds to 400 rpm = 1.67 m/s. Not tried on the robot (the fastest run so far was 0.34 m/s).
+    float plan_vmax_m_s = 4.0F;
+    // Above plan_scale_from_m_s the plan's acceleration and jerk grow with the speed, up to plan_scale_max times
+    // (0.3 m/s^2 / 1 m/s^3 to 1.0 m/s would take 3.3 s; scaled 1.8x it takes about 2 s). The scale follows the larger of
+    // the target and the planned speed, so a stop from speed brakes with the same budget that built it.
+    float plan_scale_from_m_s = 0.55F;
+    float plan_scale_max = 1.8F;
     // Motion envelope from the pendulum at the current height (SET tenv): the
     // planned speed cap becomes the wheel cap minus env_catch_rad * sqrt(g l)
     // (capture point: catching a lean theta needs about theta * sqrt(g l) of wheel
@@ -515,8 +501,6 @@ class V3Controller {
     Split split{};
     #endif
     Tier tier{};
-    Guard guard{};
-    StandUp::Config standup;
     Roll roll;
     WheelPredict wheel_pred;
     Height height{};
@@ -537,9 +521,6 @@ class V3Controller {
     // it and turns the schedule off). 0.03 stands tall but falls crouched; 0.08
     // stands both (HANDOFF 5.46).
     float lqr_lead_s = 0.03F;
-    // Actuation delay/lag predictor (SET lqrpredict 0/1, lqrdelay, lqrlag): rolls the LQR state forward by the
-    // wheel command history so the loop acts on where the robot will be when the command lands. Off at boot.
-    robot_control::LqrActuationPredictor::Config lqr_prediction{};
     // Height-adaptive lead (SET lqradapt 0/1; boot on). The wheel loop's phase
     // lag matters more the faster the pendulum is, so the lead grows as the CoM
     // comes down:
@@ -643,6 +624,7 @@ class V3Controller {
     // after the last drive command (covers LqrBalancer's stop ramp).
     std::uint64_t drive_guard_hold_us = 1'500'000U;
     float wheel_radius_m = 0.04F;
+    StandUp::Config standup;
   };
 
   struct Input {
@@ -678,9 +660,9 @@ class V3Controller {
   struct Command {
     bool start = false;       // edge
     bool go = false;          // edge: engage balancing now (from Ready)
+    bool disable = false;     // level: stop everything
     bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
     bool standup_advance = false;  // edge: begin the pitch-to-level phase from Kneeling
-    bool disable = false;     // level: stop everything
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
     // Requested hip-axle height [m]; <= 0 keeps the current request.
@@ -714,6 +696,10 @@ class V3Controller {
   [[nodiscard]] Output update(const Input& input, const Command& command);
   [[nodiscard]] float runawayImuSpeed() const noexcept { return runaway_v_imu_; }
   [[nodiscard]] State state() const noexcept { return state_; }
+  [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
+  [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
+  [[nodiscard]] bool recoveryPoseHeld() const noexcept { return recovery_pose_held_; }
+  [[nodiscard]] float kneeGoalRad() const noexcept { return knee_target_rad_; }
   [[nodiscard]] robot_control::LqrBalancer& balancer() noexcept { return lqr_; }
   [[nodiscard]] const robot_control::LqrBalancer& balancer() const noexcept { return lqr_; }
   [[nodiscard]] const char* lastFault() const noexcept { return last_fault_; }
@@ -765,19 +751,6 @@ class V3Controller {
   [[nodiscard]] bool heldOuterOff() const noexcept { return held_outer_off_; }
   [[nodiscard]] bool heldQuiet() const noexcept { return held_quiet_; }
   [[nodiscard]] float heightTarget() const noexcept { return height_target_m_; }
-  [[nodiscard]] const StandUp::Output& standupState() const noexcept { return standup_state_; }
-  [[nodiscard]] float standupLean() const noexcept { return standup_lean_; }
-  [[nodiscard]] bool recoveryPoseHeld() const noexcept { return recovery_pose_held_; }
-  [[nodiscard]] float guardRisk() const noexcept { return guard_out_.risk; }
-  [[nodiscard]] float guardAmplitude() const noexcept { return guard_out_.amplitude; }
-  [[nodiscard]] float guardRaise() const noexcept { return guard_raise_m_; }
-  // Knee the height plan is heading for: the requested height plus the guard raise.
-  [[nodiscard]] float kneeGoalRad() const noexcept {
-    return guard_raise_m_ > 1.0e-6F
-        ? LegHeight::forHeight(std::clamp(height_target_m_ + guard_raise_m_, LegHeight::minHeight(),
-                                          supportedMaxHeight())).knee_offset_rad
-        : knee_target_rad_;
-  }
   // Roll and coordinated trunk motion both need knee extension in reserve.
   // START/Ready still hold the exact power-up pose; this ceiling applies
   // only to the subsequent supported height profile.
@@ -894,19 +867,6 @@ class V3Controller {
 
   Config config_{};
   robot_control::LqrBalancer lqr_;
-  robot_control::LqrActuationPredictor lqr_prediction_{};
-  StandUp standup_{};
-  StandUp::Output standup_state_{};
-  float standup_lean_ = 0.0F;
-  bool recovery_pose_held_ = false;
-  bool trim_window_on_ = false;       // recovery handoff: clamp the learned trim near its seed
-  float trim_window_center_ = 0.0F;
-  [[nodiscard]] StandUp::Input recoveryInput(const Input& raw) const;
-  OscillationGuard guard_{};
-  OscillationGuard::Output guard_out_{};
-  float guard_raise_m_ = 0.0F;
-  float guard_scale_base_ = 1.0F;
-  bool guard_scale_active_ = false;
   State state_ = State::Idle;
   std::uint64_t state_since_us_ = 0U;
   std::uint64_t runaway_since_us_ = 0U;
@@ -936,8 +896,6 @@ class V3Controller {
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
-  void updateGuard(const Input& in, float reference);
-  void resetGuard();
   [[nodiscard]] static float heightStoppingDistance(float speed_m_s,
                                                      float accel_m_s2,
                                                      float max_accel_m_s2,
@@ -950,6 +908,15 @@ class V3Controller {
   float sus_dz_ = 0.0F, sus_dk_ = 0.0F;
   bool sus_init_ = false;
   bool height_startup_ = false;
+  StandUp standup_{};
+  StandUp::Output standup_state_{};
+  float standup_lean_ = 0.0F;
+  bool recovery_pose_held_ = false;
+  bool trim_window_on_ = false;       // recovery handoff: clamp the learned trim near its seed
+  float trim_window_center_ = 0.0F;
+  bool height_rise_ = false;          // post-stand-up rise in progress (looser planner quality)
+  bool hip_release_ramp_ = false;     // released recovery pose: dhip_ walks back slowly (StandUp::Config::release_hip_rate_rad_s)
+  [[nodiscard]] StandUp::Input recoveryInput(const Input& raw) const;
   float startup_height_m_ = 0.0F;
   std::uint64_t height_settled_since_us_ = 0U;
   float sus_alpha_ = 0.0F;
@@ -967,16 +934,6 @@ class V3Controller {
   }
   // com_line angle [rad] and its partials by hip/knee at core leg offsets.
   struct ComLine { float angle, d_hip, d_knee, height_m, pitch_inertia_at_axle; };
-  // Exact-input memoization only: encoder samples arrive slower than the
-  // controller, and recovery requests the same model twice in one tick.
-  // Include the runtime COM offset; never quantize angles or reuse stale rates.
-  struct ComCache {
-    float hip = 0.0F, knee = 0.0F, dx = 0.0F;
-    ComLine value{};
-    bool valid = false;
-  };
-  mutable std::array<ComCache, 4> com_cache_{};
-  mutable std::size_t com_cache_next_ = 0U;
   void resetReadyStill() noexcept;
   [[nodiscard]] bool readyStill(const Input& in, float body_pitch, float body_rate) noexcept;
   [[nodiscard]] ComLine comLine(float hip_offset, float knee_offset) const noexcept;
@@ -1045,6 +1002,7 @@ class V3Controller {
   bool ga_init_ = false;
   float reflex_w_ = 0.0F, gate_rate_lp_ = 0.0F; // reflex gate weight, |gyro| low-pass
   float plan_v_ = 0.0F, plan_a_ = 0.0F, plan_j_ = 0.0F, plan_dt_ = 0.002F;
+  float plan_scale_ = 1.0F;  // latched speed scale of the plan budget (Tier::plan_scale_*)
   bool plan_init_ = false;
   std::array<PlanSample, 128> plan_buf_{};
   std::size_t plan_head_ = 0U, plan_n_ = 0U;

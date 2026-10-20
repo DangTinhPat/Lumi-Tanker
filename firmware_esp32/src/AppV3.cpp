@@ -49,6 +49,9 @@ constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
 // Full stick. Forward stays 0.25 m/s under the 0.8 m/s balancer cap: catching
 // a forward lean needs the wheels to run faster than the drive speed.
 constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
+// Serial/GUI DRIVE ceiling [m/s] (15:20 build: 4.0 at the operator's request, who sets the speed on the GUI slider).
+// The BLE stick keeps its 0.55 full-stick scale. The wheel command itself clamps at 1000 rpm = 4.19 m/s.
+constexpr float kSerialDriveSpeedMS = 4.0F;
 constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
 
 std::atomic<int> g_v3_ble_links{0};
@@ -135,24 +138,13 @@ void setLegacyTier(tap_fw::v3::V3Controller::Config& c, bool old) noexcept {
 AppV3::AppV3() noexcept
     : transport_(can_.port(), uart1_.port(), uart2_.port()),
       ctrl_(tap_fw::v3::defaultV3Config()) {
-  // Actuation prediction on at boot: the wheel command-to-speed lag is 85-120 ms on the robot. The predictor
-  // keeps its command history across the microsecond jitter of the tick period since 18/10 (it used to be emptied
-  // every tick, which made it predict as if no command were in flight). SET lqrpredict 0 turns it off.
-  ctrl_.config().lqr_prediction.enabled = true;
+  // The balance loop is the 15:20 controller (no actuation predictor, no oscillation guard). The B4 catch lead
+  // still takes the wheel lag it was tuned with (0.075 s, the old predictor default).
   // Stand-up from the lying pose is enabled at boot. STANDUP still requires the
   // operator to confirm the encoder reference with SET lying 1 after powering
   // the motor supply on in the home pose.
-  ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(ctrl_.config().lqr_prediction.lag_s);
+  ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(0.075F);
   ctrl_.config().standup.enabled = true;
-  // 19/10 REC fit (3 recordings, 8.5 s at 250 Hz, both wheels): wheel command-to-speed response is a ~30 ms
-  // delay plus a ~130 ms lag (delay 20-40 ms, lag 100-170 ms within 3 % of the best fit; rmse 4.6-4.8 rad/s
-  // against 5.2-5.5 for the previous 50 ms / 75 ms). Applied AFTER tunedRecovery() so the B4 catch lead
-  // (which takes the lag as its argument) is unchanged. SET lqrdelay 0.05 / SET lqrlag 0.075 restore the
-  // previous prediction; SET lqrlag is clamped to 0.12, so the 0.13 default is only reachable from here.
-  // A 70 ms / 80 ms prediction (chosen from sim, 19/10 13:29 robot log) could not hold balance: it diverged
-  // within 4-8 s in all four attempts, against 38 s at rest with this 30 ms / 130 ms.
-  ctrl_.config().lqr_prediction.delay_s = 0.03F;
-  ctrl_.config().lqr_prediction.lag_s = 0.13F;
 }
 
 bool AppV3::begin() noexcept {
@@ -216,7 +208,13 @@ bool AppV3::begin() noexcept {
   // Height-adaptive wheel-loop lead: lead = 0.05 + 0.04 * clamp((0.95 - ratio) /
   // 0.45) s. SET lqrlead <s> pins a fixed value; SET lqradapt 0/1 (HANDOFF 5.46).
   ctrl_.config().lqr_lead_adaptive = true;
-  ctrl_.config().lqr_lead_tall_s = 0.05F;
+  // 15:20 build (19/10): tall 0.05 -> 0.09 s (the low-pose value); the wheel speed followed the command ~120 ms
+  // late and 58 ms of lead left ~60 deg of that lag uncompensated at the 2.4 Hz drive pulse. SET lqrleadtall 0.05
+  // restores it.
+  ctrl_.config().lqr_lead_tall_s = 0.09F;
+  // 15:20 build: reflex share 1.0 -> 0.6 (the hips over-react while driving; theta_v and its rate contain the hips'
+  // own motion, so the reflex partly answers its own swing). SET tdshare 1 restores it.
+  ctrl_.config().tier.disturbance_share = 0.6F;
   ctrl_.config().lqr_lead_low_s = 0.09F;
   // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
   // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
@@ -428,10 +426,12 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     } else if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
       out_.println("V3 STANDUP refused: not idle (DISABLE first)");
     } else {
-      // Match the 130 mm body/root height the sim stand-up uses.
-      height_request_m_ = std::clamp(0.130F - robot_control::geometry::wheel_radius_m +
-          robot_control::geometry::origins[0].z, tap_fw::v3::LegHeight::minHeight(),
-          ctrl_.supportedMaxHeight());
+      // The 15:20 balance loop was designed for the standing (tall) pose, so after the B4 hand-over at 98 mm the
+      // height planner keeps rising to the full supported height (SET standheight <mm> picks another; 98.2 = the
+      // 130 mm body height the sim stand-up uses, no rise after the hand-over).
+      height_request_m_ = stand_height_m_ > 0.0F
+          ? std::clamp(stand_height_m_, tap_fw::v3::LegHeight::minHeight(), ctrl_.supportedMaxHeight())
+          : ctrl_.supportedMaxHeight();
       standup_pending_ = true;
       out_.println("V3 STANDUP");
     }
@@ -497,7 +497,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   } else if (std::strncmp(line, "DRIVE ", 6U) == 0) {
     float f = 0.0F, y = 0.0F;
     if (std::sscanf(line + 6, "%f %f", &f, &y) == 2) {
-      drive_forward_ = std::clamp(f, -kBleDriveSpeedMS, kBleDriveSpeedMS);
+      drive_forward_ = std::clamp(f, -kSerialDriveSpeedMS, kSerialDriveSpeedMS);
       drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
     }
   } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
@@ -522,18 +522,6 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     // 0.2-10 m/s^2; the default is 8 (defaultV3Config). A low cap cuts the LQR's
     // push-recovery authority.
     else if (!std::strcmp(key, "accel")) lqr.setMaxGroundAccel(std::clamp(v, 0.2F, 10.0F));
-    else if (!std::strcmp(key, "lqrpredict")) ctrl_.config().lqr_prediction.enabled = v >= 0.5F;
-    else if (!std::strcmp(key, "lqrdelay")) ctrl_.config().lqr_prediction.delay_s = std::clamp(v, 0.0F, 0.1F);
-    else if (!std::strcmp(key, "lqrlag")) ctrl_.config().lqr_prediction.lag_s = std::clamp(v, 0.0F, 0.12F);
-    // Growing-oscillation guard (V3Controller::Config::Guard): mode 0 off / 1 measure and log / 2 act.
-    else if (!std::strcmp(key, "guard")) ctrl_.config().guard.mode = std::clamp(static_cast<int>(v + 0.5F), 0, 2);
-    else if (!std::strcmp(key, "guardcut")) ctrl_.config().guard.gain_cut = std::clamp(v, 0.0F, 0.5F);
-    else if (!std::strcmp(key, "guardlag")) ctrl_.config().guard.lag_boost_s = std::clamp(v, 0.0F, 0.08F);
-    else if (!std::strcmp(key, "guardraise")) ctrl_.config().guard.raise_max_m = std::clamp(v, 0.0F, 30.0F) * 1.0e-3F;
-    else if (!std::strcmp(key, "guardhold")) ctrl_.config().guard.hold_risk = std::clamp(v, 0.05F, 1.0F);
-    else if (!std::strcmp(key, "guardrisk")) ctrl_.config().guard.raise_risk = std::clamp(v, 0.1F, 1.0F);
-    else if (!std::strcmp(key, "guardgrow")) ctrl_.config().guard.detect.growth_ratio = std::clamp(v, 1.02F, 2.0F);
-    else if (!std::strcmp(key, "guardamp")) ctrl_.config().guard.detect.amp_min_rad = std::clamp(v, 0.001F, 0.05F);
     else if (!std::strcmp(key, "lying")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET lying refused: DISABLE first");
@@ -659,6 +647,66 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       out_.printf("V3 trimtau=%.2f s (after a stand-up handoff the trim follows theta_v - atan(a/g) from ALL samples with this tau; 0 = old gated estimate)\n",
                   ctrl_.config().standup.balance_trim_ungated_tau_s);
     }
+    else if (!std::strcmp(key, "standgate")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standgate refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.handoff_gate_from_lean_ref = v >= 0.5F;
+      out_.printf("V3 standgate=%d (B4 handoff lean/capture gates measured from the learned stopping lean target)\n",
+                  ctrl_.config().standup.handoff_gate_from_lean_ref ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standcknee")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standcknee refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_rise_knee_rad = std::clamp(v, 0.0F, 2.0F);
+      out_.printf("V3 standcknee=%.3f rad (B4 opens the knee this far before the hand-over; 0.640=98 mm, 0.903=120 mm, 1.031=130 mm)\n",
+                  ctrl_.config().standup.catch_rise_knee_rad);
+    }
+    else if (!std::strcmp(key, "standhiprel")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhiprel refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.release_hip_rate_rad_s = std::clamp(v, 0.0F, 3.0F);
+      out_.printf("V3 standhiprel=%.2f rad/s (hip offset walked back after the pose release; 0 = immediate)\n",
+                  ctrl_.config().standup.release_hip_rate_rad_s);
+    }
+    else if (!std::strcmp(key, "standheight")) {
+      stand_height_m_ = v <= 0.0F ? 0.0F : std::clamp(v * 0.001F, tap_fw::v3::LegHeight::minHeight(),
+                                                        tap_fw::v3::LegHeight::maxHeight());
+      out_.printf("V3 standheight=%.1f mm hip-axle after a stand-up (0 = full supported height %.1f mm)\n",
+                  stand_height_m_ * 1000.0F, ctrl_.supportedMaxHeight() * 1000.0F);
+    }
+    else if (!std::strcmp(key, "standhipdb")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standhipdb refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_hip_lean_deadband_rad = std::clamp(v, 0.0F, 0.1F);
+      out_.printf("V3 standhipdb=%.3f rad (B4 hip ignores capture errors this small once the lift is done; 0 = off)\n",
+                  ctrl_.config().standup.catch_hip_lean_deadband_rad);
+    }
+    else if (!std::strcmp(key, "standcrise")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standcrise refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.catch_rise = v >= 0.5F;
+      out_.printf("V3 standcrise=%d (B4 opens the knee to the 130 mm body height once captured and still, then hands off)\n",
+                  ctrl_.config().standup.catch_rise ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "standrise")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET standrise refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.post_handoff_rise = v >= 0.5F;
+      out_.printf("V3 standrise=%d (after the stand-up handoff the height request lifts the body with looser balance-quality limits)\n",
+                  ctrl_.config().standup.post_handoff_rise ? 1 : 0);
+    }
     else if (!std::strcmp(key, "trimseed")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
         out_.println("V3 SET trimseed refused: DISABLE first");
@@ -667,6 +715,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().standup.balance_trim_seed_offset_rad = std::clamp(v, -0.1F, 0.1F);
       out_.printf("V3 trimseed=%.3f rad (added to the LQR trim seed at the stand-up handoff)\n",
                   ctrl_.config().standup.balance_trim_seed_offset_rad);
+    }
+    else if (!std::strcmp(key, "trimmeas")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET trimmeas refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.balance_trim_seed_measured = v >= 0.5F;
+      out_.printf("V3 trimmeas=%d (LQR trim seeded from the measured virtual pitch at the stand-up handoff)\n",
+                  ctrl_.config().standup.balance_trim_seed_measured ? 1 : 0);
     }
     else if (!std::strcmp(key, "trimwin")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -691,7 +748,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
         out_.println("V3 SET standspdimax refused: DISABLE first");
         return;
       }
-      ctrl_.config().standup.catch_speed_integral_max_rad = std::clamp(v, 0.0F, 0.12F);
+      ctrl_.config().standup.catch_speed_integral_max_rad = std::clamp(v, 0.0F, 0.18F);
       out_.printf("V3 standspdimax=%.3f rad (bound of that integral)\n",
                   ctrl_.config().standup.catch_speed_integral_max_rad);
     }
@@ -1040,6 +1097,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tprev")) ctrl_.config().tier.preview = v >= 0.5F;
     else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 1.0F);
     else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
+    else if (!std::strcmp(key, "tdshare")) ctrl_.config().tier.disturbance_share = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 4.1888F);
     else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
     // Static level loop (needs trunk): body pitch target and its limits.
@@ -1322,8 +1380,23 @@ void AppV3::printTunables() noexcept {
                 rec_balance_auto_ ? 1 : 0);
     out_.printf("V3 TUNE trimtau=%.2f s (SET trimtau): ungated balance-angle observer after a stand-up handoff (0 = gated)\n",
                 su.balance_trim_ungated_tau_s);
+    out_.printf("V3 TUNE standgate=%d (SET standgate): handoff gates relative to the learned stopping lean (abs lean <= tol+%.2f)\n",
+                su.handoff_gate_from_lean_ref ? 1 : 0, su.handoff_gate_lean_extra_rad);
+    out_.printf("V3 TUNE standhipdb=%.3f rad (SET standhipdb): B4 hip capture deadband after the lift (hip risen >= %.2f rad)\n",
+                su.catch_hip_lean_deadband_rad, su.catch_hip_deadband_after_rad);
+    out_.printf("V3 TUNE standcrise=%d (SET standcrise): rise in B4 to knee %.3f rad at %.2f rad/s after %.1f s calm, then hand off\n",
+                su.catch_rise ? 1 : 0, su.catch_rise_knee_rad, su.catch_rise_rate_rad_s, su.catch_rise_start_dwell_s);
+    out_.printf("V3 TUNE standrise=%d (SET standrise): post-handoff rise to the height request with relaxed quality (err<=%.2f rad rate<=%.1f floor %.2f, release pose after %.2f s, waits <=%.1f s more for calm)\n",
+                su.post_handoff_rise ? 1 : 0, su.rise_max_pitch_error_rad, su.rise_max_pitch_rate_rad_s,
+                su.rise_min_quality, su.rise_delay_s, su.rise_wait_max_s);
     out_.printf("V3 TUNE trimseed=%.3f rad (SET trimseed): offset added to the LQR trim seed at the stand-up handoff\n",
                 su.balance_trim_seed_offset_rad);
+    out_.printf("V3 TUNE standhiprel=%.2f rad/s (SET standhiprel): hip walk-back rate after the recovery pose release\n",
+                su.release_hip_rate_rad_s);
+    out_.printf("V3 TUNE standheight=%.1f mm (SET standheight): hip-axle height after a stand-up; 0 = full supported %.1f mm\n",
+                stand_height_m_ * 1000.0F, ctrl_.supportedMaxHeight() * 1000.0F);
+    out_.printf("V3 TUNE trimmeas=%d (SET trimmeas): LQR trim seeded from the measured virtual pitch at the stand-up handoff (offset not added)\n",
+                su.balance_trim_seed_measured ? 1 : 0);
     out_.printf("V3 TUNE trimwin=%.3f rad (SET trimwin): LQR trim window around its seed after a stand-up handoff\n",
                 su.balance_trim_window_rad);
     out_.printf("V3 TUNE standspdi=%.2f 1/s^2 (SET standspdi) standspdimax=%.3f rad (SET standspdimax): "
@@ -1350,16 +1423,6 @@ void AppV3::printTunables() noexcept {
                 su.floor_approach_time_s * 1000.0F, su.floor_prediction_lag_s * 1000.0F,
                 su.floor_accel_grace ? 1 : 0);
   }
-  {
-    const auto& gd = ctrl_.config().guard;
-    out_.printf("V3 TUNE guard: mode=%d (SET guard 0 off/1 log/2 act) cut=%.2f (guardcut) lag+=%.3f s (guardlag) "
-                "raise<=%.1f mm (guardraise) hold@%.2f (guardhold) raise@%.2f (guardrisk) grow=%.2f (guardgrow) "
-                "amp>=%.3f rad (guardamp)\n", gd.mode, gd.gain_cut, gd.lag_boost_s, gd.raise_max_m * 1000.0F,
-                gd.hold_risk, gd.raise_risk, gd.detect.growth_ratio, gd.detect.amp_min_rad);
-  }
-  out_.printf("V3 TUNE lqr prediction: enabled=%d (SET lqrpredict) delay=%.3f s (lqrdelay) lag=%.3f s (lqrlag)\n",
-              ctrl_.config().lqr_prediction.enabled ? 1 : 0,
-              ctrl_.config().lqr_prediction.delay_s, ctrl_.config().lqr_prediction.lag_s);
   out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
                 tap_fw::v3::toString(legs_.config().mode), legs_.config().mit_kp_nm_per_rad,
@@ -1892,8 +1955,6 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" h=").fix(ctrl_.legPose().axle_below_hip_m * 1000.0F, 1)
         .str(" htgt=").fix(ctrl_.heightTarget() * 1000.0F, 1)
         .str(" wa=").fix(static_cast<float>(feedback_.oldestWheelAgeUs(now_us)) * 1.0e-3F, 1)
-        .str(" gr=").fix(ctrl_.guardRisk(), 2).str(" ga=").fix(ctrl_.guardAmplitude(), 3)
-        .str(" gz=").fix(ctrl_.guardRaise() * 1000.0F, 1)
         .str(" knee=").fix(ctrl_.legPose().knee_offset_rad, 3, true)
         .str(" tv=").fix(ctrl_.virtualPitch(), 4, true)
         .str(" tvr=").fix(ctrl_.virtualPitchRate(), 3, true).str(" dhip=").fix(ctrl_.trunkHip(), 4, true)

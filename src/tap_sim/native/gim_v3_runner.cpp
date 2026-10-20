@@ -254,8 +254,7 @@ class GimV3Runner {
     // short rocking phases below are allowed the separately confirmed peak.
     config.lqr.max_ground_accel_m_s2 = std::min(config.lqr.wheel_ground_mu * 9.81F,
         2.0F * 0.13F / (geometry::wheel_radius_m * geometry::total_mass_kg));
-    config.lqr_prediction = {options.lqr_prediction, static_cast<float>(options.wheel_delay_s),
-                                  static_cast<float>(options.wheel_lag_s)};
+    // The 15:20 balance controller has no actuation predictor (options.lqr_prediction is ignored).
     config.lqr_lead_adaptive = false;
     config.lqr_lead_s = static_cast<float>(options.wheel_lag_s);
     config.tier.reflex_gate = true;
@@ -371,8 +370,7 @@ class GimV3Runner {
       else if (key == "hip_rate") config.tier.rate_rad_s = v;
       else if (key == "hip_max") config.tier.max_rad = v;
       else if (key == "lean_share") config.tier.lean_share = v;
-      else if (key == "pred_delay") config.lqr_prediction.delay_s = v;
-      else if (key == "pred_lag") config.lqr_prediction.lag_s = v;
+      else if (key == "pred_delay" || key == "pred_lag") {}  // no predictor in this controller
       else if (key == "lead_adaptive") config.lqr_lead_adaptive = v >= .5;
       else throw std::invalid_argument("unknown --control key: " + key);
     }
@@ -863,7 +861,6 @@ class GimV3Runner {
               << "|pitch=" << in.pitch_rad << "|pitch_rate=" << in.pitch_rate_rad_s
               << "|pitch_rate_corrected=" << in.pitch_rate_rad_s
               << "|reflex_gate=" << controller_.reflexGate()
-              << "|lqr_prediction=" << controller_.config().lqr_prediction.enabled
               << "|hip_trunk_request=" << controller_.trunkSwingRequest()
               << "|hip_trunk_command=" << controller_.trunkHip()
               << "|hip_level=" << controller_.levelHip()
@@ -922,9 +919,6 @@ class GimV3Runner {
               << "|su_wheel=" << controller_.standupState().wheel_rad_s
               << "|su_lift=" << controller_.standupState().lift_state
               << "|su_knee_rate=" << controller_.standupState().knee_rate_rad_s
-              << "|guard_risk=" << controller_.guardRisk()
-              << "|guard_amp=" << controller_.guardAmplitude()
-              << "|guard_raise=" << controller_.guardRaise()
               << "|cmd_hip=" << controller_.hipCommand() << "|cmd_knee=" << controller_.kneeCommand()
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)

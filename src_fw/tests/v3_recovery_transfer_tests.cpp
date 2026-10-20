@@ -19,9 +19,10 @@ struct Fixture {
   StandUp::Output out{};
   float previous_hip = -.7F, previous_rate = 0.0F;
 
-  explicit Fixture(bool transfer, float speed = -.4F) {
+  explicit Fixture(bool transfer, float speed = -.4F, bool rise = false) {
     auto cfg = StandUp::tunedRecovery();
     cfg.enabled = true;
+    cfg.catch_rise = rise;
     cfg.catch_rolling_transfer = transfer;
     cfg.fold_travel_rad = cfg.kneel_hold_s = 0.0F;
     // Isolate the transfer law from the wheel acceleration controller: the
@@ -67,7 +68,7 @@ struct Fixture {
       assert(std::abs(out.hip_rate_rad_s - previous_rate) <=
           controller.config().catch_hip_accel_rad_s2 * std::min(in.dt_s, .01F) + 2e-4F);
       assert(std::abs(out.wheel_rad_s) <= controller.config().catch_wheel_max_rad_s + 1e-5F);
-      assert(out.knee_target_rad == 0.0F);
+      if (!controller.config().catch_rise) assert(out.knee_target_rad == 0.0F);
     }
     previous_hip = out.hip_target_rad;
     previous_rate = out.hip_rate_rad_s;
@@ -130,6 +131,7 @@ WheelPlantResult wheelPlant(bool wheel_speed_lean) {
   cfg.enabled = true;
   cfg.fold_travel_rad = cfg.kneel_hold_s = 0.0F;
   cfg.catch_wheel_speed_lean = wheel_speed_lean;
+  cfg.catch_rise = false;  // this plant isolates the wheel law; there is no knee here
   StandUp su(cfg);
   su.begin(-.744F, 0.0F);
   const float g = 9.80665F, l = .12F, r = .04F, dt = .002F, tau = .03F;
@@ -295,9 +297,144 @@ void wheelControllerReceivesRollingSeedAndRetainsRecoveryBounds() {
     assert(out.state == V3Controller::State::Idle && !out.wheels_enabled);
   }
 }
+
+// 20/10: the LQR wobbles at the crouch while B4 holds it; B4 opens the knee to the 130 mm body height first and
+// hands off only afterwards.
+void catchRiseOpensKneeBeforeHandoff() {
+  Fixture f(true, 0.0F, true);
+  f.centered();
+  f.in.capture_lean_rad = 0.0F; f.in.capture_rate_rad_s = 0.0F;
+  f.in.pitch_rad = 0.0F; f.in.pitch_rate_rad_s = 0.0F;
+  const float goal = f.controller.config().catch_rise_knee_rad;
+  float knee = 0.0F, previous = 0.0F;
+  bool handed_off_early = false;
+  for (int i = 0; i < 5000 && f.out.phase == StandUp::Phase::Catching; ++i) {
+    f.in.knee_measured_rad = knee;  // the knee tracks its command
+    f.tick();
+    knee = f.out.knee_target_rad;
+    assert(knee >= previous - 1e-6F && knee <= goal + 1e-4F);  // monotone, bounded
+    assert(std::abs(knee - previous) <= f.controller.config().catch_rise_rate_rad_s * f.in.dt_s + 1e-5F);
+    previous = knee;
+    if (f.out.phase == StandUp::Phase::Support && knee < goal - 0.01F) handed_off_early = true;
+  }
+  assert(!handed_off_early);
+  assert(f.out.phase == StandUp::Phase::Support);
+  assert(f.out.knee_target_rad >= goal - 0.01F);
+  // After the rise a still-rolling robot (here 0.2 m/s, inside the 0.30 rolling gate) is not handed to the LQR.
+  Fixture r(true, 0.0F, true);
+  r.centered();
+  r.in.capture_lean_rad = 0.0F; r.in.capture_rate_rad_s = 0.0F;
+  r.in.pitch_rad = 0.0F; r.in.pitch_rate_rad_s = 0.0F;
+  float rk = 0.0F;
+  for (int i = 0; i < 4000 && r.out.knee_target_rad < goal - 0.01F; ++i) { r.in.knee_measured_rad = rk; r.tick(); rk = r.out.knee_target_rad; }
+  assert(r.out.knee_target_rad >= goal - 0.01F && r.out.phase == StandUp::Phase::Catching);
+  r.in.ground_speed_m_s = -0.2F; r.in.wheel_measured_rad_s = {-0.2F / r.in.wheel_radius_m, -0.2F / r.in.wheel_radius_m};
+  for (int i = 0; i < 600; ++i) { r.in.knee_measured_rad = rk; r.tick(); assert(r.out.phase != StandUp::Phase::Support); }
+  // A rolling robot (lean far from its target) pauses the rise instead of continuing.
+  Fixture g(true, 0.0F, true);
+  g.centered();
+  g.in.pitch_rad = 0.0F; g.in.pitch_rate_rad_s = 0.0F;
+  auto track = [&g](int n) { for (int i = 0; i < n; ++i) { g.in.knee_measured_rad = g.out.knee_target_rad; g.tick(); } };
+  track(1200);
+  const float before = g.out.knee_target_rad;
+  assert(before > 0.05F && before < g.controller.config().catch_rise_knee_rad - 0.05F);
+  g.in.capture_lean_rad = 0.3F;
+  track(1000);
+  assert(g.out.knee_target_rad <= before + 0.03F);
+}
+
+// 20/10 robot: after the lift the stopping-lean target ran 0.03 above the lean the robot could hold; the hip wound
+// +0.5 rad (head up) into the floor guard. A deadband keeps the hip still for small capture errors.
+void hipIgnoresSmallCaptureErrorAfterLift() {
+  float moved[2] = {};
+  for (int db = 0; db < 2; ++db) {
+    Fixture f(true, -0.35F, false);  // rolling too fast to hand off, so the hip task keeps running
+    f.controller.config().catch_hip_lean_deadband_rad = db == 1 ? 0.04F : 0.0F;
+    f.centered();
+    f.in.capture_lean_rad = 0.07F; f.in.capture_rate_rad_s = 0.0F;  // ~0.03 below the stopping-lean target
+    f.in.pitch_rad = 0.0F; f.in.pitch_rate_rad_s = 0.0F;
+    f.run(100);
+    const float hip0 = f.out.hip_target_rad;
+    f.run(300);
+    moved[db] = std::abs(f.out.hip_target_rad - hip0);
+  }
+  assert(moved[0] > 0.02F);
+  assert(moved[1] < 0.5F * moved[0] && moved[1] < 0.02F);
+}
+
+// 19/10 robot: a stopped, captured robot holds the lean its speed integral found (+0.06..+0.10) and sat 20 s at
+// cp +0.067 against the 0.060 gate. The gate is measured from that learned lean target.
+void stoppedRobotAtLearnedLeanTransfers() {
+  for (int from_ref = 0; from_ref < 2; ++from_ref) {
+    Fixture f(true, -.55F);
+    f.controller.config().handoff_gate_from_lean_ref = from_ref == 1;
+    f.centered();
+    f.in.capture_lean_rad = .04F; f.in.capture_rate_rad_s = 0.0F;
+    f.in.pitch_rad = .05F; f.in.pitch_rate_rad_s = 0.0F;
+    for (int i = 0; i < 1500 && f.out.speed_integral_rad < 0.07F; ++i) f.tick();
+    assert(f.out.speed_integral_rad >= 0.07F && f.out.phase == StandUp::Phase::Catching);
+    f.in.ground_speed_m_s = 0.0F;
+    f.in.wheel_measured_rad_s = {0.0F, 0.0F};
+    f.in.capture_lean_rad = 0.085F;  // |lean| and |cp| beyond the plain 0.08 / 0.06 gates
+    f.in.pitch_rad = 0.0F;
+    for (int i = 0; i < 1200 && f.out.phase == StandUp::Phase::Catching; ++i) f.tick();
+    if (from_ref == 1) assert(f.out.phase == StandUp::Phase::Support);
+    else assert(f.out.phase == StandUp::Phase::Catching);
+  }
+}
+
+// 19/10 robot: after the handoff the crouch balance wobbled, the planner's quality gate (0.10 rad / 1 rad/s)
+// stayed at zero and the body never left 38 mm. With post_handoff_rise the knee opens despite the wobble.
+void postHandoffRiseLiftsDespiteWobble() {
+  using namespace tap_fw::v3;
+  float knee_after[3] = {};
+  for (int enabled = 0; enabled < 3; ++enabled) {
+    auto cfg = defaultV3Config();
+    cfg.standup.enabled = cfg.standup.capture_first = cfg.standup.coordinated_speed = true;
+    cfg.standup.fold_travel_rad = 0;
+    cfg.standup.kneel_hold_s = cfg.standup.pitch_settle_s = cfg.standup.catch_settle_s = 0;
+    cfg.standup.catch_lean_tol_rad = cfg.standup.catch_capture_tol_rad = 10;
+    cfg.standup.post_handoff_rise = enabled >= 1;
+    cfg.standup.rise_wait_max_s = enabled == 1 ? 1.5F : 0.0F;  // 2: calm-only release never fires in a wobble
+    V3Controller c(cfg);
+    V3Controller::Input in{};
+    in.legs_ready = in.legs_measured = in.sensors_ok = true;
+    in.accel_z_m_s2 = 9.80665F;
+    const auto pose = LegHeight::forKnee(LegHeight::kKneeMinRad);
+    in.hip_rad = {pose.hip_offset_rad, pose.hip_offset_rad};
+    in.knee_rad = {pose.knee_offset_rad, pose.knee_offset_rad};
+    in.leg_chain_rad = pose.hip_offset_rad + pose.knee_offset_rad;
+    V3Controller::Command cmd{}; cmd.standup = true;
+    cmd.height_m = 0.0982F;
+    V3Controller::Output out{};
+    for (int i = 0; i < 10; ++i) {
+      in.now_us += 2000;
+      out = c.update(in, cmd); cmd.standup = false;
+      if (out.state == V3Controller::State::Balancing) break;
+    }
+    assert(out.state == V3Controller::State::Balancing);
+    const float knee0 = c.kneeCommand();
+    for (int i = 0; i < 1500; ++i) {  // 3 s of a 0.2 rad / 2 rad/s wobble that closes the normal gate
+      in.now_us += 2000;
+      const float ph = 6.2831853F * 1.0F * static_cast<float>(i) * 0.002F;
+      in.pitch_rad = 0.2F * std::sin(ph);
+      in.pitch_rate_rad_s = 1.2F * std::cos(ph);
+      out = c.update(in, cmd);
+      if (out.state != V3Controller::State::Balancing) break;
+    }
+    knee_after[enabled] = c.kneeCommand() - knee0;
+  }
+  assert(knee_after[0] < 0.01F);
+  assert(knee_after[1] > 0.10F);
+  assert(knee_after[2] < 0.01F);
+}
 }  // namespace
 
 int main() {
+  hipIgnoresSmallCaptureErrorAfterLift();
+  catchRiseOpensKneeBeforeHandoff();
+  stoppedRobotAtLearnedLeanTransfers();
+  postHandoffRiseLiftsDespiteWobble();
   initialLiftIsUnchanged();
   capturedRollingStateTransfers();
   fastRollingStateDoesNotTransfer();

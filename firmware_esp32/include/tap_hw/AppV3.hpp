@@ -151,6 +151,7 @@ class AppV3 {
   bool go_pending_ = false;
   bool go_after_ready_ = false;
   float height_request_m_ = 0.0F;  // SET height; 0 = no request
+  float stand_height_m_ = 0.0F;    // SET standheight: hip-axle height after a stand-up [m]; 0 = full supported height
   // HMOVE hold-to-run: +1 raise / -1 lower while the GUI keeps repeating it;
   // released (0) or silent for kHeightHoldUs -> freeze at the current height.
   int hmove_dir_ = 0;

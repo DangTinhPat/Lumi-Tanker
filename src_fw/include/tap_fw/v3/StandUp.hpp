@@ -84,6 +84,56 @@ class StandUp {
     // balance angle and falls backward before the observer converges. Added to the seed; the trim window
     // is centred on the shifted seed. SET trimseed.
     float balance_trim_seed_offset_rad = 0.0F;
+    // Bumpless handoff: seed the LQR trim from the measured virtual pitch (minus the capture-point lead
+    // rate/omega) instead of the formula above. B4 holds the COM lean, not the body angle, and the knee
+    // rise moves the equilibrium theta_v (20/10 13:41: theta_v +0.07 at the handoff against a formula seed
+    // of -0.007, wheel command -20 rad/s within 0.3 s, fell). The seed offset is not added then. SET trimmeas.
+    bool balance_trim_seed_measured = false;
+    // Rise after the handoff: the stand-up hands over at the kneeling height (hip-axle ~38 mm) and the
+    // operator height request (130 mm body = 98.2 mm hip-axle) then has to lift the body. The normal height
+    // planner scales its speed to zero once |pitch - ref| > 0.10 rad or |rate| > 1 rad/s, which the wobbling
+    // crouch balance never satisfies (19/10: 5.4 s Balancing, height still 38.2 mm). A longer pendulum
+    // is easier to balance, so the rise must not wait for calm: it uses these looser limits and never drops
+    // below rise_min_quality of the full speed until the target is reached. SET standrise.
+    bool handoff_gate_from_lean_ref = false;
+    float handoff_gate_lean_extra_rad = 0.06F;  // absolute lean bound = catch_lean_tol_rad + this
+    // Rise inside B4: the wheel loop of the catch holds the crouch for 20 s while the LQR wobbles at that height
+    // (19-20/10 logs), so once B4 is captured and still the knee opens to catch_rise_knee_rad (0.640 rad = 98.2 mm
+    // hip-axle = 130 mm body) under the B4 wheel loop and only then is the robot handed to the LQR. Opening is
+    // slow (the COM moves only ~0.7 rad of lean per rad of knee, ~1 cm of travel) and pauses whenever the lean
+    // leaves 2x the gate or the robot rolls. SET standcrise.
+    bool catch_rise = false;
+    float catch_rise_knee_rad = 0.903F;  // 120 mm hip-axle (0.640 = 98.2 mm fell: the 15:20 loop limit-cycles below ~104 mm)
+    float catch_rise_rate_rad_s = 0.20F;
+    float catch_rise_accel_rad_s2 = 1.0F;
+    float catch_rise_start_dwell_s = 0.5F;
+    float catch_rise_tracking_max_rad = 0.15F;
+    // 20/10 logs: with the knee open the hip wound from -0.09 to +0.455 rad (head up) in 3 s at 0.2 rad/s until the
+    // floor guard faulted ("floor constraint infeasible", 3 of 4 trials), because the stopping-lean target
+    // (speed integral, up to 0.16) sat 0.03 above the lean the robot could hold while the hip has only
+    // ~-0.06 lean per rad. Once the lift has finished (hip risen catch_hip_deadband_after_rad) the hip ignores
+    // capture errors smaller than this; the wheels keep regulating speed. 0 = off. SET standhipdb.
+    float catch_hip_lean_deadband_rad = 0.0F;
+    float catch_hip_deadband_after_rad = 0.4F;
+    float catch_rise_handoff_speed_m_s = 0.05F;  // after the rise, hand off only once this slow (filtered)
+    bool post_handoff_rise = false;
+    float rise_max_pitch_error_rad = 0.30F;
+    float rise_max_pitch_rate_rad_s = 3.0F;
+    float rise_min_quality = 0.4F;
+    // The Support phase holds the kneeling pose for good (recovery_pose_held_: knee frozen, hip owned by
+    // StandUp), so no height request can lift the body. This long after the handoff the pose is released to
+    // the normal two-tier balance, whose height planner then runs the rise.
+    float rise_delay_s = 0.4F;
+    // The release waits for a calm balance (|theta_v - ref| and |rate| inside these) but never longer than
+    // rise_wait_max_s after rise_delay_s: a smooth hand-over, yet a wobbling crouch still gets its rise.
+    float rise_calm_pitch_rad = 0.10F;
+    float rise_calm_rate_rad_s = 0.6F;
+    // Release buffer: the retained hip offset (B4 ends with the body pitched -0.3 rad) is walked back to the normal
+    // two-tier pose at this rate [rad/s] instead of the tier rate (3 rad/s), and the height planner waits until it
+    // is done. 20/10 14:50: the snap of dhip 0.43 -> 0 in 0.3 s threw theta_v from +0.06 to -0.02 to +0.19 and the
+    // balance never recovered. 0 = the old immediate release. SET standhiprel.
+    float release_hip_rate_rad_s = 0.0F;
+    float rise_wait_max_s = 0.0F;  // 0 = release only when calm (the 15:20 LQR clamps the wheels at 50 rad/s, so a forced release is safe)
     float catch_speed_integral_max_rad = 0.08F;
     float catch_speed_filter_s = 0.10F;
     float catch_speed_lean_max_rad = 0.12F;
@@ -413,7 +463,19 @@ class StandUp {
     su.balance_trim_window_rad = 0.06F;
     su.balance_trim_ungated_tau_s = 2.0F;
     su.balance_trim_seed_offset_rad = 0.034F;
-    su.catch_speed_integral_max_rad = 0.08F;
+    su.balance_trim_seed_measured = true;
+    su.release_hip_rate_rad_s = 0.15F;
+    su.rise_wait_max_s = 1.0F;
+    su.post_handoff_rise = true;
+    su.catch_rise = true;
+    su.catch_hip_lean_deadband_rad = 0.04F;
+    su.handoff_gate_from_lean_ref = true;
+    // 20/10 logs (12 hand-offs): after the knee opens the stopping lean the B4 loop needs grows past the old
+    // 0.08 integral / 0.12 lean bounds; the integral sat at its 0.08 stop and B4 drifted back at 0.14-0.23 m/s,
+    // and the four hand-offs made at that speed all failed within 0.8-1 s (one ran away at -1.1 m/s), while
+    // those at |v| < 0.03 held 3.9, 11 and 25 s.
+    su.catch_speed_integral_max_rad = 0.14F;
+    su.catch_speed_lean_max_rad = 0.16F;
     // Robot logs 20261019 (7 trials): the B4 hip rises only 0.19-0.25 rad and stops at about -0.5 rad
     // when lean crosses 0, because the posture (head-level) term arms only after 0.25 rad of hip rise.
     // The head then drops back (pitch .34 -> .48) and the floor guard faults at B4 ~0.6 s needing
@@ -479,6 +541,8 @@ class StandUp {
     lift_s_ = b4_clear_s_ = knee_rate_cmd_ = lift_hip_weight_ = 0.0F;
     lift_done_ = false;
     knee_start_rad_ = knee_cmd_;
+    rise_calm_s_ = 0.0F;
+    rise_started_ = rise_done_ = rise_gates_ok_ = false;
     flip_pitch_initialized_ = catch_overlap_ = false;
     lift_clear_s_ = catch_entry_rate_ = 0.0F;
     floor_armed_ = false;
@@ -759,9 +823,14 @@ class StandUp {
         out.hip_capture_error_rad += out.hip_capture_rate_rad_s / in.capture_omega_rad_s;
       const float damping = config_.catch_capture_point_hip ? 0.0F :
           config_.catch_hip_damping_s * in.capture_rate_rad_s;
+      float hip_error = out.hip_capture_error_rad;
+      if (config_.catch_hip_lean_deadband_rad > 0.0F && phase_ == Phase::Catching && !supported_hip &&
+          in.hip_measured_rad - catch_start_hip_rad_ >= config_.catch_hip_deadband_after_rad) {
+        hip_error = std::copysign(std::max(std::abs(hip_error) - config_.catch_hip_lean_deadband_rad, 0.0F), hip_error);
+      }
       float feedback_rate = std::clamp(
           -(1.0F - transfer_weight_) *
-              (config_.catch_hip_gain * out.hip_capture_error_rad + damping) / in.hip_jacobian +
+              (config_.catch_hip_gain * hip_error + damping) / in.hip_jacobian +
           body_rate,
           -config_.catch_hip_rate_max_rad_s, config_.catch_hip_rate_max_rad_s);
       // Preserve the existing capture-before-posture priority during the
@@ -823,6 +892,24 @@ class StandUp {
         if (lift_s_ < config_.lift_hip_delay_s) feedback_rate = 0.0F;
         feedback_rate -= config_.lift_pitch_neutral * knee_rate_cmd_;
         out.lift_state = hip_floor ? 1 : lift_done_ ? 3 : 2;
+      }
+      if (config_.catch_rise && !config_.catch_lift && phase_ == Phase::Catching) {
+        rise_calm_s_ = rise_gates_ok_ ? rise_calm_s_ + dt : 0.0F;
+        if (rise_calm_s_ >= config_.catch_rise_start_dwell_s) rise_started_ = true;
+        const float rise_eq = config_.catch_wheel_speed_lean ? speedLeanRef() : 0.0F;
+        const bool still = std::abs(in.capture_lean_rad - rise_eq) <= 2.0F * config_.catch_lean_tol_rad &&
+            std::abs(speed_filtered_m_s_) <= 2.0F * config_.catch_speed_tol_m_s;
+        const float rise_goal = knee_start_rad_ + config_.catch_rise_knee_rad;
+        const bool opening = rise_started_ && still && knee_cmd_ < rise_goal - 1.0e-4F;
+        const float rise_rate_target = opening ? config_.catch_rise_rate_rad_s * catchBlend() : 0.0F;
+        const float rise_accel = config_.catch_rise_accel_rad_s2 * dt;
+        knee_rate_cmd_ += std::clamp(rise_rate_target - knee_rate_cmd_, -rise_accel, rise_accel);
+        const float rise_lower = std::max(knee_start_rad_, in.knee_measured_rad - config_.catch_rise_tracking_max_rad);
+        const float rise_upper = std::min(rise_goal, in.knee_measured_rad + config_.catch_rise_tracking_max_rad);
+        const float rise_next = std::clamp(knee_cmd_ + knee_rate_cmd_ * dt, rise_lower, std::max(rise_lower, rise_upper));
+        if (rise_next != knee_cmd_ + knee_rate_cmd_ * dt) knee_rate_cmd_ = 0.0F;  // no windup
+        knee_cmd_ = rise_next;
+        rise_done_ = knee_cmd_ >= rise_goal - 1.0e-3F;
       }
       out.knee_rate_rad_s = knee_rate_cmd_;
       out.hip_feedback_rate_rad_s = feedback_rate;
@@ -923,9 +1010,15 @@ class StandUp {
           in.floor_predicted_clearance_m >= config_.transfer_floor_reserve_m &&
           std::abs(in.ground_speed_m_s) <= rollingHandoffSpeed(in.wheel_radius_m);
       out.rolling_handoff = config_.catch_rolling_handoff && rolling_ready;
+      // The B4 speed loop holds the robot still at the lean its integral found (the COM bias, +0.06..+0.10 on
+      // the robot), so a captured, stopped robot sits there, not at 0: 19/10 logs held 20 s at cp +0.067
+      // against the 0.060 gate and timed out. Measure the gate from that learned lean target.
+      const float gate_eq = config_.handoff_gate_from_lean_ref && config_.catch_wheel_speed_lean
+          ? speedLeanRef() : 0.0F;
       out.handoff_ready = !supported_hip && blend >= 1.0F &&
-          std::abs(in.capture_lean_rad) <= config_.catch_lean_tol_rad &&
-          std::abs(out.capture_point_rad) <= config_.catch_capture_tol_rad &&
+          std::abs(in.capture_lean_rad - gate_eq) <= config_.catch_lean_tol_rad &&
+          std::abs(in.capture_lean_rad) <= config_.catch_lean_tol_rad + config_.handoff_gate_lean_extra_rad &&
+          std::abs(out.capture_point_rad - gate_eq) <= config_.catch_capture_tol_rad &&
           std::abs(in.capture_rate_rad_s) <= config_.catch_rate_tol_rad_s &&
           (config_.capture_first || std::abs(in.pitch_rad) <= config_.catch_body_tol_rad) &&
           (std::abs(in.ground_speed_m_s) <= config_.catch_speed_tol_m_s || rolling_ready) &&
@@ -1097,6 +1190,11 @@ class StandUp {
             out.wheel_tracking_error_rad_s <= config_.handoff_wheel_tracking_tol_rad_s &&
             !out.hip_limited && (!out.wheel_limited || out.rolling_handoff);
       }
+      if (config_.catch_rise && !config_.catch_lift && rise_done_ && config_.catch_rise_handoff_speed_m_s > 0.0F &&
+          std::abs(speed_filtered_m_s_) > config_.catch_rise_handoff_speed_m_s)
+        out.handoff_ready = false;  // never hand a still-rolling robot to the LQR at the tall pose
+      rise_gates_ok_ = out.handoff_ready;  // all calm gates, before the rise veto
+      if (config_.catch_rise && !config_.catch_lift && !rise_done_) out.handoff_ready = false;
       pitch_settle_s_ = out.handoff_ready ? pitch_settle_s_ + dt : 0.0F;
       // Log 200417: posture transfer is complete, COM/rates are inside the
       // capture gates, but B4's -16 command repeatedly clears the 200 ms
@@ -1233,7 +1331,7 @@ class StandUp {
     for (float v : {config_.catch_speed_filter_s, config_.catch_speed_lean_max_rad}) {
       if (!std::isfinite(v) || v < 0.0F) return false;
     }
-    if (config_.catch_speed_lean_max_rad > 0.12F) return false;
+    if (config_.catch_speed_lean_max_rad > 0.18F) return false;
     for (float v : {config_.fold_rate_rad_s, config_.fold_travel_rad, config_.fold_pitch_limit_rad,
          config_.kneel_hold_s, config_.flip_pitch_kp_rad_s_per_rad, config_.flip_pitch_kd,
          config_.flip_hip_rate_max_rad_s, config_.flip_travel_max_rad, config_.pitch_target_tol_rad,
@@ -1267,6 +1365,14 @@ class StandUp {
         if (!std::isfinite(v) || v < 0.0F) return false;
       }
     }
+    if (config_.catch_rise &&
+        (!std::isfinite(config_.catch_rise_knee_rad) || config_.catch_rise_knee_rad < 0.0F ||
+         config_.catch_rise_knee_rad > 2.0F || !std::isfinite(config_.catch_rise_rate_rad_s) ||
+         config_.catch_rise_rate_rad_s <= 0.0F || config_.catch_rise_rate_rad_s > 1.0F ||
+         !std::isfinite(config_.catch_rise_accel_rad_s2) || config_.catch_rise_accel_rad_s2 <= 0.0F ||
+         !std::isfinite(config_.catch_rise_start_dwell_s) || config_.catch_rise_start_dwell_s < 0.0F ||
+         !std::isfinite(config_.catch_rise_tracking_max_rad) || config_.catch_rise_tracking_max_rad <= 0.0F))
+      return false;
     // Software ceiling on one recovery request, not a motor thermal rating.
     return std::isfinite(config_.fold_direction) && config_.catch_wheel_peak_s <= 1.0F;
   }
@@ -1306,6 +1412,8 @@ class StandUp {
   bool floor_armed_ = false;
   float floor_arm_s_ = 0.0F;
   bool lift_done_ = false;
+  float rise_calm_s_ = 0.0F;
+  bool rise_started_ = false, rise_done_ = false, rise_gates_ok_ = false;
   float lift_s_ = 0.0F, b4_clear_s_ = 0.0F, knee_rate_cmd_ = 0.0F, knee_start_rad_ = 0.0F;
   float lift_hip_weight_ = 0.0F;
   float speed_filtered_m_s_ = 0.0F, speed_integral_rad_ = 0.0F;

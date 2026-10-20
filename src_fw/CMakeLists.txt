@@ -5,9 +5,6 @@ add_library(tap_fw STATIC
   src/MotorFeedback.cpp
   src/v3/LegLock.cpp
   src/v3/V3Controller.cpp
-  src/v3/V3Balance.cpp
-  src/v3/V3Kinematics.cpp
-  src/v3/V3Posture.cpp
   src/v3/LegHeight.cpp)
 target_include_directories(tap_fw PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
