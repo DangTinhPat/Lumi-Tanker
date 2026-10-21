@@ -48,7 +48,7 @@ LOG_DIR = os.path.expanduser("~/tap_logs")
 HEARTBEAT_S = 0.20
 # Telemetry lines that are logged to the file but not drawn in the window.
 TELEMETRY_PREFIXES = ("TR ", "SU ", "SC ", "SW ", "SV ", "SF ", "WT ", "WBUS ", "SENS ")
-WIFI_HOST = "10.10.60.68"  # robot on the LUMI network (DHCP address shown in its WIFI boot line); tap-rb.local if mDNS works, its own AP TAP-RB is 192.168.4.1
+WIFI_HOST = "172.22.188.221"  # robot on the LUMI network (DHCP address shown in its WIFI boot line); tap-rb.local if mDNS works, its own AP TAP-RB is 192.168.4.1
 WIFI_PORT = 8023
 HMOVE_REPEAT_S = 0.10   # firmware stops a height move not refreshed in 0.3 s
 JOY_SIZE = 180          # joystick canvas [px]
@@ -84,6 +84,13 @@ class _TcpPort:
         except OSError:
             pass
         self._sock.settimeout(0.15)
+        # A Wi-Fi stall can leave this socket half-open (the robot already dropped it): detect
+        # silence by keepalive and by the robot's own 5 Hz SENS line, then reconnect.
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, val in (("TCP_KEEPIDLE", 3), ("TCP_KEEPINTVL", 1), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, opt):
+                self._sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+        self._last_rx = time.monotonic()
         self._decoder = TelemetryDecoder()  # binary frames and plain text lines both come out as lines
         self.is_open = True
 
@@ -101,9 +108,12 @@ class _TcpPort:
             try:
                 chunk = self._sock.recv(8192)
             except socket.timeout:
+                if time.monotonic() - self._last_rx > 3.0:   # the robot sends SENS five times a second
+                    raise ConnectionError("no data from the robot for 3 s")
                 return b""
             if not chunk:
                 raise ConnectionError("robot closed the Wi-Fi connection")
+            self._last_rx = time.monotonic()
             self._decoder.feed(chunk)
 
     def close(self) -> None:
@@ -139,6 +149,8 @@ class SerialLink:
         self.telemetry: dict[str, str] = {}
         self.telemetry_received_monotonic_s = 0.0
         self._tcp_target: tuple[str, int] | None = None
+        self._kicked = False
+        self._keepalive_stop = threading.Event()
 
     def _log(self, text: str) -> None:
         if self.log_file is not None:
@@ -162,6 +174,7 @@ class SerialLink:
     def open(self, device: str) -> None:
         target = parse_tcp_target(device)
         self._tcp_target = target
+        self._kicked = False
         if target is not None:
             self.port = _TcpPort(*target)
         else:
@@ -200,10 +213,28 @@ class SerialLink:
                 return True
             except OSError as exc:  # serial.SerialException is an OSError too
                 self.incoming.put(f"[serial write error] {exc}")
+                if self._tcp_target is not None:
+                    try:
+                        self.port.close()  # the reader thread sees it and reconnects
+                    except OSError:
+                        pass
                 return False
 
     def command_drive(self, velocity: float, yaw_rate: float) -> bool:
         return self.send(f"DRIVE {velocity:.7g} {yaw_rate:.7g}")
+
+    def start_keepalive(self, active_fn) -> None:
+        """Send HEARTBEAT from a thread of its own while active_fn() is true, so a stalled UI cannot cost the
+        session lease. The robot also drops a DRIVE that is not refreshed for 1 s, so a dead UI cannot leave it driving."""
+        def run() -> None:
+            while not self._keepalive_stop.wait(0.2):
+                try:
+                    if self.connected and active_fn():
+                        self.send("HEARTBEAT")
+                except Exception:  # noqa: BLE001
+                    pass
+        self._keepalive_stop = threading.Event()
+        threading.Thread(target=run, daemon=True).start()
 
     def command_stop(self) -> bool:
         return self.send("STOP")
@@ -246,19 +277,27 @@ class SerialLink:
                 if self.stop_event.is_set():
                     return
                 self.incoming.put(f"[serial read error] {exc}")
+                if self._kicked:
+                    self.incoming.put("[Wi-Fi: another program connected to the robot and took it over; "
+                                      "close the other GUI, then press Kết nối]")
+                    return
                 if self._tcp_target is not None and self._reconnect():
                     continue
                 return
             if raw:
                 line = raw.decode("utf-8", errors="replace").rstrip()
+                if line.startswith("WIFI replaced by a newer client"):
+                    self._kicked = True  # another GUI took the robot: do not take it back in a loop
                 self._log(line)
                 self._update_telemetry(line)
                 self.incoming.put(line)
 
     def _reconnect(self) -> bool:
         """The robot drops a stalled Wi-Fi connection to free its memory: join it again."""
-        for attempt in range(30):
-            if self.stop_event.wait(0.5):
+        attempt = -1
+        while True:  # keep trying until the user disconnects
+            attempt += 1
+            if self.stop_event.wait(0.5 if attempt < 20 else 2.0):
                 return False
             try:
                 new_port = _TcpPort(*self._tcp_target)
@@ -274,8 +313,6 @@ class SerialLink:
             self._log("[event] Wi-Fi reconnected")
             self.send("SET uartlog 0")
             return True
-        self.incoming.put("[Wi-Fi: could not reconnect]")
-        return False
 
     def _update_telemetry(self, line: str) -> None:
         now = time.monotonic()
@@ -320,6 +357,7 @@ class TapSerialControlApp:
         self.pending_voice_lock = threading.Lock()
         self._tk_thread_id = threading.get_ident()
         self.link = SerialLink(self.incoming)
+        self.link.start_keepalive(lambda: self.session_active)
         self.last_vision_diag_log_s = 0.0
         self.port_var = tk.StringVar()
         self.lying_zero_confirmed = tk.BooleanVar(value=False)
@@ -348,7 +386,7 @@ class TapSerialControlApp:
         self.vision_process = PersonVisionProcess(ROOT / "blue_object_vision")
         self.motion = MotionAPI(
             self.link,
-            limits=MotionLimits(max_linear_m_s=0.20, max_yaw_rad_s=0.40),
+            limits=MotionLimits(max_linear_m_s=4.1888, max_yaw_rad_s=12.0),  # wheel hardware limits; the sliders choose
             require_station_capture=False,
         )
         self._follow_stop_status = "Vision: đã dừng"
@@ -467,13 +505,13 @@ class TapSerialControlApp:
         self.exact_var = tk.StringVar(value="Chưa có lệnh")
         ttk.Label(exact, text="Quãng (m):").grid(row=0, column=0, sticky="e")
         ttk.Entry(exact, textvariable=self.dist_var, width=7).grid(row=0, column=1, padx=3)
-        ttk.Label(exact, text="Tốc độ (m/s ≤0.20):").grid(row=0, column=2, sticky="e")
+        ttk.Label(exact, text="Tốc độ (m/s):").grid(row=0, column=2, sticky="e")
         ttk.Entry(exact, textvariable=self.dspeed_var, width=6).grid(row=0, column=3, padx=3)
         ttk.Button(exact, text="▲ Tiến", command=lambda: self.exact_move(1)).grid(row=0, column=4, padx=4, sticky="ew")
         ttk.Button(exact, text="▼ Lùi", command=lambda: self.exact_move(-1)).grid(row=0, column=5, padx=4, sticky="ew")
         ttk.Label(exact, text="Góc (độ):").grid(row=1, column=0, sticky="e", pady=(4, 0))
         ttk.Entry(exact, textvariable=self.angle_var, width=7).grid(row=1, column=1, padx=3, pady=(4, 0))
-        ttk.Label(exact, text="Tốc độ quay (độ/s ≤23):").grid(row=1, column=2, sticky="e", pady=(4, 0))
+        ttk.Label(exact, text="Tốc độ quay (độ/s):").grid(row=1, column=2, sticky="e", pady=(4, 0))
         ttk.Entry(exact, textvariable=self.aspeed_var, width=6).grid(row=1, column=3, padx=3, pady=(4, 0))
         ttk.Button(exact, text="↶ Quay trái", command=lambda: self.exact_turn(-1)).grid(
             row=1, column=4, padx=4, pady=(4, 0), sticky="ew")
@@ -512,12 +550,12 @@ class TapSerialControlApp:
         drive = ttk.LabelFrame(self.root, text="Điều hướng · giữ nút để chạy", padding=10)
         drive.pack(fill="x", padx=10, pady=8)
         ttk.Label(drive, text="Tốc độ tiến/lùi (m/s)").grid(row=0, column=0, sticky="w")
-        ttk.Scale(drive, from_=0.02, to=4.0, variable=self.speed_var,
+        ttk.Scale(drive, from_=0.02, to=4.19, variable=self.speed_var,
                   orient="horizontal").grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Label(drive, textvariable=self._number_var(self.speed_var, "%.2f")).grid(
             row=0, column=2, sticky="e")
         ttk.Label(drive, text="Tốc độ quay (rad/s)").grid(row=1, column=0, sticky="w")
-        ttk.Scale(drive, from_=0.05, to=1.5, variable=self.yaw_var,
+        ttk.Scale(drive, from_=0.05, to=12.0, variable=self.yaw_var,
                   orient="horizontal").grid(row=1, column=1, sticky="ew", padx=8)
         ttk.Label(drive, textvariable=self._number_var(self.yaw_var, "%.2f")).grid(
             row=1, column=2, sticky="e")
@@ -713,7 +751,7 @@ class TapSerialControlApp:
             return f"Bị từ chối: firmware ở chế độ {tel.get('mode', '?')}, chưa Balancing"
         if self.link.telemetry_received_monotonic_s <= 0.0 or age > 0.25:
             return f"Bị từ chối: telemetry cũ {age:.2f} s (cần < 0.25 s, Wi-Fi đang nghẽn?)"
-        return "Bị từ chối: tham số ngoài giới hạn (tốc độ ≤ 0.20 m/s, quãng 0.02–5 m, góc 3°–360°, quay ≤ 23 °/s)"
+        return "Bị từ chối: tham số ngoài giới hạn (giá trị phải là số hữu hạn dương)"
 
     def exact_move(self, sign: int) -> None:
         values = self._exact_numbers(self.dist_var, self.dspeed_var)
@@ -1199,7 +1237,7 @@ class TapSerialControlApp:
             self._append_log("Không thể nâng/hạ: cần ESP đang Balance và follower đã dừng.")
         self.last_hmove_sent = time.monotonic()
 
-    def _tick(self) -> None:
+    def _tick_body(self) -> None:
         while True:
             try:
                 command, response = self.voice_commands.get_nowait()
@@ -1263,12 +1301,23 @@ class TapSerialControlApp:
             if self.height_dir and now - self.last_hmove_sent >= HMOVE_REPEAT_S:
                 self.command_router.height_hold(self.height_dir)
                 self.last_hmove_sent = now
-        if self.link.connected and self.session_active and now - self.last_heartbeat >= HEARTBEAT_S:
-            self.link.send("HEARTBEAT")
-            self.last_heartbeat = now
         self._tick_vision()
         self.command_router.update(now)
         self._exact_tick(now)
+
+    def _tick(self) -> None:
+        """One UI step. An exception here used to end the whole chain: no more HEARTBEAT, the robot's session
+        lease expired and it disabled itself in mid-balance (2 cases 21/10). Now the error goes to the log and the
+        loop keeps running."""
+        try:
+            self._tick_body()
+        except Exception:  # noqa: BLE001 - the loop must survive anything
+            import traceback
+            text = traceback.format_exc()
+            self.link.log_event("GUI tick error: " + text.replace("\n", " | "))
+            if time.monotonic() - getattr(self, "_last_tick_error_s", 0.0) > 5.0:
+                self._last_tick_error_s = time.monotonic()
+                self._append_log("[lỗi GUI trong _tick, vẫn chạy tiếp] " + text.strip().splitlines()[-1])
         self.root.after(33, self._tick)
 
     def _parse_status(self, line: str) -> None:
@@ -1353,6 +1402,10 @@ class TapSerialControlApp:
 
 
 def main() -> None:
+    try:  # Tk callback errors go to a file instead of nowhere
+        sys.stderr = open(os.path.join(LOG_DIR, "gui_stderr.log"), "a", buffering=1)
+    except OSError:
+        pass
     root = tk.Tk()
     TapSerialControlApp(root)
     root.mainloop()

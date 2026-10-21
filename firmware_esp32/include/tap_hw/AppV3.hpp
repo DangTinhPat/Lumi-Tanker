@@ -200,6 +200,14 @@ class AppV3 {
   bool rec_balance_auto_ = true;
   bool rec_active_ = false;
   bool rec_dumping_ = false;
+  // Blackbox: from STANDUP the last ~12 s (8 ms samples) are kept in g_rec as a ring, frozen and dumped as RC lines
+  // when the robot leaves StandUp/Balancing (fault, DISABLE, lease). It survives a Wi-Fi blackout: DUMP (or a
+  // client joining) sends it again.
+  bool rec_ring_ = false;
+  std::size_t rec_ring_head_ = 0U;
+  std::atomic<bool> redump_request_{false};
+  void startBlackbox(std::uint64_t now_us) noexcept;
+  void startDump(bool aborted) noexcept;
   bool rec_aborted_ = false;
   std::uint64_t rec_start_us_ = 0U;
   std::uint64_t rec_next_us_ = 0U;
@@ -231,6 +239,8 @@ class AppV3 {
   void reportMotion(const tap_fw::MotionApi::Event& e) noexcept;
   void pumpMotionEvents() noexcept;
   std::array<float, tap_fw::v3::LegLock::kLegs> leg_zero_turns_{};  // ZERO: driver turns taken as the encoder zero
+  std::uint64_t drive_serial_us_ = 0U;   // last serial DRIVE; one that is not refreshed for 1 s is dropped
+  bool drive_serial_active_ = false;
   float drive_forward_ = 0.0F;
   float drive_yaw_ = 0.0F;
   int last_state_ = -1;

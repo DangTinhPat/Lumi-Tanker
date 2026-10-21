@@ -31,8 +31,8 @@ class MotionApi {
     float max_distance_m = 1000.0F, min_distance_m = 0.02F;
     float max_angle_rad = 62.8F, min_angle_rad = 0.05F;  // 10 turns
     float default_speed_m_s = 0.3F, min_speed_m_s = 0.05F, max_speed_m_s = 4.19F;
-    float default_rate_rad_s = 0.5F, min_rate_rad_s = 0.1F, max_rate_rad_s = 1.5F;
-    float decel_m_s2 = 0.30F, decel_rad_s2 = 1.0F;
+    float default_rate_rad_s = 0.5F, min_rate_rad_s = 0.05F, max_rate_rad_s = 12.0F;
+    float decel_m_s2 = 2.0F, decel_rad_s2 = 6.0F;
     float tol_m = 0.02F, tol_rad = 0.05F;
     float done_speed_m_s = 0.06F, done_rate_rad_s = 0.15F;
     float wrong_way_rad = 0.15F, wrong_way_after_s = 1.0F;

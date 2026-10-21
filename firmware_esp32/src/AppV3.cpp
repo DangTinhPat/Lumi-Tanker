@@ -10,6 +10,7 @@
 #define TAP_WIFI 0
 #endif
 #if TAP_WIFI
+#include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -29,6 +30,7 @@
 #include <cstring>
 
 #include <esp_timer.h>
+#include <esp_freertos_hooks.h>
 
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_control/GeneratedGeometry.hpp"
@@ -49,7 +51,20 @@ constexpr float kTwoPi = 6.28318530717958647692F;
 constexpr std::uint64_t kReportUs = 200'000U;
 constexpr std::uint64_t kTraceUs = 40'000U;
 constexpr std::uint64_t kLeaseUs = 500'000U;        // serial silence while active
-constexpr std::uint64_t kWifiLeaseUs = 1'500'000U;   // same, when the commands arrive over Wi-Fi
+// Over Wi-Fi the radio blacks out for 3-10 s whenever the legs move hard (every stand-up, 21/10), and the lease was
+// then spent exactly when the robot reached Balancing: it disabled itself at the handoff and fell. A held DRIVE
+// has its own 1 s watchdog, so the lease only has to catch an operator that is really gone.
+constexpr std::uint64_t kWifiLeaseUs = 30'000'000U;
+namespace {
+// Core-0 load meter: counts how often the idle task gets to run (SENS idle0=, per report window). A drop
+// from the idle baseline means higher-priority tasks (wheel workers, Wi-Fi, lwIP) hold the core.
+std::atomic<std::uint32_t> g_idle0{0U};
+bool idleHook0() noexcept {
+  g_idle0.fetch_add(1U, std::memory_order_relaxed);
+  return true;
+}
+}  // namespace
+
 constexpr std::uint64_t kLegFreshUs = 100'000U;     // 0x009 at ~100 Hz
 constexpr std::uint64_t kClosedLoopGraceUs = 500'000U;
 constexpr std::uint64_t kLockTimeoutUs = 5'000'000U;
@@ -66,8 +81,9 @@ constexpr std::uint64_t kBleAdvertiseDelayUs = 300'000U;
 constexpr float kBleDriveSpeedMS = 0.55F;   // full stick forward
 // Serial/GUI DRIVE ceiling [m/s] (15:20 build: 4.0 at the operator's request, who sets the speed on the GUI slider).
 // The BLE stick keeps its 0.55 full-stick scale. The wheel command itself clamps at 1000 rpm = 4.19 m/s.
-constexpr float kSerialDriveSpeedMS = 4.0F;
+constexpr float kSerialDriveSpeedMS = 4.19F;  // the wheel command clamp (1000 rpm)
 constexpr float kBleYawRateRadS = 1.5F;     // full stick sideways
+constexpr float kSerialYawRateRadS = 12.0F;  // serial/GUI DRIVE yaw ceiling: wheel differential tops out near there (the GUI slider sets the rate)
 
 std::atomic<int> g_v3_ble_links{0};
 std::atomic<bool> g_v3_ble_readvertise{false};
@@ -235,7 +251,11 @@ bool AppV3::begin() noexcept {
   ctrl_.config().lqr_lead_tall_s = 0.09F;
   // 15:20 build: reflex share 1.0 -> 0.6 (the hips over-react while driving; theta_v and its rate contain the hips'
   // own motion, so the reflex partly answers its own swing). SET tdshare 1 restores it.
-  ctrl_.config().tier.disturbance_share = 0.6F;
+  // Trunk (tier-2 hip) a little calmer (21/10: the hip swung back and forth while driving): the share of
+  // disturbance it absorbs 0.6 -> 0.45 and the share of the virtual lean 1.0 -> 0.85.
+  // SET tdshare 0.6 / SET tshare 1 restore the 15:20 values.
+  ctrl_.config().tier.disturbance_share = 0.45F;
+  ctrl_.config().tier.lean_share = 0.85F;
   ctrl_.config().lqr_lead_low_s = 0.09F;
   // Noise-adaptive suspension: deadband = 3 x rms(vz error), engages 6 s after
   // balance starts, sleeps while the robot is not calm. SET tsusad 0 reverts to
@@ -259,6 +279,12 @@ bool AppV3::begin() noexcept {
   // Height changes at 15 mm/s, 50 mm/s2 with a 200 mm/s3 jerk limit: the biggest
   // body kicks came when the legs STOP. SET hrate 25 / haccel 70 / hjerk 500
   // restores the faster profile.
+  // Acceleration "driver": a speed request is a jerk-limited ramp (15:20 plan, budget x1..1.8 above 0.55 m/s) whose
+  // budget then tapers off from 0.8 to 1.67 m/s (tier.plan_taper_*), where the wheel torque runs out.
+  ctrl_.config().tier.plan_scale_max = 1.8F;  // 6.0 (21/10) made the 1.5 m/s run ripple and fall: the budget grew where the wheel torque is least
+  // Drive planner stays at the 15:20 values (0.3 m/s^2, 1 m/s^3), which drove smoothly on the robot. 3.0 / 30
+  // (tried 21/10) fell it in 0.5 s at 0.74 m/s: the h*jerk/g lean feed-forward grows with the jerk. SET tpacc /
+  // SET tpjerk (up to 20 / 200) raise them in steps.
   ctrl_.config().height.rate_m_s = 0.015F;
   ctrl_.config().height.accel_m_s2 = 0.05F;
   ctrl_.config().height.jerk_m_s3 = 0.20F;
@@ -354,12 +380,46 @@ void AppV3::netTask() noexcept {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.setAutoReconnect(true);
   WiFi.setHostname("tap-rb");
+  static volatile int sta_reason = 0;  // last disconnect reason (esp_wifi: 2 auth expire, 15 4-way timeout, 201 no AP, 202 auth fail)
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) { sta_reason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  {  // What the robot hears of the network before it tries to join it (RSSI, channel, security).
+    const int found = WiFi.scanNetworks(false, true, false, 400);
+    for (int i = 0; i < found; ++i) {
+      if (WiFi.SSID(i) == TAP_WIFI_STA_SSID) {
+        Serial.printf("WIFI scan: %s ch %d rssi %d auth %d bssid %s\n", TAP_WIFI_STA_SSID, static_cast<int>(WiFi.channel(i)),
+                      static_cast<int>(WiFi.RSSI(i)), static_cast<int>(WiFi.encryptionType(i)), WiFi.BSSIDstr(i).c_str());
+      }
+    }
+    if (found < 0) Serial.printf("WIFI scan failed: %d\n", found);
+    WiFi.scanDelete();
+  }
   WiFi.begin(TAP_WIFI_STA_SSID, TAP_WIFI_STA_PASS);
-  for (int i = 0; i < 100 && WiFi.status() != WL_CONNECTED; ++i) vTaskDelay(pdMS_TO_TICKS(100));
+  // Up to 30 s: a hotspot can take a long time to hand out the DHCP lease (status stays 6 until it does).
+  for (int i = 0; i < 300 && WiFi.status() != WL_CONNECTED; ++i) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (i % 50 == 49) {
+      Serial.printf("WIFI STA %s waiting %ds: status=%d reason=%d\n", TAP_WIFI_STA_SSID, (i + 1) / 10,
+                    static_cast<int>(WiFi.status()), static_cast<int>(sta_reason));
+    }
+  }
   sta = WiFi.status() == WL_CONNECTED;
   if (sta && MDNS.begin("tap-rb")) MDNS.addService("tap", "tcp", 8023);
 #endif
   bool ap = false;
+#if defined(TAP_WIFI_STA_SSID) && !defined(TAP_WIFI_FORCE_AP)
+  if (!sta) {
+    const int found = WiFi.scanNetworks(false, false, false, 300);
+    int seen = -1;
+    for (int i = 0; i < found; ++i) {
+      if (WiFi.SSID(i) == TAP_WIFI_STA_SSID) { seen = WiFi.channel(i) * 1000 + (-WiFi.RSSI(i)); break; }
+    }
+    Serial.printf("WIFI STA %s failed: status=%d last_reason=%d scan: %d networks, target %s (channel*1000+(-rssi)=%d)\n",
+                  TAP_WIFI_STA_SSID, static_cast<int>(WiFi.status()), static_cast<int>(sta_reason), found,
+                  seen >= 0 ? "seen" : "NOT seen", seen);
+    WiFi.scanDelete();
+  }
+#endif
   if (!sta) {
     WiFi.mode(WIFI_AP);
     ap = WiFi.softAP(kSsid, kPass, 6, 0, 1);
@@ -373,6 +433,15 @@ void AppV3::netTask() noexcept {
   else std::snprintf(where, sizeof where, "AP %s pass %s ip %s", kSsid, kPass, WiFi.softAPIP().toString().c_str());
   Serial.printf("WIFI %s tcp 8023 ok=%d heap=%u\n", where, (sta || ap) ? 1 : 0,
                 static_cast<unsigned>(ESP.getFreeHeap()));
+  // Firmware update over Wi-Fi (pio run -e esp32-s3-v3-ota -t upload): only served while the robot is idle or
+  // faulted, so a transfer can never start while it balances. The partition table has two app slots.
+  esp_register_freertos_idle_hook_for_cpu(idleHook0, 0);
+  ArduinoOTA.setHostname("tap-rb");
+  ArduinoOTA.setPassword("taprobot-ota");
+  ArduinoOTA.onStart([]() { Serial.println("OTA: update started"); });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA: update done, restarting"); });
+  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA: error %d\n", static_cast<int>(e)); });
+  ArduinoOTA.begin();
   WiFiClient client;
   char text[sizeof(LineItem::text)];
   std::size_t text_len = 0U;
@@ -389,15 +458,28 @@ void AppV3::netTask() noexcept {
       std::uint32_t seen = net_gap_max_ms_.load(std::memory_order_relaxed);
       if (gap > seen) net_gap_max_ms_.store(gap, std::memory_order_relaxed);
     }
-    if (!client || !client.connected()) {
+    {
+      const auto st = ctrl_.state();
+      if (st == V3Controller::State::Idle || st == V3Controller::State::Fault) ArduinoOTA.handle();
+    }
+    const bool have_client = client && client.connected();
+    if (!have_client) {
       if (client) client.stop();
       if (tee_live) {  // client gone: stop the copy and bring the UART console back
         tee_live = false;
         out_.setTeeActive(false);
         out_.setUartText(true);
       }
+    }
+    // A new connection always wins over the old one: after a Wi-Fi stall the GUI reconnects while this side
+    // still believes the dead socket is open, and accepting only when it is gone made the GUI flap (21/10).
+    if (!have_client || server.hasClient()) {
       WiFiClient incoming = server.accept();
       if (incoming) {
+        if (client) {  // tell the old one why, so a second GUI does not fight this one for the robot
+          client.print("WIFI replaced by a newer client\r\n");
+          client.stop();
+        }
         client = incoming;
         client.setNoDelay(true);
         client.setTimeout(1);
@@ -409,7 +491,8 @@ void AppV3::netTask() noexcept {
         pending_size = pending_pos = text_len = 0U;
         stall_since_ms = 0U;
         tee_live = true;
-        out_.setTeeActive(true);  // after the reset: the first template frames must survive
+        out_.setTeeActive(true);
+        redump_request_.store(true);  // after the reset: the first template frames must survive
         client.printf("WIFI client connected, %s\r\n", where);
       }
     }
@@ -454,10 +537,12 @@ void AppV3::netTask() noexcept {
           net_eagain_.fetch_add(1U, std::memory_order_relaxed);
           // The client does not take data (Wi-Fi stall): lwIP and the radio driver keep the unsent
           // data in heap, which fell from 45 KB to 2.8 KB (logs 21/10 09:25) and risks a crash.
-          // Drop the connection after 1.5 s; the GUI joins again.
+          // Drop it after 8 s or when the heap is nearly gone; the GUI joins again.
           const std::uint32_t now_ms = millis();
           if (stall_since_ms == 0U) stall_since_ms = now_ms;
-          else if (now_ms - stall_since_ms > 1500U) {
+          else if (now_ms - stall_since_ms > 8000U || ESP.getFreeHeap() < 10000U) {
+            // Ride out a stall (a Wi-Fi hiccup of a few seconds recovers by itself); only a long one or a
+            // nearly empty heap (a stuck backlog could crash the ESP) drops the connection.
             client.stop();
             stall_since_ms = 0U;
           }
@@ -666,6 +751,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     estop_ = false;
     out_.println("V3 E-STOP cleared");
   } else if (std::strcmp(line, "STOP") == 0) {
+    drive_serial_active_ = false;
     motion_.stop();
     pumpMotionEvents();
     drive_forward_ = drive_yaw_ = 0.0F;
@@ -702,6 +788,13 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                   leg_zero_turns_[1], leg_zero_turns_[2], leg_zero_turns_[3], legJointRad(0), legJointRad(1),
                   legJointRad(2), legJointRad(3));
     }
+  } else if (std::strcmp(line, "DUMP") == 0) {
+    if (rec_ring_ && rec_n_ != 0U && !rec_active_ && !rec_dumping_ &&
+        (ctrl_.state() == V3Controller::State::Idle || ctrl_.state() == V3Controller::State::Fault)) {
+      startDump(false);
+    } else {
+      out_.println("V3 DUMP: no blackbox to send (it is recorded from STANDUP and sent when the robot stops)");
+    }
   } else if (std::strcmp(line, "MSTAT") == 0) {
     tap_fw::MotionApi::Event e;
     e.kind = motion_.kind();
@@ -716,7 +809,9 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     pumpMotionEvents();
     if (std::sscanf(line + 6, "%f %f", &f, &y) == 2) {
       drive_forward_ = std::clamp(f, -kSerialDriveSpeedMS, kSerialDriveSpeedMS);
-      drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
+      drive_yaw_ = std::clamp(y, -kSerialYawRateRadS, kSerialYawRateRadS);
+      drive_serial_us_ = now_us;
+      drive_serial_active_ = drive_forward_ != 0.0F || drive_yaw_ != 0.0F;
     }
   } else if (std::strcmp(line, "LEGMODE POS") == 0 || std::strcmp(line, "LEGMODE MIT") == 0) {
     if (ctrl_.state() != V3Controller::State::Idle &&
@@ -1328,13 +1423,21 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     // Tier::sat_margin). sleash 0 = off; below 8 cm the catch itself fails.
     else if (!std::strcmp(key, "sleash")) ctrl_.config().stand_leash_m = v <= 0.0F ? 0.0F : std::clamp(v, 0.08F, 2.0F);
     else if (!std::strcmp(key, "sret")) ctrl_.config().stand_return_m_s = std::clamp(v, 0.02F, 0.5F);
+    else if (!std::strcmp(key, "tvref")) ctrl_.config().tier.speed_ref_m_s = std::clamp(v, 0.0F, 10.0F);
+    else if (!std::strcmp(key, "tvfloor")) ctrl_.config().tier.speed_floor = std::clamp(v, 0.0F, 1.0F);
     else if (!std::strcmp(key, "tdb")) ctrl_.config().tier.hip_deadband_rad = std::clamp(v, 0.0F, 0.02F);
     else if (!std::strcmp(key, "tsatm")) ctrl_.config().tier.sat_margin = std::clamp(v, 0.3F, 0.95F);
     // Maneuver preview (needs vpitch): planned, previewed speed changes.
     else if (!std::strcmp(key, "tprev")) ctrl_.config().tier.preview = v >= 0.5F;
-    else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 1.0F);
-    else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 5.0F);
+    else if (!std::strcmp(key, "tpacc")) ctrl_.config().tier.plan_accel_m_s2 = std::clamp(v, 0.05F, 20.0F);
+    else if (!std::strcmp(key, "tpjerk")) ctrl_.config().tier.plan_jerk_m_s3 = std::clamp(v, 0.2F, 200.0F);
     else if (!std::strcmp(key, "tdshare")) ctrl_.config().tier.disturbance_share = std::clamp(v, 0.0F, 1.0F);
+    else if (!std::strcmp(key, "tptaper")) { ctrl_.config().tier.plan_taper_from_m_s = std::clamp(v, 0.1F, 4.0F); }
+    else if (!std::strcmp(key, "tptaperto")) { ctrl_.config().tier.plan_taper_to_m_s = std::clamp(v, 0.2F, 4.2F); }
+    else if (!std::strcmp(key, "tptaperfloor")) { ctrl_.config().tier.plan_taper_floor = std::clamp(v, 0.05F, 1.0F); }
+    else if (!std::strcmp(key, "tpsmooth")) ctrl_.config().tier.plan_smooth_tau_s = std::clamp(v, 0.0F, 5.0F);
+    else if (!std::strcmp(key, "tpsmax")) ctrl_.config().tier.plan_scale_max = std::clamp(v, 1.0F, 20.0F);
+    else if (!std::strcmp(key, "tpsfrom")) ctrl_.config().tier.plan_scale_from_m_s = std::clamp(v, 0.1F, 4.0F);
     else if (!std::strcmp(key, "tpvmax")) ctrl_.config().tier.plan_vmax_m_s = std::clamp(v, 0.05F, 4.1888F);
     else if (!std::strcmp(key, "tpt")) ctrl_.config().tier.preview_s = std::clamp(v, 0.0F, 0.25F);
     // Static level loop (needs trunk): body pitch target and its limits.
@@ -1433,7 +1536,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                   "(robot must be on the stand)\n", name, rec_amp_,
                   static_cast<unsigned long>(rec_resend_us_), rec_duration_s_);
   } else {
-    out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE MOVE TURN MSTAT ZERO "
+    out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE MOVE TURN MSTAT ZERO DUMP "
                   "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
                   "REC)\n", line);
   }
@@ -1521,9 +1624,9 @@ void AppV3::printTunables() noexcept {
               ctrl_.config().stand_leash_m, ctrl_.config().stand_leash_from,
               ctrl_.config().stand_return_m_s, ctrl_.config().stand_leash_release_s,
               tier.hip_deadband_rad, tier.sat_margin);
-  out_.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f "
+  out_.printf("V3 TUNE preview: tprev=%d (needs vpitch) tpacc=%.2f tpjerk=%.1f tpvmax=%.2f tpsmax=%.1f tpsfrom=%.2f tpsmooth=%.2f tvref=%.2f tvfloor=%.2f "
                 "tpt=%.3f\n", tier.preview ? 1 : 0, tier.plan_accel_m_s2, tier.plan_jerk_m_s3,
-                tier.plan_vmax_m_s, tier.preview_s);
+                tier.plan_vmax_m_s, tier.plan_scale_max, tier.plan_scale_from_m_s, tier.plan_smooth_tau_s, tier.speed_ref_m_s, tier.speed_floor, tier.preview_s);
   out_.printf("V3 TUNE suspension: tsus=%d (needs vpitch) tsusg=%.1f tsusmax=%.0f mm\n",
                 tier.suspension ? 1 : 0, tier.sus_gain, tier.sus_max_m * 1000.0F);
   out_.printf("V3 TUNE level: tlvl=%d (needs trunk) tlevel=%+.3f rad tltau=%.1f tlvmax=%.3f "
@@ -1903,6 +2006,17 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const bool active = st == V3Controller::State::Locking || st == V3Controller::State::Ready ||
       st == V3Controller::State::Balancing || st == V3Controller::State::StandUp;
 
+  // A serial DRIVE is held only while the GUI keeps refreshing it (every 0.2 s): a frozen or dead UI must not leave
+  // the robot driving. (The HEARTBEAT now comes from its own thread, so the session lease alone no longer ends this.)
+  if (drive_serial_active_ && now_us - drive_serial_us_ > 1'000'000U) {
+    drive_forward_ = drive_yaw_ = 0.0F;
+    drive_serial_active_ = false;
+    out_.println("V3 DRIVE timeout: not refreshed for 1 s, stopped");
+  }
+  if (redump_request_.exchange(false) && rec_ring_ && rec_n_ != 0U && !rec_active_ && !rec_dumping_ &&
+      (st == V3Controller::State::Idle || st == V3Controller::State::Fault)) {
+    startDump(false);  // a client joined after a blackout: send the last stand-up again
+  }
   tap_fw::MotionApi::Feedback mf;
   mf.now_us = now_us;
   mf.dt_s = tick_dt_s_;
@@ -1924,7 +2038,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   cmd.disable = disable_pending_ || estop_;
   // Over Wi-Fi the heartbeat jitters by hundreds of ms (router): a session whose lines come from
   // the TCP client gets 1.5 s instead of 0.5 s before the lease disables it.
-  const bool via_wifi = TAP_WIFI && millis() - net_rx_ms_.load(std::memory_order_relaxed) < 2000U;
+  const std::uint32_t net_rx = net_rx_ms_.load(std::memory_order_relaxed);
+  const bool via_wifi = TAP_WIFI && net_rx != 0U && millis() - net_rx < 120000U;
   const std::uint64_t lease_us = via_wifi ? kWifiLeaseUs : kLeaseUs;
   // STANDUP is autonomous (no command is needed from Folding to the handoff), and over Wi-Fi the
   // link stalled for 3-8 s every time the wheels started at Catching (logs 20/10 19:17-19:47):
@@ -2151,7 +2266,8 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const std::uint64_t p3 = nowUs();
   prof(1, p3 - p2);
   if (rec_active_ && now_us >= rec_next_us_) {
-    rec_next_us_ += kRecPeriodUs;
+    rec_next_us_ += rec_ring_ ? 2U * kRecPeriodUs : kRecPeriodUs;
+    if (rec_ring_) rec_cmd_ = 0.1F * static_cast<float>(static_cast<int>(out.state));
     recordSample(now_us, hip_cmd, knee_cmd, 0.5F * (last_wheel_cmd_[0] + last_wheel_cmd_[1]));
   }
   if (rec_dumping_) dumpRecording();
@@ -2163,6 +2279,16 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const bool recovery_handoff = last_state_ == static_cast<int>(V3Controller::State::StandUp) &&
       out.state == V3Controller::State::Balancing;
   if (state != last_state_) {
+    const int prev_state = last_state_;
+    const bool was_active = prev_state == static_cast<int>(V3Controller::State::StandUp) ||
+                            prev_state == static_cast<int>(V3Controller::State::Balancing);
+    const bool now_active = out.state == V3Controller::State::StandUp || out.state == V3Controller::State::Balancing;
+    if (out.state == V3Controller::State::StandUp && !rec_active_ && !rec_dumping_) {
+      startBlackbox(now_us);
+    } else if (was_active && !now_active && rec_ring_ && rec_active_) {
+      rec_active_ = false;  // freeze and send the last seconds
+      startDump(out.state == V3Controller::State::Fault);
+    }
     last_state_ = state;
     state_since_us_ = now_us;
     next_trace_us_ = now_us;
@@ -2259,6 +2385,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         .str(" anc=").fix(ctrl_.lqrAnchorOffset() * 1000.0F, 0, true)
         .str(" sgv=").fix(ctrl_.standGive() * 1000.0F, 0, true)
         .str(" rg=").fix(ctrl_.reflexGate(), 2)
+        .str(" tsg=").fix(ctrl_.trunkSpeedGain(), 2)
         .str(" ql=").fix(ctrl_.lqrLeadEffective(), 3)
         .str(" sdb=").fix(ctrl_.suspensionDeadband() * 1000.0F, 1)
         .str(" rref=").fix(ctrl_.rollReference(), 4, true)
@@ -2406,6 +2533,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
 
 void AppV3::startRecording(RecKind kind, float amp, float duration_s,
                            std::uint64_t now_us) noexcept {
+  rec_ring_ = false;
   rec_kind_ = kind;
   rec_amp_ = amp;
   rec_duration_s_ = duration_s;
@@ -2433,9 +2561,28 @@ void AppV3::stopRecording(bool aborted) noexcept {
   rec_cmd_ = 0.0F;
   ctrl_.setKneeExcitation(0.0F);
   if (recStand()) legs_.setResendPeriod(LegLock::Config{}.resend_period_us);
-  out_.printf("RC BEGIN kind=%s n=%u rate_hz=250 amp=%.3f centre=%+.3f resend_us=%lu "
-                "aborted=%d cols=%s scales=", recName(static_cast<int>(rec_kind_)),
-                static_cast<unsigned>(rec_n_), rec_amp_, rec_centre_,
+  startDump(aborted);
+}
+
+void AppV3::startBlackbox(std::uint64_t now_us) noexcept {
+  rec_kind_ = RecKind::Free;
+  rec_ring_ = true;
+  rec_ring_head_ = 0U;
+  rec_n_ = 0U;
+  rec_amp_ = rec_centre_ = rec_cmd_ = 0.0F;
+  rec_aborted_ = false;
+  rec_duration_s_ = 86400.0F;
+  rec_start_us_ = rec_next_us_ = now_us;
+  rec_dumping_ = false;
+  rec_active_ = true;
+}
+
+void AppV3::startDump(bool aborted) noexcept {
+  rec_dumping_ = true;
+  rec_dump_i_ = 0U;
+  out_.printf("RC BEGIN kind=%s n=%u rate_hz=%d amp=%.3f centre=%+.3f resend_us=%lu "
+                "aborted=%d cols=%s scales=", rec_ring_ ? "BLACKBOX" : recName(static_cast<int>(rec_kind_)),
+                static_cast<unsigned>(rec_n_), rec_ring_ ? 125 : 250, rec_amp_, rec_centre_,
                 static_cast<unsigned long>(rec_resend_us_), aborted ? 1 : 0, kRecColumns);
   for (std::size_t i = 0; i < kRecChannels; ++i) {
     out_.printf(i + 1U < kRecChannels ? "%g," : "%g\n", kRecScale[i]);
@@ -2454,7 +2601,7 @@ float AppV3::recExcitation(std::uint64_t now_us) const noexcept {
 
 void AppV3::recordSample(std::uint64_t now_us, float hip_cmd, float knee_cmd,
                          float wheel_cmd) noexcept {
-  if (rec_n_ >= kRecMaxSamples) return;
+  if (!rec_ring_ && rec_n_ >= kRecMaxSamples) return;
   const auto legs = tap_fw::board::MotorIds{}.leg_can;
   const std::uint64_t stamp = feedback_.legEstimate(legs[0].joint_index).stamp_us;
   const float values[kRecChannels] = {
@@ -2467,7 +2614,15 @@ void AppV3::recordSample(std::uint64_t now_us, float hip_cmd, float knee_cmd,
       body_.accel_m_s2[0], body_.accel_m_s2[1], body_.accel_m_s2[2],
       state_.joints.velocity_rad_s[2], state_.joints.velocity_rad_s[5], wheel_cmd,
       static_cast<float>(now_us > stamp ? now_us - stamp : 0U) * 1.0e-3F};
-  auto& sample = g_rec[rec_n_++];
+  std::size_t slot = rec_n_;
+  if (rec_ring_) {
+    slot = rec_ring_head_;
+    rec_ring_head_ = (rec_ring_head_ + 1U) % kRecMaxSamples;
+    if (rec_n_ < kRecMaxSamples) ++rec_n_;
+  } else {
+    ++rec_n_;
+  }
+  auto& sample = g_rec[slot];
   sample.t_us = static_cast<std::uint32_t>(now_us - rec_start_us_);
   for (std::size_t i = 0; i < kRecChannels; ++i) sample.v[i] = recQuant(values[i], kRecScale[i]);
 }
@@ -2485,10 +2640,13 @@ void AppV3::dumpRecording() noexcept {
     rec_dumping_ = false;
     // Stand tests held the wheels off: engage afresh.
     if (recStand()) ctrl_.returnToReady();
-    rec_kind_ = RecKind::None;
+    if (!rec_ring_) rec_kind_ = RecKind::None;  // the blackbox stays for DUMP
     return;
   }
-  const auto& sample = g_rec[rec_dump_i_++];
+  const std::size_t slot = rec_ring_
+      ? (rec_ring_head_ + kRecMaxSamples - rec_n_ + rec_dump_i_) % kRecMaxSamples : rec_dump_i_;
+  ++rec_dump_i_;
+  const auto& sample = g_rec[slot];
   char text[160];
   std::size_t n = 0;
   auto put_uint = [&](std::uint32_t v) {
@@ -2609,6 +2767,7 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" netgap=").u32(net_gap_max_ms_.exchange(0U, std::memory_order_relaxed))
       .str(" neteagain=").u32(net_eagain_.exchange(0U, std::memory_order_relaxed))
 #endif
+      .str(" idle0=").u32(g_idle0.exchange(0U, std::memory_order_relaxed))
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(b);
   // Bounded transport evidence, separate from requested wcmd and controller

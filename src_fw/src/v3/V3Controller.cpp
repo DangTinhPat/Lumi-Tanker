@@ -393,6 +393,7 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
         const bool seed_measured = config_.standup.balance_trim_seed_measured;
         engageBalance(in, seed_measured ? releaseBalance(in) : recovery_trim - com_line_hang_, true);
         trim_window_on_ = config_.standup.balance_trim_window_rad > 0.0F;
+        trim_window_since_us_ = in.now_us;
         if (trim_window_on_ && !seed_measured) {
           lqr_.setBalanceTrim(lqr_.balanceTrim() + config_.standup.balance_trim_seed_offset_rad);
         }
@@ -1020,6 +1021,15 @@ TAP_HOT std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Comm
       ga_f_ += std::clamp(2.0F * 3.14159265F * 0.7F * dt, 0.0F, 1.0F) * (acc_raw - ga_f_);
       // Stand-up handoff: use every sample (the centre of the oscillation), not only the quiet turning
       // points the gate keeps (StandUp::Config::balance_trim_ungated_tau_s).
+      // The stand-up trim mode (ungated observer, +-window around the seed) is for the first seconds after the
+      // handoff. Left on it clamps the lean a drive needs to +-0.06 rad around the seed and feeds the noisy ground
+      // acceleration into the trim all the time; every run from the 21/10 drives came from a stand-up and rippled
+      // 2-4x more than the 15:20 stood-up runs. A drive command or 8 s of balancing returns to the 15:20 observer.
+      if (trim_window_on_ &&
+          (std::abs(cmd.forward_m_s) > 1.0e-3F || std::abs(cmd.yaw_rad_s) > 1.0e-3F ||
+           in.now_us - trim_window_since_us_ > 8'000'000U)) {
+        trim_window_on_ = false;
+      }
       const bool ungated = trim_window_on_ && config_.standup.balance_trim_ungated_tau_s > 0.0F;
       if (ungated || (std::abs(ga_f_) < config_.trim_acc_max_a_m_s2 && std::abs(in.pitch_rate_rad_s) < 0.3F)) {
         const float target = in.pitch_rad - std::atan(ga_f_ / 9.80665F) - ffPitch();
@@ -1106,6 +1116,12 @@ TAP_HOT std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Comm
     held_window_start_us_ = 0U;
   }
   const float lqr_cmd = lqr_.debugState().commanded_ground_velocity_m_s;
+  // Held/lifted means the wheel command moves while the body does not rotate. A drive and, above all, the braking
+  // after it do exactly that when the wheels ripple at 3 Hz: the 21/10 stop from 1.5 m/s was read as "lifted" at 0.7 m/s,
+  // the wheel command was zeroed (wcmd=0.00, ho=1, trim re-seeded) and the robot fell. While a speed plan is
+  // running, and for 2.5 s after it, the test is off.
+  if (std::abs(target_v) > 0.05F || std::abs(plan_v_) > 0.05F) held_suppress_until_us_ = in.now_us + 2'500'000U;
+  if (in.now_us < held_suppress_until_us_) held_window_start_us_ = 0U;
   held_max_rate_ = std::max({held_max_rate_, std::abs(body_rate_), std::abs(theta_v_rate_)});
   held_accel_sum_ += std::abs(body_accel_f_);
   ++held_accel_n_;
@@ -1873,7 +1889,14 @@ TAP_HOT void V3Controller::updateTrunk(const Input& in, bool active,
   } else {
     reflex_w_ = 1.0F;
   }
-  const float disturbance_want = reflex_gate * (disturbance_share * fast_used / jh +
+  float speed_gain = 1.0F;
+  if (t.speed_ref_m_s > 0.0F) {
+    const float v = std::max(std::abs(pid_v_filt_), tierVirtual() && plan_n_ > 0U ? std::abs(plan_v_) : 0.0F);
+    const float q = v / t.speed_ref_m_s;
+    speed_gain = std::max(1.0F / (1.0F + q * q), std::clamp(t.speed_floor, 0.0F, 1.0F));
+  }
+  trunk_speed_gain_ = speed_gain;
+  const float disturbance_want = reflex_gate * speed_gain * (disturbance_share * fast_used / jh +
       std::clamp(body_damping, -0.04F, 0.04F));
   // Full-authority desired hip offset (alpha = 1, unclamped): decides whether the
   // legs are running out of range, independent of how far alpha has faded
@@ -2232,6 +2255,13 @@ TAP_HOT void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   plan_scale_ = std::abs(plan_v_) < 0.02F && std::abs(target_v) < 0.02F ? 1.0F : std::max(plan_scale_, demand);
   amax *= plan_scale_;
   jmax *= plan_scale_;
+  if (t.plan_taper_to_m_s > t.plan_taper_from_m_s) {
+    const float v = std::max(std::abs(plan_v_), std::abs(target_v));
+    const float u = std::clamp((v - t.plan_taper_from_m_s) / (t.plan_taper_to_m_s - t.plan_taper_from_m_s), 0.0F, 1.0F);
+    const float taper = 1.0F - (1.0F - std::clamp(t.plan_taper_floor, 0.05F, 1.0F)) * u;
+    amax *= taper;
+    jmax *= taper;
+  }
   if (envelopeOn()) {
     jmax *= std::sqrt(std::max(com_reference_m_, 0.01F) /
                        std::max(pose_.com_above_axle_m, 0.01F));
@@ -2242,7 +2272,9 @@ TAP_HOT void V3Controller::updatePlan(float target_v, float dt, bool reset) {
   // overshoot.
   const float v_stop = plan_v_ + plan_a_ * std::abs(plan_a_) / (2.0F * jmax);
   const float err = target_v - v_stop;
-  const float a_des = std::abs(err) < 1.0e-4F ? 0.0F : std::copysign(amax, err);
+  const float a_des = t.plan_smooth_tau_s > 1.0e-3F
+      ? std::clamp(err / t.plan_smooth_tau_s, -amax, amax)
+      : (std::abs(err) < 1.0e-4F ? 0.0F : std::copysign(amax, err));
   const float da = std::clamp(a_des - plan_a_, -jmax * dt, jmax * dt);
   plan_a_ += da;
   plan_j_ = dt > 0.0F ? da / dt : 0.0F;
@@ -2558,7 +2590,7 @@ V3Controller::Config defaultV3Config() {
   cfg.lqr.max_ground_velocity_m_s = 4.19F;  // 1000 rpm, the wheel command clamp (rated torque only to 400 rpm = 1.67 m/s)
   // Demo turning: 1.5 rad/s (~86 deg/s) = 0.23 m/s per wheel at the 0.1545 m
   // half track; the default 0.8 capped the BLE stick well below that.
-  cfg.lqr.max_yaw_rate_rad_s = 1.5F;
+  cfg.lqr.max_yaw_rate_rad_s = 12.0F;  // DRIVE yaw ceiling; the GUI slider chooses the rate (was 1.5)
   // tunedControllerConfig() derives this from a 0.13 N.m torque spec that
   // predates the BL4820 wheels; the PID's accel_max_m_s2 = 8.0 is the value
   // validated on this hardware, so the LQR gets the same authority (a ~6x weaker

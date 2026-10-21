@@ -653,9 +653,8 @@ TAP_HOT LqrBalancer::Output LqrBalancer::update(const RobotState& state,
   const float right_ground = commanded_ground_velocity_m_s_ +
       config_.half_wheel_base_m * yaw_command;
   const float radius = std::max(config_.wheel_radius_m, 1.0e-4F);
-  // Wheel speed bounded by the configured ground speed cap and by 50 rad/s = 2.0 m/s on the 4 cm wheel, the hard
-  // limit of the 15:20 balance build that held 320 s on the robot (the 4.19 m/s cap alone would allow 105 rad/s).
-  const float wheel_limit = std::min(std::max(config_.max_ground_velocity_m_s, 0.05F) / radius, 50.0F);
+  // Wheel speed bounded by the configured ground speed cap only (V3: 1000 rpm, the wheel command clamp).
+  const float wheel_limit = std::max(config_.max_ground_velocity_m_s, 0.05F) / radius;
   output.ground_velocity_m_s = commanded_ground_velocity_m_s_;
   output.left_wheel_velocity_rad_s = clampFinite(config_.left_wheel_sign *
       left_ground / radius, -wheel_limit, wheel_limit);

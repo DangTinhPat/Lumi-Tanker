@@ -16,10 +16,10 @@ import time
 # Native runner hard clamps. These are software ceilings, not validated
 # physical robot operating limits.
 NATIVE_MAX_LINEAR_M_S = 4.1888   # the wheel's no-load limit (1000 rpm x 0.04 m); the API defaults stay conservative
-NATIVE_MAX_YAW_RAD_S = 1.5   # the controller's own yaw cap (lqr.max_yaw_rate_rad_s)
+NATIVE_MAX_YAW_RAD_S = 12.0  # the controller's own yaw cap (lqr.max_yaw_rate_rad_s)
 WHEEL_TRACK_M = 0.2654
-MAX_DISTANCE_ACTION_M = 5.0
-MAX_TURN_ACTION_RAD = 2.0 * math.pi
+MAX_DISTANCE_ACTION_M = 1000.0
+MAX_TURN_ACTION_RAD = 100.0 * math.pi
 
 
 class ActionStatus(str, Enum):
@@ -357,7 +357,7 @@ class MotionAPI:
         return values if all(math.isfinite(value) for value in values.values()) else None
 
     def _valid_timeout(self, timeout_s: float) -> bool:
-        return (math.isfinite(timeout_s) and 0.1 <= timeout_s <= 60.0)
+        return (math.isfinite(timeout_s) and 0.1 <= timeout_s <= 3600.0)
 
     def _reject_action(self) -> bool:
         if self.action_status == ActionStatus.RUNNING:

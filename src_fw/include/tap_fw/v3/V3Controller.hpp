@@ -300,6 +300,15 @@ class V3Controller {
     // disturbances. 0.003 cut rest hip pp 17-21 % in the sim; 0.005 gave the body
     // too much of a push, 0.002 lost the 8 N catch at 189 mm.
     float hip_deadband_rad = 0.0F;
+    // Speed schedule of the trunk's feedback (the reflex / lead / damping path, not the planned-lean feed-forward):
+    // gain = max(floor, 1 / (1 + (v / ref)^2)), v = the larger of the filtered ground speed and the planned speed.
+    // The hip swung back and forth at 2.3 Hz with an amplitude that grew with the drive speed (0.019 rad at
+    // 0.08 m/s, 0.056 at 0.5, 0.082 at 1.0), the wheels rippling in step; a smooth roll-off with speed (no
+    // thresholds) lets the wheels take the motion. ref <= 0 switches it off. SET tvref / tvfloor.
+    // OFF by default (21/10): with ref 0.8 the 1.0 m/s runs got worse, pitch swing 0.142 rad against 0.046-0.051
+    // without it (5 runs, 11:40), and 1.5 m/s fell. The hip is part of the damping at speed. SET tvref 0.8 turns it on.
+    float speed_ref_m_s = 0.0F;
+    float speed_floor = 0.15F;
     // Soft event gate on the reflex ("skateboard") hip path: the lean feedback,
     // its lead and the body damping. The planned lean (preview) and the slow
     // level ("gimbal") loop are not gated. It opens on the body gyro and the
@@ -370,6 +379,18 @@ class V3Controller {
     // (0.3 m/s^2 / 1 m/s^3 to 1.0 m/s would take 3.3 s; scaled 1.8x it takes about 2 s). The scale follows the larger of
     // the target and the planned speed, so a stop from speed brakes with the same budget that built it.
     float plan_scale_from_m_s = 0.55F;
+    // The wheel torque falls with speed (BL4820: 0.13 N.m to 400 rpm = 1.67 m/s, zero at 1000 rpm) and the wheel
+    // answers a command ~110 ms late, so the acceleration and jerk budget of the plan tapers off between
+    // plan_taper_from_m_s and plan_taper_to_m_s down to plan_taper_floor of its value. At 1.5 m/s the robot
+    // rippled at ~3 Hz with the wheel command swinging +-10 rad/s and fell in 1.5 s (log 21/10 11:54).
+    float plan_taper_from_m_s = 0.8F;
+    float plan_taper_to_m_s = 1.67F;
+    float plan_taper_floor = 0.25F;
+    // Continuous acceleration law of the plan (the "driver"): a_des = clamp(err / tau, +-amax), err = target speed minus
+    // the speed the plan would stop at. The acceleration is therefore proportional to the remaining speed step and
+    // fades out smoothly as the target is approached, instead of holding amax and then dropping. tau <= 0 is the
+    // old bang-bang law (a_des = +-amax).
+    float plan_smooth_tau_s = 0.5F;
     float plan_scale_max = 1.8F;
     // Motion envelope from the pendulum at the current height (SET tenv): the
     // planned speed cap becomes the wheel cap minus env_catch_rad * sqrt(g l)
@@ -771,6 +792,7 @@ class V3Controller {
   [[nodiscard]] bool lqrGainTableReady() const noexcept { return lqr_.gainTableReady(); }
   // Ground velocity/position used by the balancer (axle, rolling contact).
   [[nodiscard]] float groundVelocity() const noexcept { return ground_v_; }
+  [[nodiscard]] float trunkSpeedGain() const noexcept { return trunk_speed_gain_; }
   [[nodiscard]] float groundPosition() const noexcept { return ground_x_; }
   // virtual pitch (equals the body pitch while virtual_pitch is off),
   // tier-2 hip offset on top of the height pose, and its authority 0..1.
@@ -912,7 +934,10 @@ class V3Controller {
   StandUp::Output standup_state_{};
   float standup_lean_ = 0.0F;
   bool recovery_pose_held_ = false;
+  std::uint64_t held_suppress_until_us_ = 0U;  // drive plan active: the held/lifted test is off until then
+  float trunk_speed_gain_ = 1.0F;  // Tier::speed_ref_m_s schedule of the trunk feedback, for the log
   bool trim_window_on_ = false;       // recovery handoff: clamp the learned trim near its seed
+  std::uint64_t trim_window_since_us_ = 0U;  // when the handoff started it (it ends after trim_window_hold_s or at the first drive command)
   float trim_window_center_ = 0.0F;
   bool height_rise_ = false;          // post-stand-up rise in progress (looser planner quality)
   bool hip_release_ramp_ = false;     // released recovery pose: dhip_ walks back slowly (StandUp::Config::release_hip_rate_rad_s)
