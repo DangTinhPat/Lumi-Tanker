@@ -55,6 +55,9 @@ class LegLock {
   [[nodiscard]] float targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept;
   [[nodiscard]] const Config& config() const noexcept { return config_; }
   void setMode(Mode mode) noexcept { config_.mode = mode; }
+  // Driver-frame position [turns] of each joint that the caller treats as zero (AppV3 "ZERO": the
+  // driver counts from its power-up pose; this moves the reference without cycling the supply).
+  void setZeroTurns(const std::array<float, kLegs>& zero) noexcept { zero_turns_ = zero; }
   // Height / tier-2 offsets: hip/knee (core frame, rad) added to every leg's
   // zero once the engage ramp is done; applied the same to both legs.
   void setOffsets(float hip_core_rad, float knee_core_rad) noexcept {
@@ -105,6 +108,7 @@ class LegLock {
   Config config_{};
   bool engaged_ = false;
   bool ramp_to_zero_ = true;
+  std::array<float, kLegs> zero_turns_{};
   std::uint64_t engage_us_ = 0U;
   std::uint64_t last_send_us_ = 0U;
   std::uint64_t next_send_us_ = 0U;

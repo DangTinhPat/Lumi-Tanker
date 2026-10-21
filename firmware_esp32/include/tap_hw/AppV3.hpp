@@ -12,6 +12,7 @@
 #include "tap_fw/BoardConfig.hpp"
 #include "tap_fw/BusTransport.hpp"
 #include "tap_fw/MotorFeedback.hpp"
+#include "tap_fw/MotionApi.hpp"
 #include "tap_fw/v3/LegLock.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
 #include "tap_hw/Esp32Bus.hpp"
@@ -54,6 +55,7 @@ class AppV3 {
   static void netTaskEntry(void* arg) noexcept;
   TaskHandle_t net_task_ = nullptr;
   StreamBufferHandle_t net_sb_ = nullptr;
+  std::atomic<std::uint32_t> net_gap_max_ms_{0U}, net_eagain_{0U};  // Wi-Fi task: longest loop gap, full-send count
   std::atomic<std::uint32_t> net_rx_ms_{0U};  // millis() of the last byte from the Wi-Fi client
   void netTask() noexcept;
   void step(bool task) noexcept;
@@ -224,6 +226,11 @@ class AppV3 {
   bool can_ready_ = false;
   bool uart_ready_ = false;
   bool imu_ready_ = false;
+  // Finite moves (tap_fw::MotionApi): MOVE <m> [v], TURN <rad> [w], MSTAT on the console.
+  tap_fw::MotionApi motion_{};
+  void reportMotion(const tap_fw::MotionApi::Event& e) noexcept;
+  void pumpMotionEvents() noexcept;
+  std::array<float, tap_fw::v3::LegLock::kLegs> leg_zero_turns_{};  // ZERO: driver turns taken as the encoder zero
   float drive_forward_ = 0.0F;
   float drive_yaw_ = 0.0F;
   int last_state_ = -1;

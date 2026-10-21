@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "gui"))
 
+from tap_telemetry import TelemetryDecoder
 from gui.motion_api import MotionAPI, MotionLimits
 from gui.command_router import CommandResult, RobotCommandRouter
 from gui.vision_behavior import VisionBehaviorConfig, VisionTarget, Vbc
@@ -64,6 +65,8 @@ SENS_RE = re.compile(
     r"joint_q=\[([^]]+)\] pitch=([+-]?[\d.]+) pitch_rate=([+-]?[\d.]+)"
 )
 CONTROL_MODE_RE = re.compile(r"CONTROL mode=(\S+)")
+STATE_RE = re.compile(r"\bstate=(\w+)")
+MOT_RE = re.compile(r"^MOT kind=(\w+) state=(\w+) target=([-+\d.]+) progress=([-+\d.]+)")
 AXLE_X_RE = re.compile(r"\baxle_x=([+-]?[\d.]+)")
 HEIGHT_RE = re.compile(r"\bh=([0-9.]+).*?\bhtgt=([0-9.]+)")
 WHEEL_POS_RE = re.compile(
@@ -76,8 +79,12 @@ class _TcpPort:
     def __init__(self, host: str, port: int) -> None:
         self._sock = socket.create_connection((host, port), timeout=3.0)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:  # DSCP EF: Wi-Fi voice queue (WMM) instead of best effort
+            self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0xB8)
+        except OSError:
+            pass
         self._sock.settimeout(0.15)
-        self._buf = bytearray()
+        self._decoder = TelemetryDecoder()  # binary frames and plain text lines both come out as lines
         self.is_open = True
 
     def write(self, data: bytes) -> int:
@@ -88,21 +95,20 @@ class _TcpPort:
 
     def readline(self) -> bytes:
         while True:
-            end = self._buf.find(b"\n")
-            if end >= 0:
-                line = bytes(self._buf[:end + 1])
-                del self._buf[:end + 1]
-                return line
+            line = self._decoder.pop()
+            if line is not None:
+                return (line + "\n").encode("utf-8")
             try:
-                chunk = self._sock.recv(4096)
+                chunk = self._sock.recv(8192)
             except socket.timeout:
                 return b""
             if not chunk:
                 raise ConnectionError("robot closed the Wi-Fi connection")
-            self._buf += chunk
+            self._decoder.feed(chunk)
 
     def close(self) -> None:
         self.is_open = False
+        self._decoder.save()
         try:
             self._sock.close()
         except OSError:
@@ -132,6 +138,7 @@ class SerialLink:
         self.log_start = time.monotonic()
         self.telemetry: dict[str, str] = {}
         self.telemetry_received_monotonic_s = 0.0
+        self._tcp_target: tuple[str, int] | None = None
 
     def _log(self, text: str) -> None:
         if self.log_file is not None:
@@ -154,6 +161,7 @@ class SerialLink:
 
     def open(self, device: str) -> None:
         target = parse_tcp_target(device)
+        self._tcp_target = target
         if target is not None:
             self.port = _TcpPort(*target)
         else:
@@ -177,6 +185,9 @@ class SerialLink:
         self.stop_event.clear()
         self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self.reader_thread.start()
+        # Over Wi-Fi the robot skips the UART text (compact binary frames to this client only);
+        # over the cable it must print text again.
+        self.send("SET uartlog 0" if target is not None else "SET uartlog 1")
 
     def send(self, command: str) -> bool:
         with self.write_lock:
@@ -196,6 +207,13 @@ class SerialLink:
 
     def command_stop(self) -> bool:
         return self.send("STOP")
+
+    def command_move(self, distance_m: float, speed_m_s: float) -> bool:
+        """Finite move run by the firmware (MOVE); progress comes back as MOT lines."""
+        return self.send(f"MOVE {distance_m:.4f} {speed_m_s:.3f}")
+
+    def command_turn(self, angle_rad: float, rate_rad_s: float) -> bool:
+        return self.send(f"TURN {angle_rad:.4f} {rate_rad_s:.3f}")
 
     def command_estop(self) -> bool:
         return self.send("ESTOP")
@@ -217,16 +235,19 @@ class SerialLink:
             self.log_file = None
 
     def _read_loop(self) -> None:
-        port = self.port
-        if port is None:
-            return
         while not self.stop_event.is_set():
+            port = self.port
+            if port is None:
+                return
             try:
                 raw = port.readline()
             except (OSError, TypeError) as exc:
                 # TypeError: pyserial reading a port that close() just shut.
-                if not self.stop_event.is_set():
-                    self.incoming.put(f"[serial read error] {exc}")
+                if self.stop_event.is_set():
+                    return
+                self.incoming.put(f"[serial read error] {exc}")
+                if self._tcp_target is not None and self._reconnect():
+                    continue
                 return
             if raw:
                 line = raw.decode("utf-8", errors="replace").rstrip()
@@ -234,11 +255,45 @@ class SerialLink:
                 self._update_telemetry(line)
                 self.incoming.put(line)
 
+    def _reconnect(self) -> bool:
+        """The robot drops a stalled Wi-Fi connection to free its memory: join it again."""
+        for attempt in range(30):
+            if self.stop_event.wait(0.5):
+                return False
+            try:
+                new_port = _TcpPort(*self._tcp_target)
+            except OSError:
+                continue
+            old, self.port = self.port, new_port
+            try:
+                if old is not None:
+                    old.close()
+            except OSError:
+                pass
+            self.incoming.put(f"[reconnected to {self._tcp_target[0]} after {attempt + 1} tries]")
+            self._log("[event] Wi-Fi reconnected")
+            self.send("SET uartlog 0")
+            return True
+        self.incoming.put("[Wi-Fi: could not reconnect]")
+        return False
+
     def _update_telemetry(self, line: str) -> None:
         now = time.monotonic()
+        if line.startswith("MOT ") and (mot := MOT_RE.match(line)):
+            self.telemetry["motion_kind"] = mot.group(1)
+            self.telemetry["motion_state"] = mot.group(2)
+            self.telemetry["motion_target"] = mot.group(3)
+            self.telemetry["motion_progress"] = mot.group(4)
+            self.telemetry["motion_seq"] = str(int(self.telemetry.get("motion_seq", "0")) + 1)
+        elif "V3 TUNE motion=1" in line:
+            self.telemetry["fw_motion"] = "1"  # firmware has MOVE / TURN / MSTAT
         if match := CONTROL_MODE_RE.search(line):
             mode = match.group(1)
             self.telemetry["mode"] = "Balance" if mode == "Balancing" else mode
+        elif line.startswith("SENS ") and (state := STATE_RE.search(line)):
+            # CONTROL mode= is printed only on a command-driven change; the STANDUP -> Balancing
+            # handoff prints none, so the mode MotionAPI checks must also follow SENS (5 Hz).
+            self.telemetry["mode"] = "Balance" if state.group(1) == "Balancing" else state.group(1)
         if match := AXLE_X_RE.search(line):
             self.telemetry["wheel_position"] = match.group(1)
         if match := WHEEL_POS_RE.search(line):
@@ -379,24 +434,55 @@ class TapSerialControlApp:
             row=2, column=4, padx=4, pady=3, sticky="w")
         self._direction_button(actions, "▲ TIẾN (giữ)", "up", 3, 0, columnspan=2)
         self._direction_button(actions, "▼ LÙI (giữ)", "down", 3, 3, columnspan=2)
+        # Steering: hold to turn on the spot (yaw speed from the slider; A / D keys do the same).
+        self._direction_button(actions, "◀ TRÁI (giữ)", "left", 4, 0, columnspan=2)
+        self._direction_button(actions, "▶ PHẢI (giữ)", "right", 4, 3, columnspan=2)
         self.vision_button = ttk.Button(
             actions, text="Theo dõi người", command=self.toggle_vision)
-        self.vision_button.grid(row=4, column=0, columnspan=5, padx=4, pady=(8, 2),
+        self.vision_button.grid(row=5, column=0, columnspan=5, padx=4, pady=(8, 2),
                                 sticky="ew")
         ttk.Label(actions, textvariable=self.vision_status_var).grid(
-            row=5, column=0, columnspan=5, padx=4, pady=(0, 3), sticky="w")
+            row=6, column=0, columnspan=5, padx=4, pady=(0, 3), sticky="w")
         ttk.Checkbutton(actions,
                         text="Đã bật nguồn motor khi robot ở đúng tư thế nằm HOME (mốc encoder)",
                         variable=self.lying_zero_confirmed).grid(
-            row=6, column=0, columnspan=5, padx=4, pady=3, sticky="w")
+            row=7, column=0, columnspan=5, padx=4, pady=3, sticky="w")
         ttk.Button(actions, text="ĐỨNG DẬY từ tư thế nằm xấp → 130 mm",
                    command=self.standup).grid(
-            row=7, column=0, columnspan=5, padx=4, pady=3, sticky="ew")
+            row=8, column=0, columnspan=5, padx=4, pady=3, sticky="ew")
+        ttk.Button(actions, text="ZERO ENCODER chân (đã xếp chân, robot DISABLE)", command=self.zero_encoder).grid(
+            row=9, column=0, columnspan=5, padx=4, pady=3, sticky="ew")
         for column in range(5):
             actions.columnconfigure(column, weight=1)
 
         # v3.3 two-tier control + maneuver preview: always on in the firmware
         # (no toggles); SET vpitch/trunk/tprev 0 in the console for A/B tests.
+        # Exact moves: the firmware runs MOVE / TURN on the robot (odometry, gyro); progress comes back as MOT.
+        exact = ttk.LabelFrame(self.root, text="Di chuyển đúng khoảng cách / góc (firmware MOVE · TURN)", padding=10)
+        exact.pack(fill="x", padx=10, pady=(0, 8))
+        self.dist_var = tk.StringVar(value="0.5")
+        self.dspeed_var = tk.StringVar(value="0.2")
+        self.angle_var = tk.StringVar(value="90")
+        self.aspeed_var = tk.StringVar(value="20")
+        self.exact_var = tk.StringVar(value="Chưa có lệnh")
+        ttk.Label(exact, text="Quãng (m):").grid(row=0, column=0, sticky="e")
+        ttk.Entry(exact, textvariable=self.dist_var, width=7).grid(row=0, column=1, padx=3)
+        ttk.Label(exact, text="Tốc độ (m/s ≤0.20):").grid(row=0, column=2, sticky="e")
+        ttk.Entry(exact, textvariable=self.dspeed_var, width=6).grid(row=0, column=3, padx=3)
+        ttk.Button(exact, text="▲ Tiến", command=lambda: self.exact_move(1)).grid(row=0, column=4, padx=4, sticky="ew")
+        ttk.Button(exact, text="▼ Lùi", command=lambda: self.exact_move(-1)).grid(row=0, column=5, padx=4, sticky="ew")
+        ttk.Label(exact, text="Góc (độ):").grid(row=1, column=0, sticky="e", pady=(4, 0))
+        ttk.Entry(exact, textvariable=self.angle_var, width=7).grid(row=1, column=1, padx=3, pady=(4, 0))
+        ttk.Label(exact, text="Tốc độ quay (độ/s ≤23):").grid(row=1, column=2, sticky="e", pady=(4, 0))
+        ttk.Entry(exact, textvariable=self.aspeed_var, width=6).grid(row=1, column=3, padx=3, pady=(4, 0))
+        ttk.Button(exact, text="↶ Quay trái", command=lambda: self.exact_turn(-1)).grid(
+            row=1, column=4, padx=4, pady=(4, 0), sticky="ew")
+        ttk.Button(exact, text="↷ Quay phải", command=lambda: self.exact_turn(1)).grid(
+            row=1, column=5, padx=4, pady=(4, 0), sticky="ew")
+        ttk.Button(exact, text="HỦY", command=self.exact_cancel).grid(row=0, column=6, rowspan=2, padx=8, sticky="ns")
+        ttk.Label(exact, textvariable=self.exact_var).grid(row=2, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        self._exact_active = False
+
         tiers = ttk.LabelFrame(self.root, text="v3.3 điều khiển phân tầng (luôn bật)", padding=10)
         tiers.pack(fill="x", padx=10, pady=(0, 8))
         ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
@@ -610,6 +696,85 @@ class TapSerialControlApp:
         self.command_router.stop_all()
         self.session_active = False
         self._send("DISABLE")
+
+    def _exact_numbers(self, *variables: tk.StringVar) -> list[float] | None:
+        try:
+            values = [float(v.get().replace(",", ".")) for v in variables]
+        except ValueError:
+            messagebox.showinfo("Di chuyển đúng khoảng cách", "Nhập số hợp lệ.")
+            return None
+        return values
+
+    def _exact_refusal(self) -> str:
+        """Why MotionAPI said no, in words."""
+        tel = self.link.telemetry
+        age = time.monotonic() - self.link.telemetry_received_monotonic_s
+        if tel.get("mode") not in ("Balance", "Balancing", "Drive"):
+            return f"Bị từ chối: firmware ở chế độ {tel.get('mode', '?')}, chưa Balancing"
+        if self.link.telemetry_received_monotonic_s <= 0.0 or age > 0.25:
+            return f"Bị từ chối: telemetry cũ {age:.2f} s (cần < 0.25 s, Wi-Fi đang nghẽn?)"
+        return "Bị từ chối: tham số ngoài giới hạn (tốc độ ≤ 0.20 m/s, quãng 0.02–5 m, góc 3°–360°, quay ≤ 23 °/s)"
+
+    def exact_move(self, sign: int) -> None:
+        values = self._exact_numbers(self.dist_var, self.dspeed_var)
+        if values is None:
+            return
+        if not self._can_control():
+            self.exact_var.set("Cần robot đang Balancing và đã bấm START/STANDUP trong phiên này")
+            self.link.log_event(f"exact_move refused: mode={self.mode_var.get()} session_active={self.session_active}")
+            return
+        distance, speed = abs(values[0]), values[1]
+        ok = (self.motion.forward if sign > 0 else self.motion.backward)(speed, distance_m=distance)
+        self._exact_active = ok
+        self.exact_var.set(f"{'Tiến' if sign > 0 else 'Lùi'} {distance:.2f} m @ {speed:.2f} m/s: đang chạy"
+                           if ok else self._exact_refusal())
+        self.link.log_event(f"exact_move sign={sign:+d} d={distance} v={speed} -> {self.exact_var.get()}")
+
+    def exact_turn(self, sign: int) -> None:
+        values = self._exact_numbers(self.angle_var, self.aspeed_var)
+        if values is None:
+            return
+        if not self._can_control():
+            self.exact_var.set("Cần robot đang Balancing và đã bấm START/STANDUP trong phiên này")
+            return
+        angle, rate = math.radians(abs(values[0])) * sign, math.radians(abs(values[1]))
+        ok = self.motion.rotate(rate, angle_rad=angle)
+        self._exact_active = ok
+        self.exact_var.set(f"Quay {'phải' if sign > 0 else 'trái'} {abs(values[0]):.0f}°: đang chạy"
+                           if ok else self._exact_refusal())
+        self.link.log_event(f"exact_turn sign={sign:+d} a={values[0]} w={values[1]} -> {self.exact_var.get()}")
+
+    def exact_cancel(self) -> None:
+        self.motion.cancel_action()
+        self._exact_active = False
+        self.exact_var.set("Đã hủy")
+
+    def _exact_tick(self, now: float) -> None:
+        """Follow the move started from the panel (the command router only follows its own)."""
+        if not self._exact_active:
+            return
+        status = self.motion.update_action(now)
+        tel = self.link.telemetry
+        progress = tel.get("motion_progress")
+        if status.value == "running":
+            if progress is not None and tel.get("fw_motion") == "1":
+                self.exact_var.set(f"Đang chạy: {float(progress):+.3f} / {float(tel.get('motion_target', 0)):+.3f}")
+            return
+        self._exact_active = False
+        names = {"completed": "XONG", "timed_out": "Hết giờ", "rejected": "Bị dừng (không còn cân bằng / mất telemetry)",
+                 "cancelled": "Đã hủy"}
+        self.exact_var.set(f"{names.get(status.value, status.value)}"
+                           + (f" — tiến độ {float(progress):+.3f}" if progress is not None else ""))
+        self._append_log(f"[exact] {status.value}")
+
+    def zero_encoder(self) -> None:
+        """Take the current leg pose as encoder zero (as after a power-up), no supply cycling."""
+        if self.mode_var.get() not in ("Idle", "Fault", "—"):
+            messagebox.showinfo("Zero encoder", "Chỉ zero khi robot đang Idle/Fault. Bấm DISABLE trước.")
+            return
+        self.session_active = False
+        self.lying_zero_confirmed.set(False)
+        self._send("ZERO")
 
     def estop(self) -> None:
         self._follow_stop_status = "Vision: dừng do ESTOP"
@@ -1103,6 +1268,7 @@ class TapSerialControlApp:
             self.last_heartbeat = now
         self._tick_vision()
         self.command_router.update(now)
+        self._exact_tick(now)
         self.root.after(33, self._tick)
 
     def _parse_status(self, line: str) -> None:

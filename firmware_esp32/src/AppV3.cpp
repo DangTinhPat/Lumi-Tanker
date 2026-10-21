@@ -12,6 +12,7 @@
 #if TAP_WIFI
 #include <ESPmDNS.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <lwip/sockets.h>
 #include <cerrno>
 #if __has_include("tap_hw/WifiSecrets.hpp")
@@ -31,6 +32,7 @@
 
 #include "robot_hal/MotorFrameCodec.hpp"
 #include "robot_control/GeneratedGeometry.hpp"
+#include "tap_fw/MotionProfile.hpp"
 #include "tap_fw/FastFormat.hpp"
 #include "tap_fw/ImuMount.hpp"
 #include "tap_fw/v3/JointTestSchedule.hpp"
@@ -343,11 +345,13 @@ void AppV3::netTask() noexcept {
   constexpr char kPass[] = "taprobot123";
   WiFi.persistent(false);
   bool sta = false;
-#ifdef TAP_WIFI_STA_SSID
+#if defined(TAP_WIFI_STA_SSID) && !defined(TAP_WIFI_FORCE_AP)
   // Join the shared network first (laptop and robot on the same router); the own access point
   // below is the fallback when it is not reachable within 10 s.
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // modem sleep would add up to ~100 ms to every command
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.setAutoReconnect(true);
   WiFi.setHostname("tap-rb");
   WiFi.begin(TAP_WIFI_STA_SSID, TAP_WIFI_STA_PASS);
@@ -372,18 +376,40 @@ void AppV3::netTask() noexcept {
   WiFiClient client;
   char text[sizeof(LineItem::text)];
   std::size_t text_len = 0U;
-  std::uint8_t pending[512];
+  std::uint8_t pending[1400];  // one TCP segment
   std::size_t pending_size = 0U, pending_pos = 0U;
+  std::uint32_t last_loop_ms = millis(), last_batch_ms = 0U;
+  bool tee_live = false;
+  std::uint32_t stall_since_ms = 0U;
   for (;;) {
+    {
+      const std::uint32_t now_ms = millis();
+      const std::uint32_t gap = now_ms - last_loop_ms;
+      last_loop_ms = now_ms;
+      std::uint32_t seen = net_gap_max_ms_.load(std::memory_order_relaxed);
+      if (gap > seen) net_gap_max_ms_.store(gap, std::memory_order_relaxed);
+    }
     if (!client || !client.connected()) {
       if (client) client.stop();
+      if (tee_live) {  // client gone: stop the copy and bring the UART console back
+        tee_live = false;
+        out_.setTeeActive(false);
+        out_.setUartText(true);
+      }
       WiFiClient incoming = server.accept();
       if (incoming) {
         client = incoming;
         client.setNoDelay(true);
         client.setTimeout(1);
+        {  // DSCP EF: the router puts this connection in the Wi-Fi voice queue (WMM), ahead of bulk traffic
+          const int tos = 0xB8;
+          (void)::setsockopt(client.fd(), IPPROTO_IP, IP_TOS, &tos, sizeof tos);
+        }
         xStreamBufferReset(net_sb_);
         pending_size = pending_pos = text_len = 0U;
+        stall_since_ms = 0U;
+        tee_live = true;
+        out_.setTeeActive(true);  // after the reset: the first template frames must survive
         client.printf("WIFI client connected, %s\r\n", where);
       }
     }
@@ -405,15 +431,37 @@ void AppV3::netTask() noexcept {
         text_len = 0U;
       }
       if (pending_pos == pending_size) {
-        pending_size = xStreamBufferReceive(net_sb_, pending, sizeof pending, 0);
-        pending_pos = 0U;
+        // Batch: send a full segment, or whatever has collected in 20 ms. At 150 records/s one
+        // packet per record kept the radio and the laptop's power-save busy with small frames.
+        const std::size_t waiting = xStreamBufferBytesAvailable(net_sb_);
+        const std::uint32_t now_ms = millis();
+        if (waiting >= 1200U || (waiting != 0U && now_ms - last_batch_ms >= 20U)) {
+          pending_size = xStreamBufferReceive(net_sb_, pending, sizeof pending, 0);
+          pending_pos = 0U;
+          last_batch_ms = now_ms;
+        }
       }
       if (pending_pos < pending_size) {
         // Never block here: a blocking write stalls the reads, the heartbeat stops arriving
         // and the session lease disables the robot (seen 2026-10-20 during STANDUP).
         const int sent = ::send(client.fd(), pending + pending_pos, pending_size - pending_pos, MSG_DONTWAIT);
-        if (sent > 0) pending_pos += static_cast<std::size_t>(sent);
-        else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) client.stop();
+        if (sent > 0) {
+          pending_pos += static_cast<std::size_t>(sent);
+          stall_since_ms = 0U;
+        } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+          client.stop();
+        } else {
+          net_eagain_.fetch_add(1U, std::memory_order_relaxed);
+          // The client does not take data (Wi-Fi stall): lwIP and the radio driver keep the unsent
+          // data in heap, which fell from 45 KB to 2.8 KB (logs 21/10 09:25) and risks a crash.
+          // Drop the connection after 1.5 s; the GUI joins again.
+          const std::uint32_t now_ms = millis();
+          if (stall_since_ms == 0U) stall_since_ms = now_ms;
+          else if (now_ms - stall_since_ms > 1500U) {
+            client.stop();
+            stall_since_ms = 0U;
+          }
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(5));  // heartbeat arrives every 200 ms; 5 ms keeps the radio task calm
@@ -618,9 +666,54 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     estop_ = false;
     out_.println("V3 E-STOP cleared");
   } else if (std::strcmp(line, "STOP") == 0) {
+    motion_.stop();
+    pumpMotionEvents();
     drive_forward_ = drive_yaw_ = 0.0F;
+  } else if (std::strncmp(line, "MOVE ", 5U) == 0 || std::strncmp(line, "TURN ", 5U) == 0) {
+    const bool turn = line[0] == 'T';
+    float target = 0.0F, rate = 0.0F;
+    const int n = std::sscanf(line + 5, "%f %f", &target, &rate);
+    if (n < 1) {
+      out_.printf("MOT kind=%s state=refused reason=usage (%s <%s> [<%s>])\n", turn ? "turn" : "move",
+                  turn ? "TURN" : "MOVE", turn ? "angle_rad" : "distance_m", turn ? "rate_rad_s" : "speed_m_s");
+    } else {
+      (void)(turn ? motion_.rotate(target, n == 2 ? rate : 0.0F) : motion_.move(target, n == 2 ? rate : 0.0F));
+      pumpMotionEvents();
+    }
+  } else if (std::strcmp(line, "ZERO") == 0 || std::strcmp(line, "ZERO CLEAR") == 0) {
+    // Re-zero the four leg encoders at the pose the legs are in now (fold them as for a power-up),
+    // without switching the motor supply off and on. Software reference only: the drivers keep
+    // counting from their own power-up pose, a later ESP reset forgets it (ZERO again).
+    const bool clear = line[4] != '\0';
+    if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+      out_.println("V3 ZERO refused: DISABLE first");
+    } else if (legs_.engaged()) {
+      out_.println("V3 ZERO refused: legs still locked (DISABLE releases them)");
+    } else if (!clear && !legsFresh(now_us)) {
+      out_.println("V3 ZERO refused: no fresh leg feedback (motor supply on?)");
+    } else {
+      for (std::size_t leg = 0; leg < LegLock::kLegs; ++leg) {
+        leg_zero_turns_[leg] = clear ? 0.0F
+            : feedback_.legEstimate(tap_fw::board::MotorIds{}.leg_can[leg].joint_index).pos_turns;
+      }
+      legs_.setZeroTurns(leg_zero_turns_);
+      out_.printf("V3 ZERO %s: leg zero turns [%+.4f %+.4f %+.4f %+.4f] (joint_q now %+.3f %+.3f %+.3f %+.3f rad)\n",
+                  clear ? "cleared (driver power-up zero)" : "set at the current pose", leg_zero_turns_[0],
+                  leg_zero_turns_[1], leg_zero_turns_[2], leg_zero_turns_[3], legJointRad(0), legJointRad(1),
+                  legJointRad(2), legJointRad(3));
+    }
+  } else if (std::strcmp(line, "MSTAT") == 0) {
+    tap_fw::MotionApi::Event e;
+    e.kind = motion_.kind();
+    e.status = motion_.status();
+    e.target = motion_.target();
+    e.progress = motion_.progress();
+    if (e.kind == tap_fw::MotionApi::Kind::None) out_.println("MOT kind=none state=idle target=+0.000 progress=+0.000 speed=0.00");
+    else reportMotion(e);
   } else if (std::strncmp(line, "DRIVE ", 6U) == 0) {
     float f = 0.0F, y = 0.0F;
+    motion_.stop();
+    pumpMotionEvents();
     if (std::sscanf(line + 6, "%f %f", &f, &y) == 2) {
       drive_forward_ = std::clamp(f, -kSerialDriveSpeedMS, kSerialDriveSpeedMS);
       drive_yaw_ = std::clamp(y, -kBleYawRateRadS, kBleYawRateRadS);
@@ -780,6 +873,16 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       ctrl_.config().standup.handoff_gate_from_lean_ref = v >= 0.5F;
       out_.printf("V3 standgate=%d (B4 handoff lean/capture gates measured from the learned stopping lean target)\n",
                   ctrl_.config().standup.handoff_gate_from_lean_ref ? 1 : 0);
+    }
+    else if (!std::strcmp(key, "uartlog")) {
+      out_.printf("V3 uartlog=%d (SET uartlog 0/1): console text on the UART; off = log only to the Wi-Fi client "
+                  "(back on by itself when it disconnects)\n", v >= 0.5F ? 1 : 0);
+      out_.setUartText(v >= 0.5F);
+    }
+    else if (!std::strcmp(key, "wifilog")) {
+      out_.setTeeBinary(v >= 0.5F);
+      out_.printf("V3 wifilog=%d (SET wifilog 0/1): Wi-Fi log as text (0) or compact binary frames (1, tools/tap_telemetry.py)\n",
+                  v >= 0.5F ? 1 : 0);
     }
     else if (!std::strcmp(key, "standrisepost")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1330,7 +1433,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                   "(robot must be on the stand)\n", name, rec_amp_,
                   static_cast<unsigned long>(rec_resend_us_), rec_duration_s_);
   } else {
-    out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE "
+    out_.printf("V3 unknown command '%s' (START DISABLE ESTOP CLEAR_ESTOP STOP DRIVE MOVE TURN MSTAT ZERO "
                   "GO HMOVE LEGMODE POS|MIT SET GET BALANCE [CLEAR] TILTTEST HIPTEST KNEETEST [FLOOR] "
                   "REC)\n", line);
   }
@@ -1525,6 +1628,10 @@ void AppV3::printTunables() noexcept {
                 su.rise_min_quality, su.rise_delay_s, su.rise_wait_max_s);
     out_.printf("V3 TUNE trimseed=%.3f rad (SET trimseed): offset added to the LQR trim seed at the stand-up handoff\n",
                 su.balance_trim_seed_offset_rad);
+    out_.printf("V3 TUNE uartlog=%d wifilog=%d (SET uartlog / SET wifilog): UART text console, Wi-Fi copy binary\n",
+                out_.uartText() ? 1 : 0, out_.teeBinaryMode() ? 1 : 0);
+    out_.println("V3 TUNE motion=1 (MOVE m [v] / TURN rad [w] / MSTAT): finite moves run on the robot; "
+                 "MOT kind=move|turn state=running|done|timeout|aborted|cancelled|refused target= progress= speed=");
     out_.printf("V3 TUNE standrisepost=%.2f rad/s (SET standrisepost): signed body leveling by the hip during/after the B4 knee rise\n",
                 su.catch_rise_posture_rate_rad_s);
     out_.printf("V3 TUNE standhiprel=%.2f rad/s (SET standhiprel): hip walk-back rate after the recovery pose release\n",
@@ -1630,7 +1737,7 @@ bool AppV3::legsFresh(std::uint64_t now_us) const noexcept {
 
 float AppV3::legJointRad(std::size_t leg) const noexcept {
   const std::size_t joint = tap_fw::board::MotorIds{}.leg_can[leg].joint_index;
-  return feedback_.legEstimate(joint).pos_turns * kTwoPi / 8.0F;
+  return (feedback_.legEstimate(joint).pos_turns - leg_zero_turns_[leg]) * kTwoPi / 8.0F;
 }
 
 float AppV3::legJointRate(std::size_t leg) const noexcept {
@@ -1774,15 +1881,40 @@ const char* AppV3::legAxisProblem(std::uint64_t now_us, bool need_closed_loop) c
   return text;
 }
 
+// MOVE: forward odometry of the axle (ground_x_) toward the target distance; TURN: the gyro yaw
+// rate integrated (its sign matches the DRIVE yaw sign: logs 19/10, corr +0.89). Both use the
+// speed that stops at the target, abort if the robot stops balancing, runs out of time, or a
+// turn goes the wrong way (so a sign error can never spin the robot away).
+void AppV3::reportMotion(const tap_fw::MotionApi::Event& e) noexcept {
+  out_.printf("MOT kind=%s state=%s target=%+.3f progress=%+.3f speed=%.2f%s%s\n",
+              e.kind == tap_fw::MotionApi::Kind::Turn ? "turn" : "move",
+              tap_fw::MotionApi::statusName(e.status), e.target, e.progress, e.speed,
+              e.reason[0] != '\0' ? " reason=" : "", e.reason);
+}
+
+void AppV3::pumpMotionEvents() noexcept {
+  tap_fw::MotionApi::Event e;
+  while (motion_.takeEvent(e)) reportMotion(e);
+}
+
 void AppV3::controlTick(std::uint64_t now_us) noexcept {
   feedback_.writeTo(state_);
   const auto st = ctrl_.state();
   const bool active = st == V3Controller::State::Locking || st == V3Controller::State::Ready ||
       st == V3Controller::State::Balancing || st == V3Controller::State::StandUp;
 
+  tap_fw::MotionApi::Feedback mf;
+  mf.now_us = now_us;
+  mf.dt_s = tick_dt_s_;
+  mf.balancing = st == V3Controller::State::Balancing;
+  mf.ground_x_m = ctrl_.groundPosition();
+  mf.ground_v_m_s = ctrl_.groundVelocity();
+  mf.yaw_rate_rad_s = imu_.yaw_rate_rad_s;
+  const auto motion = motion_.update(mf);
+  pumpMotionEvents();
   V3Controller::Command cmd{};
-  cmd.forward_m_s = drive_forward_;
-  cmd.yaw_rad_s = drive_yaw_;
+  cmd.forward_m_s = motion.active ? motion.forward_m_s : drive_forward_;
+  cmd.yaw_rad_s = motion.active ? motion.yaw_rad_s : drive_yaw_;
   // HMOVE held but no refresh (GUI closed, link lost): stop where it is.
   if (hmove_dir_ != 0 && now_us - hmove_last_us_ > kHeightHoldUs) {
     freezeHeight();
@@ -2472,6 +2604,11 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" rssi=").i32(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0)
 #endif
       .str(" heap=").u32(ESP.getFreeHeap()).chr('/').u32(ESP.getMinFreeHeap())
+      .str(" teedrop=").u32(out_.teeDropped())
+#if TAP_WIFI
+      .str(" netgap=").u32(net_gap_max_ms_.exchange(0U, std::memory_order_relaxed))
+      .str(" neteagain=").u32(net_eagain_.exchange(0U, std::memory_order_relaxed))
+#endif
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(b);
   // Bounded transport evidence, separate from requested wcmd and controller

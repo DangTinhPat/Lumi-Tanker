@@ -61,8 +61,12 @@ bằng GUI (Dabble gamepad vẫn có). v1 (`esp32-s3-poc`) và v2 (`impulse-v2`)
 
 ## Lệnh console
 
-`START`, `GO`, `GO NOW`, `TILTTEST`, `BALANCE`, `BALANCE CLEAR`, `DISABLE`, `ESTOP`, `CLEAR_ESTOP`, `STOP`, `DRIVE f y`, `HMOVE ±1`,
+`START`, `GO`, `GO NOW`, `TILTTEST`, `BALANCE`, `BALANCE CLEAR`, `DISABLE`, `ESTOP`, `CLEAR_ESTOP`, `STOP`, `DRIVE f y`, `MOVE m [v]`, `TURN rad [w]`, `HMOVE ±1`,
 `GET` (in các dòng `V3 TUNE …`), `LEGMODE POS|MIT` (khi Idle), `SET <khóa> <giá trị>`.
+
+The same moves are a C++ API inside the firmware, `tap_fw::MotionApi` (`src_fw/include/tap_fw/MotionApi.hpp`): `forward(m, v)`, `backward(m, v)`, `move(signed m, v)`, `rotate(signed rad, w)`, `stop()`, `update(feedback)` each control tick, `takeEvent()` for the state changes, `status()`. `AppV3` owns one (`motion_`) and the console commands below call it.
+
+`MOVE m [v]` travels a signed distance (0.02-1000 m, default 0.3 m/s, 0.05-4.19) from the axle odometry; `TURN rad [w]` turns a signed angle (0.05-62.8 rad, default 0.5 rad/s, 0.1-1.5) from the integrated gyro yaw rate, positive = the sign of `DRIVE` yaw. Both run on the robot (cruise, then the speed that stops at the target, decel 0.30 m/s^2 / 1 rad/s^2), need the robot Balancing, report `MOT kind=move|turn state=running|done|timeout|aborted|cancelled|refused target=<x> progress=<x> speed=<x>` (a `running` line at 5 Hz, one final state line; `MSTAT` repeats the latest; boot `V3 TUNE motion=1` announces the API), and are cancelled by `STOP`, `DRIVE`, a fault or `DISABLE`; a turn that goes the wrong way for 1 s is aborted, and a move times out after `max(3, 2.5 d/v + 2)` s.
 
 `SET` theo nhóm (khóa chính xác nằm trong `handleSet` của `AppV3.cpp`; `GET` in giá trị đang dùng):
 - **Bánh/LQR:** `algo` (0 LQR+tầng, 1 PID, 2 whole-body; chỉ khi Idle), `accel`, `amax`, `trim_gain|trim_max|trim|margin|pitch_scale`,

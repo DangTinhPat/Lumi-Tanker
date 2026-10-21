@@ -68,6 +68,7 @@ class MotionAPI:
         self._action_start_left_m = 0.0
         self._action_start_right_m = 0.0
         self._action_start_position_m = 0.0
+        self._fw_seq = 0
 
     def command_velocity(self, linear_m_s: float, yaw_rad_s: float) -> bool:
         """Set forward velocity and yaw rate; finite requests are clamped.
@@ -179,6 +180,8 @@ class MotionAPI:
             "wheel_position", "wheel_left_position", "wheel_right_position")
         if state is None:
             return self._reject_action()
+        if self._firmware_motion():
+            return self._begin_firmware_action("fw_distance", distance_m, speed_m_s, timeout)
         self._begin_action("distance", distance_m, tolerance_m, speed_m_s,
                            decel_m_s2, timeout, state["wheel_position"],
                            state["wheel_left_position"],
@@ -208,6 +211,8 @@ class MotionAPI:
             "wheel_left_position", "wheel_right_position")
         if state is None:
             return self._reject_action()
+        if self._firmware_motion():
+            return self._begin_firmware_action("fw_turn", angle_rad, yaw_rate_rad_s, timeout)
         mean_position = 0.5 * (state["wheel_left_position"] +
                                 state["wheel_right_position"])
         self._begin_action("turn", angle_rad, tolerance_rad, yaw_rate_rad_s,
@@ -234,6 +239,8 @@ class MotionAPI:
         if fields.get("mode") not in ("Balance", "Balancing", "Drive"):
             self._end_action(ActionStatus.REJECTED)
             return self.action_status
+        if self._action_kind.startswith("fw_"):
+            return self._update_firmware_action(fields)
         try:
             if self._action_kind == "distance":
                 current = float(fields["wheel_position"])
@@ -261,6 +268,44 @@ class MotionAPI:
                 if self._action_kind == "distance"
                 else self._send_velocity(0.0, signed_speed))
         if not sent:
+            self._end_action(ActionStatus.REJECTED)
+        return self.action_status
+
+    # -- finite moves run by the firmware (MOVE / TURN, progress as MOT lines) ------------------
+    def _firmware_motion(self) -> bool:
+        return (hasattr(self.backend, "command_move") and
+                self.backend.telemetry.get("fw_motion") == "1")
+
+    def _begin_firmware_action(self, kind: str, target: float, rate: float,
+                               timeout_s: float) -> bool:
+        self._fw_seq = int(self.backend.telemetry.get("motion_seq", "0"))
+        sent = (self.backend.command_move(target, rate) if kind == "fw_distance"
+                else self.backend.command_turn(target, rate))
+        if sent is False:
+            return self._reject_action()
+        self._action_kind = kind
+        self._action_start_s = time.monotonic()
+        self._action_timeout_s = timeout_s + 2.0   # the firmware has its own timeout
+        self._action_target = target
+        self.action_status = ActionStatus.RUNNING
+        return True
+
+    def _update_firmware_action(self, fields) -> ActionStatus:
+        try:
+            seq = int(fields.get("motion_seq", "0"))
+        except ValueError:
+            seq = 0
+        if seq <= self._fw_seq:
+            return self.action_status   # no answer to our command yet
+        state = fields.get("motion_state", "")
+        if state == "done":
+            self._end_action(ActionStatus.COMPLETED)
+        elif state == "timeout":
+            self._end_action(ActionStatus.TIMED_OUT)
+        elif state == "cancelled":
+            self._action_kind = ""
+            self.action_status = ActionStatus.CANCELLED
+        elif state in ("aborted", "refused"):
             self._end_action(ActionStatus.REJECTED)
         return self.action_status
 

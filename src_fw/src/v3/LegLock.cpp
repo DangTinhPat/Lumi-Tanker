@@ -72,7 +72,8 @@ float LegLock::targetTurns(std::size_t leg, std::uint64_t now_us) const noexcept
   const float offset_core = knee ? knee_offset_rad_ + side_knee_rad_[side]
                                  : hip_offset_rad_ + side_hip_rad_[side];
   const float offset_turns = offset_core * binding.driver_sign * config_.gear_ratio / kTwoPi;
-  return ramp_to_zero_ ? start_turns_[leg] * (1.0F - blend) + offset_turns : offset_turns;
+  return ramp_to_zero_ ? start_turns_[leg] * (1.0F - blend) + zero_turns_[leg] * blend + offset_turns
+                       : offset_turns + zero_turns_[leg];
 }
 
 float LegLock::velFfTurns(std::size_t leg) const noexcept {

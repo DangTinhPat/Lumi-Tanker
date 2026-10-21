@@ -14,6 +14,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/stream_buffer.h>
 #include "tap_fw/DeferredFormat.hpp"
+#include "tap_fw/TelemetryCodec.hpp"
 
 namespace tap_hw {
 
@@ -69,35 +70,22 @@ class OutSink {
   // retain a partial serial write without ever waiting for UART space.
   void drainTo(HardwareSerial& out) noexcept {
     if (sb_ == nullptr) return;
+    if (!uart_text_.load(std::memory_order_relaxed)) {
+      drainTeeOnly();
+      return;
+    }
     int room = out.availableForWrite();
     while (room > 0) {
       if (text_pos_ == text_size_) {
         text_pos_ = text_size_ = 0U;
-        if (payload_size_ == 0U) {
-          if (xStreamBufferBytesAvailable(sb_) < 3U) break;
-          std::uint8_t header[3];
-          (void)xStreamBufferReceive(sb_, header, sizeof header, 0);
-          kind_ = header[0];
-          payload_size_ = header[1] | (static_cast<std::size_t>(header[2]) << 8U);
-        }
-        // Producer may have published the header but not the payload yet.
-        if (xStreamBufferBytesAvailable(sb_) < payload_size_) break;
-        (void)xStreamBufferReceive(sb_, payload_, payload_size_, 0);
-        if (kind_ == 1U) {
-          text_size_ = tap_fw::DeferredLine::render(payload_, payload_size_, text_, sizeof text_);
-          if (text_size_ == 0U) ++dropped_;
-        } else {
-          std::memcpy(text_, payload_, payload_size_);
-          text_size_ = payload_size_;
-        }
+        if (!pullRecord()) break;
+        const bool tee_live = tee_ != nullptr && tee_on_.load(std::memory_order_relaxed);
+        if (tee_live && tee_binary_.load(std::memory_order_relaxed)) teeBinary();
+        renderRecord();
         payload_size_ = 0U;
         // Bound work even when a record cannot be rendered.
         if (text_size_ == 0U) break;
-        // Second consumer (Wi-Fi task): a whole record or nothing, never blocking.
-        if (tee_ != nullptr && !teeSkips()) {
-          if (xStreamBufferSpacesAvailable(tee_) >= text_size_) (void)xStreamBufferSend(tee_, text_, text_size_, 0);
-          else ++tee_dropped_;
-        }
+        if (tee_live && !tee_binary_.load(std::memory_order_relaxed)) teeText();
       }
       const auto want = std::min(text_size_ - text_pos_, static_cast<std::size_t>(room));
       const auto sent = out.write(reinterpret_cast<const std::uint8_t*>(text_ + text_pos_), want);
@@ -105,6 +93,33 @@ class OutSink {
       room -= static_cast<int>(sent);
       if (sent == 0U) break;
     }
+  }
+  // UART text off: records go only to the Wi-Fi copy and no number is turned into text at all
+  // when that copy is binary (the default). Bounded work per call.
+  void drainTeeOnly() noexcept {
+    for (int n = 0; n < 24; ++n) {
+      if (!pullRecord()) break;
+      if (tee_ != nullptr && tee_on_.load(std::memory_order_relaxed)) {
+        if (tee_binary_.load(std::memory_order_relaxed)) {
+          teeBinary();
+        } else {
+          renderRecord();
+          if (text_size_ != 0U) teeText();
+        }
+      }
+      payload_size_ = 0U;
+      text_size_ = text_pos_ = 0U;
+    }
+  }
+  // UART console on/off (SET uartlog) and the Wi-Fi copy: on only while a client is connected,
+  // binary (tap_fw::TelemetryEncoder) or plain text (SET wifilog).
+  void setUartText(bool on) noexcept { uart_text_.store(on, std::memory_order_relaxed); }
+  [[nodiscard]] bool uartText() const noexcept { return uart_text_.load(std::memory_order_relaxed); }
+  void setTeeBinary(bool on) noexcept { tee_binary_.store(on, std::memory_order_relaxed); }
+  [[nodiscard]] bool teeBinaryMode() const noexcept { return tee_binary_.load(std::memory_order_relaxed); }
+  void setTeeActive(bool on) noexcept {
+    if (on) encoder_.resendTemplates();
+    tee_on_.store(on, std::memory_order_relaxed);
   }
   void setTee(StreamBufferHandle_t tee) noexcept { tee_ = tee; }
   // While the robot stands up or balances the Wi-Fi copy carries less: no WT/WBUS diagnostics and
@@ -115,12 +130,59 @@ class OutSink {
   [[nodiscard]] std::uint32_t dropped() const noexcept { return dropped_.load(std::memory_order_relaxed); }
 
  private:
-  bool teeSkips() noexcept {
-    if (!tee_quiet_.load(std::memory_order_relaxed) || text_size_ < 3U) return false;
-    const char a = text_[0], b = text_[1];
-    if ((a == 'W' && b == 'T' && text_[2] == ' ') || (a == 'W' && b == 'B' && text_size_ > 4U && text_[2] == 'U')) return true;
-    if (a == 'S' && (b == 'U' || b == 'C' || b == 'W' || b == 'V' || b == 'F') && text_[2] == ' ') return (tee_snapshot_++ & 1U) != 0U;
+  bool teeSkips(const char* t, std::size_t n) noexcept {
+    // Only the text copy is thinned out; the compact binary copy carries every record.
+    if (tee_binary_.load(std::memory_order_relaxed) || !tee_quiet_.load(std::memory_order_relaxed) || n < 3U) return false;
+    const char a = t[0], b = t[1];
+    if ((a == 'W' && b == 'T' && t[2] == ' ') || (a == 'W' && b == 'B' && n > 4U && t[2] == 'U')) return true;
+    if (a == 'S' && (b == 'U' || b == 'C' || b == 'W' || b == 'V' || b == 'F') && t[2] == ' ') return (tee_snapshot_++ & 1U) != 0U;
     return false;
+  }
+  // Next complete record from the stream buffer into kind_/payload_/payload_size_; the caller
+  // clears payload_size_ when it is done with it.
+  bool pullRecord() noexcept {
+    if (payload_size_ == 0U) {
+      if (xStreamBufferBytesAvailable(sb_) < 3U) return false;
+      std::uint8_t header[3];
+      (void)xStreamBufferReceive(sb_, header, sizeof header, 0);
+      kind_ = header[0];
+      payload_size_ = header[1] | (static_cast<std::size_t>(header[2]) << 8U);
+    }
+    // Producer may have published the header but not the payload yet.
+    if (xStreamBufferBytesAvailable(sb_) < payload_size_) return false;
+    (void)xStreamBufferReceive(sb_, payload_, payload_size_, 0);
+    return true;
+  }
+  void renderRecord() noexcept {
+    if (kind_ == 1U) {
+      text_size_ = tap_fw::DeferredLine::render(payload_, payload_size_, text_, sizeof text_);
+      if (text_size_ == 0U) ++dropped_;
+    } else {
+      std::memcpy(text_, payload_, payload_size_);
+      text_size_ = payload_size_;
+    }
+  }
+  void teeText() noexcept {
+    if (teeSkips(text_, text_size_)) return;
+    if (xStreamBufferSpacesAvailable(tee_) >= text_size_) (void)xStreamBufferSend(tee_, text_, text_size_, 0);
+    else ++tee_dropped_;
+  }
+  void teeBinary() noexcept {
+    if (teeSkips(payload_, payload_size_)) return;
+    std::size_t w = 0U;
+    if (kind_ == 1U) w = encoder_.encodeDeferred(payload_, payload_size_, millis(), frame_, sizeof frame_);
+    if (w == 0U) {  // not encodable (or plain text): a text frame
+      std::size_t n = payload_size_;
+      const char* src = payload_;
+      if (kind_ == 1U) {
+        n = tap_fw::DeferredLine::render(payload_, payload_size_, text_, sizeof text_);
+        src = text_;
+      }
+      if (n == 0U) return;
+      w = encoder_.encodeText(src, n, frame_, sizeof frame_);
+    }
+    if (w != 0U && xStreamBufferSpacesAvailable(tee_) >= w) (void)xStreamBufferSend(tee_, frame_, w, 0);
+    else ++tee_dropped_;
   }
   bool enqueue(const char* data, std::size_t n, std::uint8_t kind) noexcept {
     if (n == 0U) return true;
@@ -139,6 +201,9 @@ class OutSink {
   StreamBufferHandle_t sb_ = nullptr;
   StreamBufferHandle_t tee_ = nullptr;
   std::atomic<bool> tee_quiet_{false};
+  std::atomic<bool> uart_text_{true}, tee_on_{false}, tee_binary_{true};
+  tap_fw::TelemetryEncoder encoder_{};
+  std::uint8_t frame_[2048]{};
   std::uint32_t tee_snapshot_ = 0U;
   std::uint32_t tee_dropped_ = 0U;
   std::atomic<std::uint32_t> dropped_{0U};
