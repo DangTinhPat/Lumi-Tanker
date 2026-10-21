@@ -13,6 +13,7 @@
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
 #include <cerrno>
@@ -228,11 +229,12 @@ bool AppV3::begin() noexcept {
   // Hip share of the residual lean = (l/l_hang)^0.15 (0.88 at 78 mm): mechanism 1
   // must still act crouched. SET texp 1.5 restores the old crouch cut (HANDOFF 5.46).
   ctrl_.config().tier.height_exp = 0.15F;
-  // Roll balance off: the lowering fall first appeared in the build that added it,
-  // and it held a -9..-12 mm leg height difference (HANDOFF 5.45). SET roll 1
-  // turns it on (and the 12 mm roll start reserve applies). rollvff stays off: it
-  // made the side legs hunt (SET rollvff 1).
-  ctrl_.config().roll.enabled = false;
+  // Roll balance on (21/10): the stand-up works, and driving/turning needs the side legs to lean into the turn and
+  // level the body (host tier sim, two-tier path: apparent roll in a 0.55 m/s, 2 rad/s turn 0.066 -> 0.016, 110 mm
+  // crouch 0.144 -> 0.031, no fall). It was off since 07/10 because the first build with it fell while lowering
+  // (HANDOFF 5.45, later shown not to be the roll). Robot-unverified in its layered form: watch rref, rm, rdh;
+  // SET roll 0 turns it off. rollvff stays off: it made the side legs hunt (SET rollvff 1).
+  ctrl_.config().roll.enabled = true;
   // Layered roll response, used once SET roll 1 (docs/ROLL_REDESIGN_20261005.md): level
   // reference learned in place (not a fixed -0.040), turn lean-in from the commanded yaw,
   // a latch that fades the loop out if it cannot level the body, and the loop belongs to the
@@ -442,6 +444,11 @@ void AppV3::netTask() noexcept {
   ArduinoOTA.onEnd([]() { Serial.println("OTA: update done, restarting"); });
   ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA: error %d\n", static_cast<int>(e)); });
   ArduinoOTA.begin();
+  // Discovery beacon: one UDP broadcast packet to port 8024 saying where the console is, so the GUI finds the robot
+  // on any network (phone hotspot, new router) without knowing its address. Every second while no client is
+  // connected, every 5 s otherwise.
+  WiFiUDP beacon;
+  std::uint32_t last_beacon_ms = 0U;
   WiFiClient client;
   char text[sizeof(LineItem::text)];
   std::size_t text_len = 0U;
@@ -463,6 +470,23 @@ void AppV3::netTask() noexcept {
       if (st == V3Controller::State::Idle || st == V3Controller::State::Fault) ArduinoOTA.handle();
     }
     const bool have_client = client && client.connected();
+    {
+      const std::uint32_t now_ms = millis();
+      if (now_ms - last_beacon_ms >= (have_client ? 5000U : 1000U)) {
+        last_beacon_ms = now_ms;
+        const bool up = sta ? WiFi.status() == WL_CONNECTED : ap;
+        if (up) {
+          const IPAddress ip = sta ? WiFi.localIP() : WiFi.softAPIP();
+          const IPAddress bcast = sta ? WiFi.broadcastIP() : IPAddress(192, 168, 4, 255);
+          char msg[96];
+          const int n = std::snprintf(msg, sizeof msg, "TAP-RB 1 %s 8023 tap-rb\n", ip.toString().c_str());
+          if (n > 0 && beacon.beginPacket(bcast, 8024)) {
+            beacon.write(reinterpret_cast<const std::uint8_t*>(msg), static_cast<std::size_t>(n));
+            beacon.endPacket();
+          }
+        }
+      }
+    }
     if (!have_client) {
       if (client) client.stop();
       if (tee_live) {  // client gone: stop the copy and bring the UART console back
@@ -789,7 +813,7 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
                   legJointRad(2), legJointRad(3));
     }
   } else if (std::strcmp(line, "DUMP") == 0) {
-    if (rec_ring_ && rec_n_ != 0U && !rec_active_ && !rec_dumping_ &&
+    if (rec_ring_ && rec_n_ != 0U && !rec_active_ &&
         (ctrl_.state() == V3Controller::State::Idle || ctrl_.state() == V3Controller::State::Fault)) {
       startDump(false);
     } else {
@@ -821,6 +845,23 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     }
     legs_.setMode(line[8] == 'P' ? LegLock::Mode::Position : LegLock::Mode::Mit);
     printTunables();
+  } else if (std::strncmp(line, "HOP", 3U) == 0 && (line[3] == '\0' || line[3] == ' ')) {
+    // One small vertical hop from a calm balance (SET hop 1 first; docs/V3.7_HOP_20261021.md). HOP [mm] = the CoM rise.
+    float mm = 0.0F;
+    if (line[3] == ' ') (void)std::sscanf(line + 4, "%f", &mm);
+    if (!ctrl_.config().hop.enabled) {
+      out_.println("V3 HOP refused: SET hop 1 first (and have the robot on a line)");
+    } else if (ctrl_.state() != V3Controller::State::Balancing) {
+      out_.println("V3 HOP refused: not balancing");
+    } else if (estop_) {
+      out_.println("V3 HOP refused: E-STOP latched");
+    } else {
+      hop_clearance_m_ = std::isfinite(mm) && mm > 0.0F ? std::clamp(mm, 5.0F, 50.0F) * 0.001F : 0.0F;
+      hop_pending_ = true;
+      out_.printf("V3 HOP request: %.0f mm (planned CoM rise), thrust gain %.3f\n",
+                  (hop_clearance_m_ > 0.0F ? hop_clearance_m_ : ctrl_.config().hop.clearance_m) * 1000.0F,
+                  ctrl_.config().hop.thrust_gain);
+    }
   } else if (std::strncmp(line, "SET ", 4U) == 0) {
     char key[20]{};
     float v = 0.0F;
@@ -1435,6 +1476,14 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "tptaper")) { ctrl_.config().tier.plan_taper_from_m_s = std::clamp(v, 0.1F, 4.0F); }
     else if (!std::strcmp(key, "tptaperto")) { ctrl_.config().tier.plan_taper_to_m_s = std::clamp(v, 0.2F, 4.2F); }
     else if (!std::strcmp(key, "tptaperfloor")) { ctrl_.config().tier.plan_taper_floor = std::clamp(v, 0.05F, 1.0F); }
+    else if (!std::strcmp(key, "modist")) motion_dist_scale_ = std::clamp(v, 0.3F, 3.0F);
+    else if (!std::strcmp(key, "moyaw")) motion_yaw_scale_ = std::clamp(v, 0.3F, 3.0F);
+    else if (!std::strcmp(key, "molag")) motion_lag_s_ = std::clamp(v, 0.0F, 0.6F);
+    else if (!std::strcmp(key, "moylag")) motion_yaw_lag_s_ = std::clamp(v, 0.0F, 0.6F);
+    else if (!std::strcmp(key, "ybtau")) ctrl_.config().tier.yaw_bias_tau_s = std::clamp(v, 0.0F, 60.0F);
+    else if (!std::strcmp(key, "yacc")) ctrl_.config().tier.yaw_accel_rad_s2 = std::clamp(v, 0.0F, 200.0F);
+    else if (!std::strcmp(key, "yjerk")) ctrl_.config().tier.yaw_jerk_rad_s3 = std::clamp(v, 0.0F, 2000.0F);
+    else if (!std::strcmp(key, "yawkp")) ctrl_.config().lqr.yaw_rate_feedback_kp = std::clamp(v, 0.0F, 3.0F);
     else if (!std::strcmp(key, "tpsmooth")) ctrl_.config().tier.plan_smooth_tau_s = std::clamp(v, 0.0F, 5.0F);
     else if (!std::strcmp(key, "tpsmax")) ctrl_.config().tier.plan_scale_max = std::clamp(v, 1.0F, 20.0F);
     else if (!std::strcmp(key, "tpsfrom")) ctrl_.config().tier.plan_scale_from_m_s = std::clamp(v, 0.1F, 4.0F);
@@ -1457,6 +1506,22 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
     else if (!std::strcmp(key, "wbff")) ctrl_.config().wb_lean_ff = v >= 0.5F;
     else if (!std::strcmp(key, "wbslack")) ctrl_.config().wb_drive_slack_m = std::clamp(v, 0.0F, 0.1F);
     else if (!std::strcmp(key, "wbbg")) ctrl_.config().wb_bias_gain = std::clamp(v, 0.0F, 0.3F);
+    else if (!std::strcmp(key, "imurange")) {
+      if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+        out_.println("V3 SET imurange refused: DISABLE first");
+        return;
+      }
+      if (!mpu_.setAccelRangeG(static_cast<int>(std::lround(v)))) {
+        out_.println("V3 SET imurange: use 2, 4, 8 or 16 (g)");
+        return;
+      }
+    }
+    else if (std::strncmp(key, "hop", 3) == 0) {
+      if (!handleHopSet(key, v)) {
+        out_.printf("V3 SET unknown key '%s'\n", key);
+        return;
+      }
+    }
     else if (!std::strcmp(key, "leg_kp")) legs_.setMitGains(std::clamp(v, 0.0F, 60.0F), legs_.config().mit_kd_nm_s_per_rad);
     else if (!std::strcmp(key, "leg_kd")) legs_.setMitGains(legs_.config().mit_kp_nm_per_rad, std::clamp(v, 0.0F, 3.0F));
     else {
@@ -1542,6 +1607,65 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
   }
 }
 
+bool AppV3::handleHopSet(const char* key, float v) noexcept {
+  auto& h = ctrl_.config().hop;
+  if (ctrl_.hopActive()) {
+    out_.println("V3 SET hop*: refused while a hop runs");
+    return true;
+  }
+  if (!std::strcmp(key, "hop")) {
+    if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
+      out_.println("V3 SET hop refused: DISABLE first");
+      return true;
+    }
+    h.enabled = v >= 0.5F;
+    if (h.enabled && mpu_.accelRangeG() < 8) {
+      // The thrust pulls ~1.6 g and the landing spikes past 2 g: +-2 g would clip both. 8 g is kept for the session.
+      (void)mpu_.setAccelRangeG(8);
+      out_.println("V3 hop: accelerometer range set to +-8 g (SET imurange)");
+    }
+    out_.printf("V3 hop %s\n", h.enabled ? "ENABLED (HOP [mm])" : "off");
+    return true;
+  }
+  struct Key { const char* name; float* field; float lo, hi, scale; };
+  const Key keys[] = {
+      {"hopclr", &h.clearance_m, 5.0F, 40.0F, 0.001F},       // mm
+      {"hopgain", &h.thrust_gain, 0.3F, 2.0F, 1.0F},
+      {"hopdipknee", &h.dip_knee_rad, 0.30F, 1.20F, 1.0F},
+      {"hopdip", &h.dip_rad, 0.0F, 0.5F, 1.0F},
+      {"hopdips", &h.dip_s, 0.10F, 0.60F, 1.0F},
+      {"hopstroke", &h.stroke_rad, 0.30F, 1.20F, 1.0F},
+      {"hopkmax", &h.knee_max_rad, 0.80F, 1.60F, 1.0F},
+      {"hoplead", &h.thrust_lead_s, 0.0F, 0.10F, 1.0F},
+      {"hopfsens", &h.flight_sens, 0.0F, 1.0F, 1.0F},
+      {"hopfrate", &h.flight_hip_rate_rad_s, 1.0F, 12.0F, 1.0F},
+      {"hopflex", &h.land_flex_rad, 0.0F, 0.4F, 1.0F},
+      {"hopflexlead", &h.land_flex_lead_s, 0.0F, 0.1F, 1.0F},
+      {"hoplean", &h.thrust_lean_rad, -0.1F, 0.15F, 1.0F},
+      {"hoptvkp", &h.tv_kp, 0.0F, 3.0F, 1.0F},
+      {"hoptvkd", &h.tv_kd_s, 0.0F, 0.5F, 1.0F},
+      {"hopwff", &h.wheel_ff_gain, 0.0F, 1.5F, 1.0F},
+      {"hopcarrier", &h.wheel_carrier_gain, 0.0F, 1.5F, 1.0F},
+      {"hophippred", &h.hip_pred_s, 0.0F, 0.15F, 1.0F},
+      {"hoprecover", &h.recover_s, 0.2F, 1.5F, 1.0F},
+      {"hoparmwait", &h.arm_wait_s, 0.0F, 10.0F, 1.0F},
+      {"hoplg", &h.liftoff_g, 0.1F, 0.8F, 1.0F},
+      {"hoptdg", &h.touchdown_g, 0.8F, 3.0F, 1.0F},
+      {"hopwdelay", &h.wheel_delay_s, 0.0F, 0.15F, 1.0F},
+      {"hopwlag", &h.wheel_lag_s, 0.0F, 0.25F, 1.0F},
+  };
+  for (const Key& k : keys) {
+    if (!std::strcmp(key, k.name)) {
+      *k.field = std::clamp(v, k.lo, k.hi) * k.scale;
+      out_.printf("V3 %s=%g\n", k.name, static_cast<double>(*k.field / k.scale));
+      return true;
+    }
+  }
+  if (!std::strcmp(key, "hopadapt")) { h.adapt = v >= 0.5F; return true; }
+  if (!std::strcmp(key, "hoplimp")) { h.wheels_limp = v >= 0.5F; return true; }
+  return false;
+}
+
 void AppV3::printTunables() noexcept {
   // The full configuration dump uses many printf float conversions (~8 ms
   // in the active log). Apply SET immediately, but print the full dump only
@@ -1610,6 +1734,11 @@ void AppV3::printTunables() noexcept {
               ctrl_.config().tier.body_damping_s, ctrl_.config().tier.body_damp_lpf_hz);
   out_.printf("V3 TUNE knee follow: kfhz=%.2f Hz (0 = instant IK knee) kfrate=%.2f rad/s\n",
               ctrl_.config().tier.knee_follow_hz, ctrl_.config().tier.knee_follow_rate_rad_s);
+  out_.printf("V3 TUNE motion: modist=%.4f moyaw=%.4f (floor / gyro calibration of MOVE and TURN) molag=%.2f s moylag=%.2f s\n",
+                motion_dist_scale_, motion_yaw_scale_, motion_lag_s_, motion_yaw_lag_s_);
+  out_.printf("V3 TUNE yaw: yacc=%.1f rad/s2 yjerk=%.0f rad/s3 yawkp=%.2f (gyro yaw-rate feedback) max=%.1f rad/s ybtau=%.1f s ybias=%+.4f rad/s\n",
+                tier.yaw_accel_rad_s2, tier.yaw_jerk_rad_s3, ctrl_.config().lqr.yaw_rate_feedback_kp,
+                ctrl_.config().lqr.max_yaw_rate_rad_s, tier.yaw_bias_tau_s, ctrl_.yawBias());
   out_.printf("V3 TUNE suspension: tsus=%d adaptive=%d (SET tsusad) k=%.1f (tsusk) engage delay %.1f s (tsusdelay) deadband in use %.1f mm/s\n",
               ctrl_.config().tier.suspension ? 1 : 0, ctrl_.config().tier.sus_adaptive ? 1 : 0,
               ctrl_.config().tier.sus_noise_k, ctrl_.config().tier.sus_engage_delay_s,
@@ -1768,6 +1897,14 @@ void AppV3::printTunables() noexcept {
                 su.floor_arm_clearance_m * 1000.0F, su.floor_arm_dwell_s * 1000.0F,
                 su.floor_approach_time_s * 1000.0F, su.floor_prediction_lag_s * 1000.0F,
                 su.floor_accel_grace ? 1 : 0);
+  }
+  {
+    const auto& hp = ctrl_.config().hop;
+    out_.printf("V3 TUNE hop=%d (SET hop, HOP [mm]) clr=%.0f mm gain=%.3f adapt=%d dip=%.2f..%.2f rad/%.2f s stroke=%.2f kmax=%.2f lead=%.0f ms "
+                "limp=%d fsens=%.2f flex=%.2f/%.0f ms lean=%+.3f imu=+-%d g\n",
+                hp.enabled ? 1 : 0, hp.clearance_m * 1000.0F, hp.thrust_gain, hp.adapt ? 1 : 0, hp.dip_rad, hp.dip_knee_rad,
+                hp.dip_s, hp.stroke_rad, hp.knee_max_rad, hp.thrust_lead_s * 1000.0F, hp.wheels_limp ? 1 : 0, hp.flight_sens,
+                hp.land_flex_rad, hp.land_flex_lead_s * 1000.0F, hp.thrust_lean_rad, mpu_.accelRangeG());
   }
   out_.printf("V3 TUNE legmode=%s leg_kp=%.1f leg_kd=%.2f trim_gain=%.2f trim_max=%.2f "
                 "trim=%+.4f margin=%.2f accel=%.2f pitch_scale=%.2f vmax=%.2f\n",
@@ -1989,9 +2126,11 @@ const char* AppV3::legAxisProblem(std::uint64_t now_us, bool need_closed_loop) c
 // speed that stops at the target, abort if the robot stops balancing, runs out of time, or a
 // turn goes the wrong way (so a sign error can never spin the robot away).
 void AppV3::reportMotion(const tap_fw::MotionApi::Event& e) noexcept {
-  out_.printf("MOT kind=%s state=%s target=%+.3f progress=%+.3f speed=%.2f%s%s\n",
-              e.kind == tap_fw::MotionApi::Kind::Turn ? "turn" : "move",
-              tap_fw::MotionApi::statusName(e.status), e.target, e.progress, e.speed,
+  const bool turn = e.kind == tap_fw::MotionApi::Kind::Turn;
+  const float scale = turn ? motion_yaw_scale_ : motion_dist_scale_;
+  out_.printf("MOT kind=%s state=%s target=%+.3f progress=%+.3f speed=%.2f raw=%+.3f scale=%.4f%s%s\n",
+              turn ? "turn" : "move", tap_fw::MotionApi::statusName(e.status), e.target, e.progress, e.speed,
+              scale > 1.0e-6F ? e.progress / scale : e.progress, scale,
               e.reason[0] != '\0' ? " reason=" : "", e.reason);
 }
 
@@ -2013,17 +2152,24 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     drive_serial_active_ = false;
     out_.println("V3 DRIVE timeout: not refreshed for 1 s, stopped");
   }
-  if (redump_request_.exchange(false) && rec_ring_ && rec_n_ != 0U && !rec_active_ && !rec_dumping_ &&
+  if (redump_request_.exchange(false) && rec_ring_ && rec_n_ != 0U && !rec_active_ &&
       (st == V3Controller::State::Idle || st == V3Controller::State::Fault)) {
-    startDump(false);  // a client joined after a blackout: send the last stand-up again
+    // A client joined after a blackout: send the last stand-up again from the first row, also when a dump is
+    // already running (it started with nobody listening, and the client would only get its last rows).
+    startDump(false);
   }
   tap_fw::MotionApi::Feedback mf;
   mf.now_us = now_us;
   mf.dt_s = tick_dt_s_;
   mf.balancing = st == V3Controller::State::Balancing;
-  mf.ground_x_m = ctrl_.groundPosition();
-  mf.ground_v_m_s = ctrl_.groundVelocity();
-  mf.yaw_rate_rad_s = imu_.yaw_rate_rad_s;
+  mf.ground_x_m = ctrl_.groundPosition() * motion_dist_scale_;
+  mf.ground_v_m_s = ctrl_.groundVelocity() * motion_dist_scale_;
+  mf.yaw_rate_rad_s = (imu_.yaw_rate_rad_s - ctrl_.yawBias()) * motion_yaw_scale_;
+  if (motion_.active()) {
+    mf.stop_known = true;
+    mf.stop_m = ctrl_.planStopDistance(motion_lag_s_) * motion_dist_scale_;
+    mf.stop_rad = ctrl_.yawStopAngle(motion_yaw_lag_s_) * motion_yaw_scale_;
+  }
   const auto motion = motion_.update(mf);
   pumpMotionEvents();
   V3Controller::Command cmd{};
@@ -2035,6 +2181,21 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     hmove_dir_ = 0;
   }
   cmd.height_m = height_request_m_;
+  cmd.hop = hop_pending_ && st == V3Controller::State::Balancing;
+  cmd.hop_clearance_m = hop_clearance_m_;
+  if (hop_pending_) {
+    hop_pending_ = false;
+    if (cmd.hop) {
+      // Record the hop at 500 Hz (3 s): the flight lasts ~0.13 s, the 250 Hz REC / 125 Hz blackbox are too coarse.
+      if (rec_active_ && rec_ring_) {
+        rec_period_us_ = 2'000U;           // the blackbox ring keeps the last 3 s at 500 Hz from now on
+      } else if (!rec_dumping_) {
+        rec_active_ = false;
+        startRecording(RecKind::Free, 0.0F, 2.8F, now_us);
+        rec_period_us_ = 2'000U;
+      }
+    }
+  }
   cmd.disable = disable_pending_ || estop_;
   // Over Wi-Fi the heartbeat jitters by hundreds of ms (router): a session whose lines come from
   // the TCP client gets 1.5 s instead of 0.5 s before the lease disables it.
@@ -2167,6 +2328,29 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   prof(0, p1 - p0);
   prof_upd_sum_ += static_cast<std::uint32_t>(p1 - p0);
   ++prof_upd_n_;
+  {
+    const bool hop_now = ctrl_.hopPhase() != tap_fw::v3::HopSequence::Phase::Idle;
+    if (hop_was_active_ && !hop_now) {
+      const auto& hp = ctrl_.hop();
+      static const char* const kResult[] = {"none", "done", "no lift-off", "aborted"};
+      out_.printf("V3 HOP %s: IMU flight %.0f ms -> CoM rise %.1f mm (planned %.1f), thrust gain now %.3f%s\n",
+                  kResult[static_cast<std::size_t>(ctrl_.hopResult())], hp.measuredFlightS() * 1000.0F,
+                  hp.measuredClearanceM() * 1000.0F, hp.config().clearance_m * 1000.0F, ctrl_.config().hop.thrust_gain,
+                  out.state == V3Controller::State::Balancing ? "" : " (robot not balancing)");
+      if (rec_active_ && rec_ring_ && rec_period_us_ < kRecPeriodUs) {
+        rec_active_ = false;   // freeze the 500 Hz window and send it
+        startDump(false);
+      }
+    }
+    hop_was_active_ = hop_now;
+  }
+  if (ctrl_.hopRefusal() != hop_last_refusal_) {
+    hop_last_refusal_ = ctrl_.hopRefusal();
+    if (hop_last_refusal_ != tap_fw::v3::HopSequence::Refusal::None) {
+      out_.printf("V3 HOP refused: %s\n", tap_fw::v3::HopSequence::refusalName(hop_last_refusal_));
+      if (rec_active_ && !rec_ring_ && rec_period_us_ < kRecPeriodUs) rec_active_ = false;   // nothing happened: drop the recording
+    }
+  }
   if (out.fault != nullptr) {
     out_.printf("V3 FAULT: %s (wheels stopped, legs %s; START retries, DISABLE releases)\n",
                   out.fault, out.legs_locked ? "still locked" : "free");
@@ -2218,7 +2402,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
     wheel_cmd = {w, w};
   }
   const bool stand_test = (rec_active_ || rec_dumping_) && recStand();
-  driveWheels(out.wheels_enabled && !stand_test, wheel_cmd, now_us);
+  driveWheels(out.wheels_enabled && !stand_test, wheel_cmd, now_us, ctrl_.hopWheelsLimp());
   const std::uint64_t wheel_send_us = nowUs() - p_wheel;
   const std::uint64_t p2 = nowUs();
   float hip_cmd = 0.0F, knee_cmd = 0.0F;
@@ -2242,7 +2426,11 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
         ctrl_.recoveryPoseHeld() && ctrl_.config().standup.support_hip_capture &&
         !ctrl_.heldOuterOff() && !ctrl_.heldQuiet();
     const bool recovery_path = standing_up || supported_hip;
-    if (recovery_path && ff_prev_us_ != 0U && now_us > ff_prev_us_) {
+    if (ctrl_.hopActive()) {
+      // The hop path's analytic rates (no filter lag): the POS driver leads with them (Set_Input_Pos vel_ff).
+      ff_hip_rate_ = ctrl_.hopHipRate();
+      ff_knee_rate_ = ctrl_.hopKneeRate();
+    } else if (recovery_path && ff_prev_us_ != 0U && now_us > ff_prev_us_) {
       const float dt_s = static_cast<float>(now_us - ff_prev_us_) * 1.0e-6F;
       const float alpha = dt_s / (0.02F + dt_s);  // 20 ms low-pass
       ff_hip_rate_ += alpha * (std::clamp((hip_cmd - ff_hip_prev_) / dt_s, -6.0F, 6.0F) - ff_hip_rate_);
@@ -2266,8 +2454,10 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
   const std::uint64_t p3 = nowUs();
   prof(1, p3 - p2);
   if (rec_active_ && now_us >= rec_next_us_) {
-    rec_next_us_ += rec_ring_ ? 2U * kRecPeriodUs : kRecPeriodUs;
+    rec_next_us_ += rec_ring_ && rec_period_us_ >= kRecPeriodUs ? 2U * rec_period_us_ : rec_period_us_;
     if (rec_ring_) rec_cmd_ = 0.1F * static_cast<float>(static_cast<int>(out.state));
+    if (ctrl_.hopPhase() != tap_fw::v3::HopSequence::Phase::Idle)
+      rec_cmd_ = 0.1F * static_cast<float>(10 + static_cast<int>(ctrl_.hopPhase()));   // 1.1 Dip .. 1.5 Recover
     recordSample(now_us, hip_cmd, knee_cmd, 0.5F * (last_wheel_cmd_[0] + last_wheel_cmd_[1]));
   }
   if (rec_dumping_) dumpRecording();
@@ -2408,6 +2598,22 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
           .str("] tx_count=[").u32(left.speed_tx).chr(' ').u32(right.speed_tx).chr(']');
       out_.println(wb);
     }
+    if (ctrl_.hopPhase() != tap_fw::v3::HopSequence::Phase::Idle) {
+      tap_fw::DeferredLine hb(line, sizeof line);
+      hb.str("HP t=").u32(static_cast<std::uint32_t>(now_us / 1000U))
+          .str(" phase=").str(tap_fw::v3::HopSequence::name(ctrl_.hopPhase()))
+          .str(" knee_cmd=").fix(ctrl_.hopKneeCommand(), 3, true)
+          .str(" hip_cmd=").fix(ctrl_.hipCommand(), 3, true)
+          .str(" acc=").fix(std::sqrt(body_.accel_m_s2[0] * body_.accel_m_s2[0] + body_.accel_m_s2[1] * body_.accel_m_s2[1] +
+                                      body_.accel_m_s2[2] * body_.accel_m_s2[2]), 2)
+          .str(" tv=").fix(ctrl_.virtualPitch(), 4, true)
+          .str(" pitch=").fix(imu_.pitch_rad, 3, true)
+          .str(" rate=").fix(imu_.pitch_rate_rad_s, 2, true)
+          .str(" wcmd=").fix(last_wheel_cmd_[0], 2, true)
+          .str(" limp=").i32(ctrl_.hopWheelsLimp() ? 1 : 0)
+          .str(" gain=").fix(ctrl_.config().hop.thrust_gain, 3);
+      out_.println(hb);
+    }
     const auto& su = ctrl_.standupState();
     if (recovery_handoff || out.state == V3Controller::State::StandUp ||
         (out.state == V3Controller::State::Balancing && ctrl_.recoveryPoseHeld() &&
@@ -2534,6 +2740,7 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
 void AppV3::startRecording(RecKind kind, float amp, float duration_s,
                            std::uint64_t now_us) noexcept {
   rec_ring_ = false;
+  rec_period_us_ = kRecPeriodUs;
   rec_kind_ = kind;
   rec_amp_ = amp;
   rec_duration_s_ = duration_s;
@@ -2569,6 +2776,7 @@ void AppV3::startBlackbox(std::uint64_t now_us) noexcept {
   rec_ring_ = true;
   rec_ring_head_ = 0U;
   rec_n_ = 0U;
+  rec_period_us_ = kRecPeriodUs;
   rec_amp_ = rec_centre_ = rec_cmd_ = 0.0F;
   rec_aborted_ = false;
   rec_duration_s_ = 86400.0F;
@@ -2582,7 +2790,8 @@ void AppV3::startDump(bool aborted) noexcept {
   rec_dump_i_ = 0U;
   out_.printf("RC BEGIN kind=%s n=%u rate_hz=%d amp=%.3f centre=%+.3f resend_us=%lu "
                 "aborted=%d cols=%s scales=", rec_ring_ ? "BLACKBOX" : recName(static_cast<int>(rec_kind_)),
-                static_cast<unsigned>(rec_n_), rec_ring_ ? 125 : 250, rec_amp_, rec_centre_,
+                static_cast<unsigned>(rec_n_),
+                static_cast<int>(1.0e6F / static_cast<float>(rec_ring_ && rec_period_us_ >= kRecPeriodUs ? 2U * rec_period_us_ : rec_period_us_) + 0.5F), rec_amp_, rec_centre_,
                 static_cast<unsigned long>(rec_resend_us_), aborted ? 1 : 0, kRecColumns);
   for (std::size_t i = 0; i < kRecChannels; ++i) {
     out_.printf(i + 1U < kRecChannels ? "%g," : "%g\n", kRecScale[i]);
@@ -2676,14 +2885,17 @@ void AppV3::dumpRecording() noexcept {
 }
 
 void AppV3::driveWheels(bool enabled, const std::array<float, 2>& cmd_rad_s,
-                        std::uint64_t now_us) noexcept {
+                        std::uint64_t now_us, bool coast) noexcept {
   const auto wheels = tap_fw::board::MotorIds{}.wheel_uart;
   if (!enabled) {
     last_wheel_cmd_ = {0.0F, 0.0F};
     if (wheels_on_) {
       for (std::size_t i = 0; i < wheels.size(); ++i) {
-        (void)transport_.sendUart(static_cast<std::uint8_t>(i),
-                                  frame::buildMovingSpeed(wheels[i].motor_id, 0.0F));
+        // A hop's coast (torque off) must not start with a brake pulse: no zero-speed frame first.
+        if (!coast) {
+          (void)transport_.sendUart(static_cast<std::uint8_t>(i),
+                                    frame::buildMovingSpeed(wheels[i].motor_id, 0.0F));
+        }
         (void)transport_.sendUart(static_cast<std::uint8_t>(i),
                                   frame::buildTorqueEnable(wheels[i].motor_id, false));
       }
@@ -2731,6 +2943,7 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .chr(' ').fix(state_.joints.position_rad[5], 3)
       .str("] pitch=").fix(imu_.pitch_rad, 3, true).str(" pitch_rate=").fix(imu_.raw_pitch_rate_rad_s, 3, true)
       .str(" yaw_rate=").fix(imu_.yaw_rate_rad_s, 3, true)
+      .str(" ybias=").fix(ctrl_.yawBias(), 4, true)
       .str(" acc=[").fix(body_.accel_m_s2[0], 2, true).chr(' ').fix(body_.accel_m_s2[1], 2, true).chr(' ')
       .fix(body_.accel_m_s2[2], 2, true)
       .str("] chip_acc=[").fix(chip_.accel_m_s2[0], 2, true).chr(' ').fix(chip_.accel_m_s2[1], 2, true).chr(' ')

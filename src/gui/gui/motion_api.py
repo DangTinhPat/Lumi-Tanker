@@ -230,6 +230,11 @@ class MotionAPI:
                 now - self._action_start_s >= self._action_timeout_s):
             self._end_action(ActionStatus.TIMED_OUT)
             return self.action_status
+        if self._action_kind.startswith("fw_"):
+            # The firmware runs the move on its own odometry / gyro, ends it by itself (done, timeout, left
+            # balancing) and says so with a MOT line. A late or missing telemetry frame (Wi-Fi) must not make
+            # this side send STOP: that cut the move short.
+            return self._update_firmware_action(self.backend.telemetry)
         backend_stamp = getattr(self.backend, "telemetry_received_monotonic_s", 0.0)
         if (backend_stamp <= 0.0 or now - backend_stamp < 0.0 or
                 now - backend_stamp > 0.25):
@@ -285,7 +290,7 @@ class MotionAPI:
             return self._reject_action()
         self._action_kind = kind
         self._action_start_s = time.monotonic()
-        self._action_timeout_s = timeout_s + 2.0   # the firmware has its own timeout
+        self._action_timeout_s = timeout_s + 6.0   # the firmware has its own timeout (same formula)
         self._action_target = target
         self.action_status = ActionStatus.RUNNING
         return True

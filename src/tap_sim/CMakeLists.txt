@@ -165,6 +165,14 @@ if(BUILD_TESTING)
             --runner $<TARGET_FILE:tap_mujoco_native>
             --model ${CMAKE_CURRENT_SOURCE_DIR}/model/tap_robot.xml
             --duration-s 120)
+  # Small vertical hop of the firmware controller in MuJoCo (docs/V3.7_HOP_20261021.md, RULES.md Rule 6). Sim evidence only.
+  add_test(
+    NAME tap_mujoco_gim_hop
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/gim_hop_test.py
+            --runner $<TARGET_FILE:tap_mujoco_gim_v3>
+            --model ${CMAKE_CURRENT_SOURCE_DIR}/model/gim_dynamic.xml
+            --check --min-pass 11)
   # These tests own a native runner and sensor clock. Prevent a parallel CTest
   # job from turning host contention into a false lifecycle/control failure.
   set_tests_properties(
@@ -177,5 +185,6 @@ if(BUILD_TESTING)
     tap_mujoco_native_yaw_station
     tap_mujoco_native_posture_transition
     tap_mujoco_native_dance_skill
+    tap_mujoco_gim_hop
     PROPERTIES RUN_SERIAL TRUE)
 endif()

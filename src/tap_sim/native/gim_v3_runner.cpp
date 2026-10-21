@@ -67,6 +67,18 @@ struct Options {
   bool standup_skip_pitching = true;   // --standup-skip-pitching 0: keep the separate pitch-to-level flip
   // --standup-set key=value[,key=value]: override StandUp::Config fields for A/B runs (lift, lift_hip_min, ...).
   std::vector<std::pair<std::string, double>> standup_overrides;
+  // --hop key=value[,key=value]: enable the small vertical hop (HOP [mm]) and override HopSequence::Config.
+  bool hop = false;
+  std::vector<std::pair<std::string, double>> hop_overrides;
+  // --leg-delay SEC: dead time between the controller's leg targets and the driver position loop (the real GDS68
+  // path measures ~22 ms). --imu-hw 1: the MPU6500 as configured on the robot (accelerometer +-2 g per axis,
+  // ~44 Hz digital low-pass); off = the ideal sensor of the other tests.
+  double leg_delay_s = 0.0;
+  // --leg-model KP_S,KV,ARMATURE,CURRENT_LAG: the GDS68 position loop of the sim (default 15/s, 0.8 N.m.s/rad, 1e-4 kg.m^2,
+  // 20 ms = the provisional model). Real stand-up logs (21/10) fit dead time ~25 ms + lag ~30 ms on the hip.
+  double leg_kp_s = 15.0, leg_kv = 0.8, leg_armature = 1.0e-4, leg_current_lag_s = 0.020;
+  bool imu_hw = false;
+  double imu_range_g = 2.0;
   bool roll = false;     // --roll: roll balance on, with the firmware's layered response (off by default: the flat-ground tests)
   // Commands run at exact simulated times (--at SEC:COMMAND); stdin timing depends on
   // process scheduling, so headless tests use this to be reproducible.
@@ -138,6 +150,28 @@ Options parseOptions(int argc, char** argv) {
         out.standup_overrides.emplace_back(item.substr(0, eq), number(item.substr(eq + 1).c_str(), "--standup-set"));
       }
     }
+    else if (arg == "--hop") {
+      out.hop = true;
+      std::stringstream list(next());
+      std::string item;
+      while (std::getline(list, item, ',')) {
+        if (item.empty() || item == "1") continue;
+        const auto eq = item.find('=');
+        if (eq == std::string::npos) throw std::invalid_argument("--hop expects key=value");
+        out.hop_overrides.emplace_back(item.substr(0, eq), number(item.substr(eq + 1).c_str(), "--hop"));
+      }
+    }
+    else if (arg == "--leg-model") {
+      std::stringstream list(next());
+      std::string item;
+      std::vector<double> v;
+      while (std::getline(list, item, ',')) v.push_back(number(item.c_str(), "--leg-model"));
+      if (v.size() != 4) throw std::invalid_argument("--leg-model expects KP_S,KV,ARMATURE,CURRENT_LAG");
+      out.leg_kp_s = v[0]; out.leg_kv = v[1]; out.leg_armature = v[2]; out.leg_current_lag_s = v[3];
+    }
+    else if (arg == "--leg-delay") out.leg_delay_s = number(next(), "--leg-delay");
+    else if (arg == "--imu-hw") out.imu_hw = number(next(), "--imu-hw") != 0.0;
+    else if (arg == "--imu-range") out.imu_range_g = number(next(), "--imu-range");
     else if (arg == "--plain-balance") out.plain_balance = number(next(), "--plain-balance") != 0.0;
     else if (arg == "--roll") out.roll = number(next(), "--roll") != 0.0;
     else if (arg == "--at") {
@@ -191,7 +225,10 @@ class GimV3Runner {
       wheels_[side] = robot_control::SimBl4012Wheel(wheel_config);
     }
     bindModel();
+    for (const std::size_t j : {0U, 1U, 3U, 4U}) model_->dof_armature[joints_[j].qvel] = options_.leg_armature;
     wheel_delay_ticks_ = static_cast<std::size_t>(std::lround(options_.wheel_delay_s * options_.sensor_hz));
+    leg_delay_ticks_ = std::min<std::size_t>(leg_delay_buf_.size(),
+        static_cast<std::size_t>(std::lround(options_.leg_delay_s * options_.sensor_hz)));
     configureImu();
     reset();
     setNonBlockingStdin();
@@ -326,6 +363,59 @@ class GimV3Runner {
       config.standup.hold_at_kneel = false;
       config.standup.hold_after_flip = false;
       config.standup.catch_wheel_lead_s = static_cast<float>(options.wheel_lag_s);
+    }
+    if (options.hop) {
+      auto& hp = config.hop;
+      hp.enabled = true;
+      for (const auto& [key, v] : options.hop_overrides) {
+        const auto f = static_cast<float>(v);
+        if (key == "clear") hp.clearance_m = f / 1000.0F;   // mm
+        else if (key == "gain") hp.thrust_gain = f;
+        else if (key == "adapt") hp.adapt = v >= 0.5;
+        else if (key == "dip") hp.dip_rad = f;
+        else if (key == "dip_s") hp.dip_s = f;
+        else if (key == "stroke") hp.stroke_rad = f;
+        else if (key == "kmax") hp.knee_max_rad = f;
+        else if (key == "kmin") hp.knee_min_rad = f;
+        else if (key == "lead") hp.thrust_lead_s = f;
+        else if (key == "lg") hp.liftoff_g = f;
+        else if (key == "lconf") hp.liftoff_confirm_s = f;
+        else if (key == "lwait") hp.liftoff_wait_s = f;
+        else if (key == "tdg") hp.touchdown_g = f;
+        else if (key == "minfl") hp.min_flight_s = f;
+        else if (key == "margin") hp.flight_margin_s = f;
+        else if (key == "flex") hp.land_flex_rad = f;
+        else if (key == "flexlead") hp.land_flex_lead_s = f;
+        else if (key == "flexs") hp.land_flex_s = f;
+        else if (key == "hold") hp.land_hold_s = f;
+        else if (key == "recover") hp.recover_s = f;
+        else if (key == "wait") hp.start_min_balance_s = f;
+        else if (key == "armwait") hp.arm_wait_s = f;
+        else if (key == "smin") hp.start_min_tv_err_rad = f;
+        else if (key == "rlo") hp.start_rate_lo_rad_s = f;
+        else if (key == "rhi") hp.start_rate_hi_rad_s = f;
+        else if (key == "srate") hp.start_max_rate_rad_s = f;
+        else if (key == "sspeed") hp.start_max_speed_m_s = f;
+        else if (key == "serr") hp.start_max_pitch_err_rad = f;
+        else if (key == "carrier") hp.wheel_carrier_gain = f;
+        else if (key == "fsens") hp.flight_sens = f;
+        else if (key == "fmax") hp.flight_hip_max_rad = f;
+        else if (key == "frate") hp.flight_hip_rate_rad_s = f;
+        else if (key == "tlean") hp.thrust_lean_rad = f;
+        else if (key == "t2") hp.tier2_after_touchdown = v >= 0.5;
+        else if (key == "limp") hp.wheels_limp = v >= 0.5;
+        else if (key == "wff") hp.wheel_ff_gain = f;
+        else if (key == "wdelay") hp.wheel_delay_s = f;
+        else if (key == "wlag") hp.wheel_lag_s = f;
+        else if (key == "hippred") hp.hip_pred_s = f;
+        else if (key == "tvkp") hp.tv_kp = f;
+        else if (key == "tvkd") hp.tv_kd_s = f;
+        else if (key == "tvmax") hp.tv_max_rad = f;
+        else if (key == "dipknee") hp.dip_knee_rad = f;
+        else if (key == "holdthrust") hp.wheels_hold_in_thrust = v >= 0.5;
+        else if (key == "holddip") hp.wheels_hold_in_dip = v >= 0.5;
+        else throw std::invalid_argument("unknown --hop key: " + key);
+      }
     }
     if (options.plain_balance) {
       config.tier.virtual_pitch = false;
@@ -538,6 +628,12 @@ class GimV3Runner {
       enable_request_ = true;
     }
     else if (op == "FLIP") standup_advance_pending_ = true;
+    else if (op == "HOP") {
+      float mm = 0.0F;
+      stream >> mm;
+      hop_clearance_m_ = std::isfinite(mm) && mm > 0.0F ? mm / 1000.0F : 0.0F;
+      hop_pending_ = true;
+    }
     else if (op == "PUSH") {
       float force = 0.0F, duration = 0.0F;
       if (stream >> force >> duration && std::isfinite(force) && std::isfinite(duration) &&
@@ -647,6 +743,17 @@ class GimV3Runner {
         gyro[static_cast<std::size_t>(i)] = static_cast<float>(sensor(gyro_sensor_, i)) + sensorNoise(.005F);
       }
     }
+    if (options_.imu_hw && physics_started_) {
+      // MPU6500 as the robot configures it: +-range per axis, then the ~44 Hz accelerometer low-pass.
+      const float limit = static_cast<float>(options_.imu_range_g) * 9.80665F;
+      const float a = static_cast<float>(1.0 - std::exp(-2.0 * 3.14159265 * 44.0 * static_cast<double>(dt)));
+      for (std::size_t i = 0; i < 3; ++i) {
+        const float clipped = std::clamp(accel[i], -limit, limit);
+        imu_lp_[i] = imu_lp_seeded_ ? imu_lp_[i] + a * (clipped - imu_lp_[i]) : clipped;
+        accel[i] = imu_lp_[i];
+      }
+      imu_lp_seeded_ = true;
+    }
     const auto velocity = controller_.imuVelocity();
     const auto estimate = estimator_.update(accel, gyro, dt,
         static_cast<float>(sim_time_s_), 0.0F, output_.legs_moving, !enable_request_,
@@ -700,7 +807,14 @@ class GimV3Runner {
     cmd.forward_m_s = enable_request_ && !cmd.disable ? command_.forward_m_s : 0.0F;
     cmd.yaw_rad_s = enable_request_ && !cmd.disable ? command_.yaw_rad_s : 0.0F;
     cmd.height_m = command_.height_m;
+    cmd.hop = hop_pending_ && output_.state == V3Controller::State::Balancing;
+    cmd.hop_clearance_m = hop_clearance_m_;
+    if (cmd.hop) hop_pending_ = false;
     output_ = controller_.update(in, cmd);
+    if (controller_.hopRefusal() != tap_fw::v3::HopSequence::Refusal::None && controller_.hopRefusal() != last_hop_refusal_)
+      std::cout << "HOP_REFUSED|t=" << sim_time_s_ << "|reason="
+                << tap_fw::v3::HopSequence::refusalName(controller_.hopRefusal()) << std::endl;
+    last_hop_refusal_ = controller_.hopRefusal();
 
     // Like AppV3: the leg path is the controller's hip/knee command plus the per-side roll offsets.
     const bool standing_up = output_.state == V3Controller::State::StandUp;
@@ -727,6 +841,18 @@ class GimV3Runner {
         standup_ff_prev_[k] = common[k];
       }
     }
+    hop_ff_hip_ = controller_.hopHipRate();
+    hop_ff_knee_ = controller_.hopKneeRate();
+    // Dead time between the controller and the driver position loop (the command reaches the driver late).
+    std::array<float, 4> driver_target = target;
+    if (leg_delay_ticks_ > 0U) {
+      auto& slot = leg_delay_buf_[leg_delay_head_];
+      const std::array<float, 4> late = slot;
+      slot = target;
+      for (std::size_t i = 0; i < 4; ++i) driver_target[i] = leg_delay_init_ ? late[i] : target[i];
+      if (leg_delay_head_ + 1U == leg_delay_ticks_) leg_delay_init_ = true;
+      leg_delay_head_ = (leg_delay_head_ + 1U) % leg_delay_ticks_;
+    }
     for (std::size_t i = 0; i < target.size(); ++i) {
       leg_target_rate_[i] = (target[i] - previous_leg_target_[i]) / dt;
       previous_leg_target_[i] = target[i];
@@ -744,11 +870,12 @@ class GimV3Runner {
         if (output_.legs_locked) {
           // Like LegLock::velFfTurns: the roll rate reference plus, in stand-up only, the path rate.
           const float vel_ff = (standing_up ? standup_ff_rate_[i % 2] : 0.0F) +
+              (i % 2 == 0 ? hop_ff_hip_ : hop_ff_knee_) +
               (i % 2 == 0 ? output_.leg_roll_hip_rate[side] : output_.leg_roll_knee_rate[side]);
-          const float vel_cmd = std::clamp(kPosGainPerS * (target[i] - q) + vel_ff,
+          const float vel_cmd = std::clamp(static_cast<float>(options_.leg_kp_s) * (driver_target[i] - q) + vel_ff,
                                            -kDriverVelLimitRadS, kDriverVelLimitRadS);
           const float vel_err = vel_cmd - qd;
-          const float unsat = kVelGainNmSPerRad * vel_err + leg_pos_integrator_nm_[i];
+          const float unsat = static_cast<float>(options_.leg_kv) * vel_err + leg_pos_integrator_nm_[i];
           tau = std::clamp(unsat, -kTorqueLimitNm, kTorqueLimitNm);
           // Anti-windup: integrate only while the torque is not saturated against the error.
           if (tau == unsat) {
@@ -805,7 +932,7 @@ class GimV3Runner {
         output_.state == V3Controller::State::Fault ||
         (enable_seen_ && (!enable_request_ || estop_));
     for (std::size_t i = 0; i < 4; ++i) {
-      const double alpha = dt / (kCurrentLagS + dt);
+      const double alpha = dt / (options_.leg_current_lag_s + dt);
       if (active && output_.legs_locked)
         leg_applied_current_[i] += alpha * (leg_target_current_[i] - leg_applied_current_[i]);
       else
@@ -919,6 +1046,11 @@ class GimV3Runner {
               << "|su_wheel=" << controller_.standupState().wheel_rad_s
               << "|su_lift=" << controller_.standupState().lift_state
               << "|su_knee_rate=" << controller_.standupState().knee_rate_rad_s
+              << "|hop_phase=" << static_cast<int>(controller_.hopPhase())
+              << "|hop_phase_name=" << tap_fw::v3::HopSequence::name(controller_.hopPhase())
+              << "|hop_result=" << static_cast<int>(controller_.hopResult())
+              << "|hop_gain=" << controller_.config().hop.thrust_gain
+              << "|hop_flight_ms=" << 1000.0F * controller_.hop().measuredFlightS()
               << "|cmd_hip=" << controller_.hipCommand() << "|cmd_knee=" << controller_.kneeCommand()
               << "|imu_accel_norm=" << std::sqrt(in.accel_x_m_s2 * in.accel_x_m_s2 +
                   in.accel_y_m_s2 * in.accel_y_m_s2 + in.accel_z_m_s2 * in.accel_z_m_s2)
@@ -926,6 +1058,7 @@ class GimV3Runner {
               << "|held_outer_off=" << controller_.heldOuterOff()
               << "|wheel_clearance=" << wheelClearance()
               << "|ang_mom_y=" << angularMomentumY() << "|body_wy=" << data_->qvel[4]
+              << "|axle_x=" << data_->xpos[3 * left_wheel_body_] << "|axle_z=" << data_->xpos[3 * left_wheel_body_ + 2]
               << "|com_x=" << data_->subtree_com[3 * body_id_] << "|com_z=" << data_->subtree_com[3 * body_id_ + 2]
               << "|leg_iq_rh=" << leg_measured_current_[2]
               << "|leg_iq_rk=" << leg_measured_current_[3]
@@ -995,6 +1128,14 @@ class GimV3Runner {
   std::size_t next_scheduled_ = 0;
   int last_jump_phase_ = 0;
   bool start_pending_ = false, go_pending_ = false, jump_pending_ = false;
+  bool hop_pending_ = false;
+  tap_fw::v3::HopSequence::Refusal last_hop_refusal_ = tap_fw::v3::HopSequence::Refusal::None;
+  float hop_clearance_m_ = 0.0F, hop_ff_hip_ = 0.0F, hop_ff_knee_ = 0.0F;
+  std::array<float, 3> imu_lp_{};
+  bool imu_lp_seeded_ = false;
+  std::array<std::array<float, 4>, 64> leg_delay_buf_{};
+  std::size_t leg_delay_ticks_ = 0U, leg_delay_head_ = 0U;
+  bool leg_delay_init_ = false;
   bool standup_pending_ = false, standup_advance_pending_ = false, imu_seeded_ = false;
   bool stood_up_ = false;   // a lying start: STANDUP was given (ENABLE is refused until then)
   float jump_forward_m_ = std::numeric_limits<float>::quiet_NaN();

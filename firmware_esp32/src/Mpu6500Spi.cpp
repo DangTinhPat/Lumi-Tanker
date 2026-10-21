@@ -60,7 +60,7 @@ bool Mpu6500Spi::read(Sample& sample) const noexcept {
         (static_cast<std::uint16_t>(bytes[index]) << 8U) |
         static_cast<std::uint16_t>(bytes[index + 1U]));
   };
-  constexpr float kAccelScale = kGravity / 16384.0F;
+  const float kAccelScale = accel_scale_;
   constexpr float kGyroScale = kDegToRad / 65.5F;
   sample.accel_m_s2 = {be16(0U) * kAccelScale, be16(2U) * kAccelScale,
                        be16(4U) * kAccelScale};
@@ -72,6 +72,22 @@ bool Mpu6500Spi::read(Sample& sample) const noexcept {
       std::isfinite(sample.gyro_rad_s[0]) &&
       std::isfinite(sample.gyro_rad_s[1]) &&
       std::isfinite(sample.gyro_rad_s[2]);
+}
+
+bool Mpu6500Spi::setAccelRangeG(int g) noexcept {
+  std::uint8_t reg = 0x00U;
+  float lsb_per_g = 16384.0F;
+  switch (g) {
+    case 2: reg = 0x00U; lsb_per_g = 16384.0F; break;
+    case 4: reg = 0x08U; lsb_per_g = 8192.0F; break;
+    case 8: reg = 0x10U; lsb_per_g = 4096.0F; break;
+    case 16: reg = 0x18U; lsb_per_g = 2048.0F; break;
+    default: return false;
+  }
+  writeRegister(0x1C, reg);
+  accel_range_g_ = g;
+  accel_scale_ = kGravity / lsb_per_g;
+  return true;
 }
 
 void Mpu6500Spi::writeRegister(std::uint8_t address,

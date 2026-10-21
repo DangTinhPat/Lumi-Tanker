@@ -72,7 +72,7 @@ class AppV3 {
   void updateImu(std::uint64_t now_us) noexcept;
   void controlTick(std::uint64_t now_us) noexcept;
   void driveWheels(bool enabled, const std::array<float, 2>& cmd_rad_s,
-                   std::uint64_t now_us) noexcept;
+                   std::uint64_t now_us, bool coast = false) noexcept;
   void report(std::uint64_t now_us) noexcept;
   void printTunables() noexcept;
   bool tunables_pending_ = false;
@@ -98,6 +98,14 @@ class AppV3 {
   static constexpr float kHomeKneeRad = 0.0F;
   bool lying_start_ = false;
   bool standup_pending_ = false;  // STANDUP request (SET lying 1, SET standup 1)
+  // Small vertical hop (HOP [mm], SET hop 1, docs/V3.7_HOP_20261021.md): a request for the next control tick, the
+  // 500 Hz recording it starts, and the bookkeeping for its summary line.
+  bool hop_pending_ = false;
+  float hop_clearance_m_ = 0.0F;
+  bool hop_was_active_ = false;
+  tap_fw::v3::HopSequence::Refusal hop_last_refusal_ = tap_fw::v3::HopSequence::Refusal::None;
+  std::uint64_t rec_period_us_ = 4'000U;
+  bool handleHopSet(const char* key, float v) noexcept;
   // Stand-up POS velocity feed-forward: filtered rate of the commanded hip/knee path [core rad/s].
   float ff_hip_prev_ = 0.0F, ff_knee_prev_ = 0.0F, ff_hip_rate_ = 0.0F, ff_knee_rate_ = 0.0F;
   std::uint64_t ff_prev_us_ = 0U;
@@ -129,6 +137,12 @@ class AppV3 {
   // controller, worst tick execution time, ticks started >1 period late.
   std::uint64_t last_tick_us_ = 0U;
   float tick_dt_s_ = 0.002F;
+  // Finite moves (MOVE / TURN): calibration of the odometry and the gyro against the floor, and the response lag
+  // behind the speed plan that the braking point allows for. SET modist / moyaw / molag / moylag.
+  float motion_dist_scale_ = 1.0F;
+  float motion_yaw_scale_ = 1.0F;
+  float motion_lag_s_ = 0.12F;
+  float motion_yaw_lag_s_ = 0.07F;
   std::uint32_t tick_exec_max_us_ = 0U;
   std::uint32_t tick_imu_max_us_ = 0U;
   std::uint32_t tick_ctrl_max_us_ = 0U;

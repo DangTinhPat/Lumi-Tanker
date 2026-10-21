@@ -6,6 +6,7 @@
 
 #include "robot_control/ImuStateEstimator.hpp"
 #include "robot_control/LqrBalancer.hpp"
+#include "tap_fw/v3/HopSequence.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/StandUp.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
@@ -386,12 +387,21 @@ class V3Controller {
     float plan_taper_from_m_s = 0.8F;
     float plan_taper_to_m_s = 1.67F;
     float plan_taper_floor = 0.25F;
-    // Continuous acceleration law of the plan (the "driver"): a_des = clamp(err / tau, +-amax), err = target speed minus
-    // the speed the plan would stop at. The acceleration is therefore proportional to the remaining speed step and
-    // fades out smoothly as the target is approached, instead of holding amax and then dropping. tau <= 0 is the
-    // old bang-bang law (a_des = +-amax).
-    float plan_smooth_tau_s = 0.5F;
+    // Acceleration law of the plan: jerk-limited S-curve, a_des = sqrt(2 k jmax |err|), err = target speed minus plan
+    // speed (see updatePlan). plan_smooth_tau_s is the width in seconds of the linear blend at the very end of the
+    // step (SET tpsmooth); tau <= 0 is the old bang-bang law (a_des = +-amax).
+    float plan_smooth_tau_s = 0.15F;
     float plan_scale_max = 1.8F;
+    // Turn command profile: the same jerk-limited S-curve as the speed plan, applied to the operator's yaw rate
+    // (replaces the LqrBalancer slew of 1 rad/s^2, which needed 12 s to reach the 12 rad/s ceiling). 0 = no profile.
+    // With Roll on the slower of this and Roll::yaw_accel_rad_s2 applies. SET yacc / yjerk.
+    // Zero-rate offset of the yaw gyro (MPU6500, 0.04 rad/s = 2.4 deg/s measured on the robot). The attitude filter
+    // only removes the pitch-axis bias, so the yaw-rate feedback read it as a real turn and rotated the robot the
+    // other way at a few deg/s. Learned while quiet: against the wheels' own differential (true yaw rate ~ 0) when
+    // balancing, directly from the gyro when not. 0 = off. SET ybtau.
+    float yaw_bias_tau_s = 2.0F;
+    float yaw_accel_rad_s2 = 12.0F;
+    float yaw_jerk_rad_s3 = 120.0F;
     // Motion envelope from the pendulum at the current height (SET tenv): the
     // planned speed cap becomes the wheel cap minus env_catch_rad * sqrt(g l)
     // (capture point: catching a lean theta needs about theta * sqrt(g l) of wheel
@@ -646,6 +656,7 @@ class V3Controller {
     std::uint64_t drive_guard_hold_us = 1'500'000U;
     float wheel_radius_m = 0.04F;
     StandUp::Config standup;
+    HopSequence::Config hop;   // small vertical hop (off by default, SET hop 1)
   };
 
   struct Input {
@@ -684,6 +695,8 @@ class V3Controller {
     bool disable = false;     // level: stop everything
     bool standup = false;     // edge: stand up from the lying pose (Config::standup.enabled; from Idle or Fault)
     bool standup_advance = false;  // edge: begin the pitch-to-level phase from Kneeling
+    bool hop = false;              // edge: one small vertical hop (Config::hop.enabled, from Balancing)
+    float hop_clearance_m = 0.0F;  // CoM rise wanted; <= 0 keeps Config::hop.clearance_m
     float forward_m_s = 0.0F;
     float yaw_rad_s = 0.0F;
     // Requested hip-axle height [m]; <= 0 keeps the current request.
@@ -794,6 +807,12 @@ class V3Controller {
   [[nodiscard]] float groundVelocity() const noexcept { return ground_v_; }
   [[nodiscard]] float trunkSpeedGain() const noexcept { return trunk_speed_gain_; }
   [[nodiscard]] float groundPosition() const noexcept { return ground_x_; }
+  // Distance (m, signed like the plan speed) the speed plan would still cover if the request dropped to zero now,
+  // plus lag_s of the current speed for the robot's response behind the plan; and the same for the turn command
+  // (rad). The finite-move layer (MotionApi) starts braking when the distance left equals this, so the move ends
+  // on the target instead of overshooting by the plan's real stopping distance.
+  [[nodiscard]] float planStopDistance(float lag_s) const noexcept;
+  [[nodiscard]] float yawStopAngle(float lag_s) const noexcept;
   // virtual pitch (equals the body pitch while virtual_pitch is off),
   // tier-2 hip offset on top of the height pose, and its authority 0..1.
   [[nodiscard]] float virtualPitch() const noexcept { return theta_v_; }
@@ -826,6 +845,7 @@ class V3Controller {
   }
   [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
   [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
+  [[nodiscard]] float yawBias() const noexcept { return yaw_bias_; }  // learned gyro yaw offset (rad/s)
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
   [[nodiscard]] float reflexGate() const noexcept { return reflex_w_; }
   [[nodiscard]] float lqrLeadEffective() const noexcept { return lqr_lead_eff_; }
@@ -839,7 +859,7 @@ class V3Controller {
 
   // Hip offset to send to the legs (height pose + tier 2), every state.
   [[nodiscard]] float hipCommand() const noexcept {
-    return pose_.hip_offset_rad + dhip_ + axle_hip_correction_;
+    return hop_leg_override_ ? hop_hip_cmd_ : pose_.hip_offset_rad + dhip_ + axle_hip_correction_;
   }
   [[nodiscard]] bool trunkWorkspaceLimited() const noexcept { return axle_limited_; }
   struct TrunkSchedule {
@@ -855,7 +875,20 @@ class V3Controller {
     return wheel_carrier_rad_s_;
   }
   // Knee offset to send to the legs (height pose + whole-body offset).
-  [[nodiscard]] float kneeCommand() const noexcept { return pose_.knee_offset_rad + dknee_; }
+  [[nodiscard]] float kneeCommand() const noexcept {
+    return hop_leg_override_ ? hop_knee_cmd_ : pose_.knee_offset_rad + dknee_;
+  }
+  // Hop (HopSequence): phase, why a request was refused, the leg path rates for the driver velocity
+  // feed-forward [core rad/s] (0 outside a hop) and the flight measured from the IMU.
+  [[nodiscard]] HopSequence::Phase hopPhase() const noexcept { return hop_.phase(); }
+  [[nodiscard]] HopSequence::Refusal hopRefusal() const noexcept { return hop_refusal_; }
+  [[nodiscard]] HopSequence::Result hopResult() const noexcept { return hop_.result(); }
+  [[nodiscard]] const HopSequence& hop() const noexcept { return hop_; }
+  [[nodiscard]] bool hopActive() const noexcept { return hop_leg_override_; }
+  [[nodiscard]] bool hopWheelsLimp() const noexcept { return hop_wheels_limp_; }
+  [[nodiscard]] float hopKneeCommand() const noexcept { return hop_knee_cmd_; }
+  [[nodiscard]] float hopHipRate() const noexcept { return hop_leg_override_ ? hop_hip_rate_ : 0.0F; }
+  [[nodiscard]] float hopKneeRate() const noexcept { return hop_leg_override_ ? hop_knee_rate_ : 0.0F; }
   [[nodiscard]] bool wholeBody() const noexcept { return config_.algo == Algo::WholeBody; }
   // Gain table in use (default: the generated WholeBodyGains.hpp); tests and
   // the weight search swap in their own designs.
@@ -918,6 +951,25 @@ class V3Controller {
   bool chain_init_ = false;
   std::uint64_t legs_moved_us_ = 0U;
   void updateHeight(const Input& in, const Command& cmd);
+  // Small hop (HopSequence).
+  void hopBegin(const Input& in, const Command& cmd);
+  void hopStep(const Input& in);
+  void hopResume(const Input& in);
+  void hopEnd() noexcept;
+  [[nodiscard]] float hopHipFor(float knee, float hip_warm, float c_ref, float* height_m) const noexcept;
+  HopSequence hop_{};
+  HopSequence::Refusal hop_refusal_ = HopSequence::Refusal::None;
+  bool hop_leg_override_ = false;
+  bool hop_arm_ = false;                 // HOP requested, waiting for a calm moment
+  std::uint64_t hop_arm_until_us_ = 0U;
+  float hop_req_clearance_m_ = 0.0F;
+  bool hop_wheels_free_ = false, hop_wheels_limp_ = false;
+  float hop_hip_cmd_ = 0.0F, hop_knee_cmd_ = 0.0F, hop_hip_rate_ = 0.0F, hop_knee_rate_ = 0.0F;
+  float hop_hip_start_ = 0.0F, hop_c_ref_ = 0.0F, hop_trim_ = 0.0F, hop_tv0_ = 0.0F, hop_tv_corr_ = 0.0F, hop_carrier0_ = 0.0F, hop_carrier_lp_ = 0.0F;
+  float hop_tv_goal_ = 0.0F, hop_flight_hip0_ = 0.0F, hop_flight_corr_ = 0.0F;
+  bool hop_in_flight_ = false, hop_tier2_on_ = false;
+  float hop_dhip0_ = 0.0F;
+  std::array<float, 2> hop_last_wheel_cmd_{};
   [[nodiscard]] static float heightStoppingDistance(float speed_m_s,
                                                      float accel_m_s2,
                                                      float max_accel_m_s2,
@@ -1009,7 +1061,9 @@ class V3Controller {
   bool roll_init_ = false;
   float roll_dh_ = 0.0F;       // side height offset: left +roll_dh_, right -roll_dh_ [m]
   float roll_v_lp_ = 0.0F, roll_w_lp_ = 0.0F, roll_i_ = 0.0F, roll_e_lp_ = 0.0F;
-  float yaw_cmd_ = 0.0F;  // the turn command as used (slewed with roll on)
+  float yaw_cmd_ = 0.0F;  // the turn command as used (S-curve profile)
+  float yaw_acc_ = 0.0F;  // its acceleration
+  float yaw_bias_ = 0.0F;  // learned yaw-gyro zero-rate offset (Tier::yaw_bias_tau_s)
   float roll_target_ = 0.0F;
   float roll_ref_ = 0.0F;          // learned level reference (IMU roll frame)
   bool roll_ref_valid_ = false;
@@ -1025,6 +1079,7 @@ class V3Controller {
   [[nodiscard]] bool envelopeOn() const noexcept {
     return config_.tier.envelope || (wholeBody() && config_.tier.envelope_wb);
   }
+  void planBudget(float v_abs, float scale, float& amax, float& jmax) const noexcept;  // amax/jmax at that speed
   [[nodiscard]] PlanSample planDelayed() const noexcept;
   [[nodiscard]] PlanSample planAt(float delay_s) const noexcept;  // plan delay_s ago
   float lean_lp_ = 0.0F, lean_rate_f_ = 0.0F; // whole-system residual / rate

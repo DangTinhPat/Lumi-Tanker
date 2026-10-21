@@ -66,7 +66,8 @@ SENS_RE = re.compile(
 )
 CONTROL_MODE_RE = re.compile(r"CONTROL mode=(\S+)")
 STATE_RE = re.compile(r"\bstate=(\w+)")
-MOT_RE = re.compile(r"^MOT kind=(\w+) state=(\w+) target=([-+\d.]+) progress=([-+\d.]+)")
+MOT_RE = re.compile(r"^MOT kind=(\w+) state=(\w+) target=([-+\d.]+) progress=([-+\d.]+)"
+                    r"(?: speed=[\d.]+ raw=([-+\d.]+) scale=([\d.]+))?")
 AXLE_X_RE = re.compile(r"\baxle_x=([+-]?[\d.]+)")
 HEIGHT_RE = re.compile(r"\bh=([0-9.]+).*?\bhtgt=([0-9.]+)")
 WHEEL_POS_RE = re.compile(
@@ -125,10 +126,45 @@ class _TcpPort:
             pass
 
 
+BEACON_PORT = 8024
+
+
+def discover_robot(timeout_s: float = 6.0) -> tuple[str, int] | None:
+    """Listen for the robot's UDP beacon ("TAP-RB 1 <ip> <port> <name>", once a second) and return (ip, port).
+
+    Works on any network the laptop and the robot share (phone hotspot, router): no address to know."""
+    deadline = time.monotonic() + timeout_s
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", BEACON_PORT))
+        while (left := deadline - time.monotonic()) > 0.0:
+            sock.settimeout(min(left, 0.5))
+            try:
+                data, sender = sock.recvfrom(256)
+            except socket.timeout:
+                continue
+            parts = data.decode("ascii", "replace").split()
+            if len(parts) >= 4 and parts[0] == "TAP-RB":
+                try:
+                    return (parts[2] or sender[0]), int(parts[3])
+                except ValueError:
+                    return sender[0], WIFI_PORT
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return None
+
+
 def parse_tcp_target(device: str) -> tuple[str, int] | None:
-    """'tcp://192.168.4.1:8023' (or 'wifi') -> (host, port); None for a serial device."""
+    """'tcp://192.168.4.1:8023' (or 'wifi') -> (host, port); None for a serial device.
+
+    'auto' / 'tcp://auto' -> ('auto', port): the robot is looked up from its UDP beacon when connecting."""
     if device == "wifi":
         return WIFI_HOST, WIFI_PORT
+    if device in ("auto", "tcp://auto"):
+        return "auto", WIFI_PORT
     if not device.startswith("tcp://"):
         return None
     host, _, port = device[6:].partition(":")
@@ -149,6 +185,7 @@ class SerialLink:
         self.telemetry: dict[str, str] = {}
         self.telemetry_received_monotonic_s = 0.0
         self._tcp_target: tuple[str, int] | None = None
+        self._auto = False
         self._kicked = False
         self._keepalive_stop = threading.Event()
 
@@ -173,6 +210,15 @@ class SerialLink:
 
     def open(self, device: str) -> None:
         target = parse_tcp_target(device)
+        self._auto = target is not None and target[0] == "auto"
+        if self._auto:
+            self.incoming.put("[auto] đang tìm robot (tín hiệu UDP 8024, tối đa 8 s)...")
+            found = discover_robot(8.0)
+            if found is None:
+                raise RuntimeError("Không thấy robot: laptop và robot phải cùng một mạng Wi-Fi, "
+                                   "robot đã bật và vào mạng (tín hiệu UDP 8024 bị chặn?).")
+            target = found
+            self.incoming.put(f"[auto] thấy robot tại {found[0]}:{found[1]}")
         self._tcp_target = target
         self._kicked = False
         if target is not None:
@@ -299,6 +345,10 @@ class SerialLink:
             attempt += 1
             if self.stop_event.wait(0.5 if attempt < 20 else 2.0):
                 return False
+            if getattr(self, "_auto", False) and attempt % 3 == 2:  # the address may have changed: ask the beacon
+                found = discover_robot(1.2)
+                if found is not None:
+                    self._tcp_target = found
             try:
                 new_port = _TcpPort(*self._tcp_target)
             except OSError:
@@ -321,6 +371,9 @@ class SerialLink:
             self.telemetry["motion_state"] = mot.group(2)
             self.telemetry["motion_target"] = mot.group(3)
             self.telemetry["motion_progress"] = mot.group(4)
+            if mot.group(5) is not None:
+                self.telemetry["motion_raw"] = mot.group(5)
+                self.telemetry["motion_scale"] = mot.group(6)
             self.telemetry["motion_seq"] = str(int(self.telemetry.get("motion_seq", "0")) + 1)
         elif "V3 TUNE motion=1" in line:
             self.telemetry["fw_motion"] = "1"  # firmware has MOVE / TURN / MSTAT
@@ -521,6 +574,24 @@ class TapSerialControlApp:
         ttk.Label(exact, textvariable=self.exact_var).grid(row=2, column=0, columnspan=7, sticky="w", pady=(6, 0))
         self._exact_active = False
 
+        # Calibration against the floor: the odometry (wheel angle x radius) and the gyro integral are what MOVE /
+        # TURN trust. After a finished move, measure what the robot really did and apply the ratio.
+        cal = ttk.LabelFrame(self.root, text="Hiệu chuẩn quãng / góc (đo thực tế sau khi robot dừng)", padding=10)
+        cal.pack(fill="x", padx=10, pady=(0, 8))
+        self.cal_dist_var = tk.StringVar(value="")
+        self.cal_angle_var = tk.StringVar(value="")
+        self.cal_var = tk.StringVar(value="Chạy một lệnh Tiến/Quay trọn vẹn, đo quãng/góc thực rồi nhập vào đây.")
+        ttk.Label(cal, text="Quãng thực đo (m):").grid(row=0, column=0, sticky="e")
+        ttk.Entry(cal, textvariable=self.cal_dist_var, width=8).grid(row=0, column=1, padx=3)
+        ttk.Button(cal, text="Áp dụng quãng", command=lambda: self.apply_calibration("move")).grid(
+            row=0, column=2, padx=4, sticky="ew")
+        ttk.Label(cal, text="Góc thực đo (độ):").grid(row=0, column=3, sticky="e")
+        ttk.Entry(cal, textvariable=self.cal_angle_var, width=8).grid(row=0, column=4, padx=3)
+        ttk.Button(cal, text="Áp dụng góc", command=lambda: self.apply_calibration("turn")).grid(
+            row=0, column=5, padx=4, sticky="ew")
+        ttk.Label(cal, textvariable=self.cal_var).grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        self._last_motion = {}
+
         tiers = ttk.LabelFrame(self.root, text="v3.3 điều khiển phân tầng (luôn bật)", padding=10)
         tiers.pack(fill="x", padx=10, pady=(0, 8))
         ttk.Label(tiers, textvariable=self.tier_var).grid(row=0, column=0, sticky="w")
@@ -620,7 +691,7 @@ class TapSerialControlApp:
         if not ports:
             ports = sorted(glob.glob("/dev/serial/by-id/*CP210*") +
                            glob.glob("/dev/ttyUSB*"))
-        ports += [f"tcp://{WIFI_HOST}:{WIFI_PORT}", f"tcp://tap-rb.local:{WIFI_PORT}"]
+        ports += ["auto", f"tcp://{WIFI_HOST}:{WIFI_PORT}", f"tcp://tap-rb.local:{WIFI_PORT}"]
         self.port_box["values"] = ports
         if self.port_var.get() not in ports:
             self.port_var.set(ports[0])
@@ -782,6 +853,34 @@ class TapSerialControlApp:
                            if ok else self._exact_refusal())
         self.link.log_event(f"exact_turn sign={sign:+d} a={values[0]} w={values[1]} -> {self.exact_var.get()}")
 
+    def apply_calibration(self, kind: str) -> None:
+        """New scale = measured / raw (what the robot's own odometry or gyro integral said it did)."""
+        last = self._last_motion
+        if not last or last.get("kind") != kind or last.get("status") != "completed":
+            self.cal_var.set("Cần một lệnh " + ("Tiến/Lùi" if kind == "move" else "Quay") + " đã XONG trước khi hiệu chuẩn.")
+            return
+        try:
+            text = (self.cal_dist_var if kind == "move" else self.cal_angle_var).get().replace(",", ".")
+            measured = float(text)
+        except ValueError:
+            messagebox.showinfo("Hiệu chuẩn", "Nhập số đo thực hợp lệ.")
+            return
+        if kind == "turn":
+            measured = math.radians(measured)
+        raw = last["raw"]
+        if abs(raw) < 0.02 or measured == 0.0 or (measured > 0) != (raw > 0):
+            self.cal_var.set("Số đo không hợp lệ (cùng chiều với lần chạy, khác 0).")
+            return
+        new_scale = measured / raw
+        if not 0.3 <= new_scale <= 3.0:
+            self.cal_var.set(f"Hệ số {new_scale:.3f} ngoài 0.3–3: kiểm tra lại số đo.")
+            return
+        key = "modist" if kind == "move" else "moyaw"
+        self._send(f"SET {key} {new_scale:.4f}")
+        self.link.log_event(f"calibration {key}={new_scale:.4f} (measured {measured:.4f}, raw {raw:.4f}, old {last['scale']:.4f})")
+        self.cal_var.set(f"Đã gửi SET {key} {new_scale:.4f} (thực đo {measured:.3f} / thô {raw:.3f}). "
+                         f"Chạy lại để kiểm; báo mình số này để ghi vào mã.")
+
     def exact_cancel(self) -> None:
         self.motion.cancel_action()
         self._exact_active = False
@@ -799,7 +898,15 @@ class TapSerialControlApp:
                 self.exact_var.set(f"Đang chạy: {float(progress):+.3f} / {float(tel.get('motion_target', 0)):+.3f}")
             return
         self._exact_active = False
-        names = {"completed": "XONG", "timed_out": "Hết giờ", "rejected": "Bị dừng (không còn cân bằng / mất telemetry)",
+        raw, scale = tel.get("motion_raw"), tel.get("motion_scale")
+        if raw is not None and scale is not None:
+            self._last_motion = {"kind": tel.get("motion_kind", ""), "raw": float(raw), "scale": float(scale),
+                                 "target": float(tel.get("motion_target", 0)), "status": status.value}
+            self.cal_var.set(f"Lần cuối: {self._last_motion['kind']} {status.value}, đích {self._last_motion['target']:+.3f}, "
+                             f"odometry/gyro thô {float(raw):+.3f}, hệ số đang dùng {float(scale):.4f}")
+        self.link.log_event(f"exact result: {status.value} target={tel.get('motion_target')} progress={progress} "
+                            f"raw={raw} scale={scale}")
+        names = {"completed": "XONG", "timed_out": "Hết giờ", "rejected": "Bị từ chối / firmware hủy",
                  "cancelled": "Đã hủy"}
         self.exact_var.set(f"{names.get(status.value, status.value)}"
                            + (f" — tiến độ {float(progress):+.3f}" if progress is not None else ""))

@@ -36,6 +36,10 @@ class MotionApi {
     float tol_m = 0.02F, tol_rad = 0.05F;
     float done_speed_m_s = 0.06F, done_rate_rad_s = 0.15F;
     float wrong_way_rad = 0.15F, wrong_way_after_s = 1.0F;
+    // With the controller's stopping distance known: brake this much early, then creep the last bit.
+    float stop_margin_m = 0.005F, stop_margin_rad = 0.01F;
+    float creep_m_s = 0.12F, creep_min_m_s = 0.04F, creep_gain_m = 1.5F;
+    float creep_rad_s = 0.15F, creep_min_rad_s = 0.06F, creep_gain_rad = 2.0F;
   };
 
   struct Feedback {
@@ -45,6 +49,12 @@ class MotionApi {
     float ground_x_m = 0.0F;     // axle odometry
     float ground_v_m_s = 0.0F;
     float yaw_rate_rad_s = 0.0F; // gyro, + = the DRIVE yaw sign
+    // What the controller needs to stop from its current speed plan, in the units of ground_x_m / the gyro
+    // integral and signed like the motion (V3Controller::planStopDistance / yawStopAngle). < 0 = unknown: the
+    // move then brakes on the fixed Limits::decel_* instead (host tests, other callers).
+    float stop_m = -1.0F;
+    float stop_rad = -1.0F;
+    bool stop_known = false;
   };
 
   struct Output {
@@ -95,8 +105,31 @@ class MotionApi {
       finish(Status::Done, "done");
       return out;
     }
-    const float v = std::fabs(remaining) <= tol ? 0.0F
-        : approachSpeed(remaining, cruise_, turn ? limits_.decel_rad_s2 : limits_.decel_m_s2);
+    float v;
+    if (fb.stop_known) {
+      // Brake when the distance left equals what the controller needs to stop (plus a small margin), and ask for
+      // zero: its own jerk-limited plan then ends on the target. A slow creep closes what the model missed.
+      const float dir = target_ >= 0.0F ? 1.0F : -1.0F;
+      const float stop = std::max(turn ? fb.stop_rad * dir : fb.stop_m * dir, 0.0F);
+      const float margin = turn ? limits_.stop_margin_rad : limits_.stop_margin_m;
+      if (!braking_ && remaining * dir <= stop + margin) braking_ = true;
+      if (!braking_) {
+        v = dir * cruise_;
+      } else if (std::fabs(remaining) <= tol) {
+        v = 0.0F;
+      } else {
+        const float creep_max = turn ? limits_.creep_rad_s : limits_.creep_m_s;
+        const float creep_min = turn ? limits_.creep_min_rad_s : limits_.creep_min_m_s;
+        const float gain = turn ? limits_.creep_gain_rad : limits_.creep_gain_m;
+        const float want = std::clamp(std::fabs(remaining) * gain, creep_min, std::min(creep_max, cruise_));
+        // Only creep once the plan has nearly stopped; until then the request stays zero and it brakes.
+        v = rate < (turn ? 2.0F * limits_.done_rate_rad_s : 2.0F * limits_.done_speed_m_s)
+            ? std::copysign(want, remaining) : 0.0F;
+      }
+    } else {
+      v = std::fabs(remaining) <= tol ? 0.0F
+          : approachSpeed(remaining, cruise_, turn ? limits_.decel_rad_s2 : limits_.decel_m_s2);
+    }
     out.active = true;
     (turn ? out.yaw_rad_s : out.forward_m_s) = v;
     if (fb.now_us - report_us_ >= 200'000U) {  // progress for the layer above, 5 Hz
@@ -151,6 +184,7 @@ class MotionApi {
     target_ = target;
     progress_ = 0.0F;
     start_x_ = last_fb_.ground_x_m;
+    braking_ = false;
     start_us_ = report_us_ = last_fb_.now_us;
     timeout_us_ = static_cast<std::uint64_t>(std::max(3.0F, 2.5F * std::fabs(target) / cruise_ + 2.0F) * 1.0e6F);
     reason_ = "";
@@ -183,6 +217,7 @@ class MotionApi {
   Kind kind_ = Kind::None, last_kind_ = Kind::None;
   Status last_status_ = Status::Idle;
   float target_ = 0.0F, progress_ = 0.0F, start_x_ = 0.0F, cruise_ = 0.0F;
+  bool braking_ = false;
   std::uint64_t start_us_ = 0U, timeout_us_ = 0U, report_us_ = 0U;
   const char* reason_ = "";
   Feedback last_fb_{};

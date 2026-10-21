@@ -322,6 +322,52 @@ from implementation changes in the final report.
 
 ---
 
+## Rule 6: Small vertical hop on the real robot (2026-10-21)
+
+**The robot may have one jump function: a small vertical hop (target 20 mm of
+CoM rise, wheels leaving the floor, landing on the wheels). Nothing larger and
+no drive-off-a-ledge landing is covered.** This rule supplies the "new rule
+with a scenario that exists in the current tooling" that retired Rule 3 asks
+for, for this hop only.
+
+### Why this rule exists
+
+The user asked (2026-10-21, branch `v3.7`) for a hop on the real robot with a
+modest goal: joints coordinated, wheels fully clear of the floor, robot lands
+without falling. The older v3.5 jump was built on torque-mode legs with motor
+current feedback and cannot be reused on the position-mode legs of v3.7. A
+hop pushes the legs and wheels beyond anything the balance logs cover, so it
+needs binding conditions before it reaches the robot.
+
+### Binding conditions
+
+1. **Default off.** `HopSequence::Config::enabled` is false at boot; only
+   `SET hop 1` (console, robot not balancing) enables `HOP [mm]`. Every
+   tunable has a safe range and a `SET hop...` key. Turning it off restores
+   the pre-hop firmware behaviour.
+2. **Sensor contract (Rule 1).** Lift-off and touchdown are decided from the
+   MPU6500 specific force and the six encoders only. No wheel motor current, no
+   simulator state, no contact signal. The hop plan is open loop in time; the
+   only runtime adaptation is the next thrust gain from the IMU flight time.
+3. **Scenario in the tooling.** `tap_mujoco_gim_v3 --hop ...` with `HOP` at a
+   scheduled time (`--at`), with the hardware-shaped IMU (`--imu-hw 1`: +-2 g,
+   44 Hz) and the leg dead time (`--leg-delay`). Acceptance and the robustness
+   grid are in `docs/V3.7_HOP_20261021.md`. Simulator wheel clearance is
+   scoring only, never an input.
+4. **Evidence labels.** Sim and host-test results are evidence for the model
+   (leg torque/velocity limits, BL4012 wheel lag and the POS-loop response are
+   not measured on the robot); they do not certify the hop. The hardware ladder
+   of the document (stand, loaded push, tethered hop, free hop at 10/20/30 mm)
+   is the deployment evidence and runs only when the user asks for it.
+5. **Hardware safety.** First hops on a slack line; robot on a firm, flat,
+   non-slip floor. The sequence aborts to the normal balance logic on any fault
+   and never commands the knee beyond `knee_max_rad`. The wheels are coasted
+   (torque off) only between the start of the thrust and the touchdown.
+6. **Protected documents.** Changing this rule needs the user's permission
+   (Rule 5).
+
+---
+
 ## Revision history
 
 - 2026-10-08 (user-authorized restructure): rewritten against the current code.
@@ -332,6 +378,9 @@ from implementation changes in the final report.
   states that the firmware exists and that console `SET` tunables are allowed.
   Rule 1's allowed/not-allowed lists, the Iq exception and its five binding
   conditions, Rule 2 and Rule 5 keep their substance unchanged.
+
+- 2026-10-21 (user-authorized addition): Rule 6, small vertical hop. Existing rules unchanged; Rule 3 stays
+  retired for ledge landings.
 
 <!--
 Add future mandatory rules below as their own "## Rule N: <short name>"
