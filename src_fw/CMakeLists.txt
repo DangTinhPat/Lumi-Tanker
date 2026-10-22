@@ -20,6 +20,11 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(v3_addwifi_balance_tests tests/v3_addwifi_balance_tests.cpp)
+  target_link_libraries(v3_addwifi_balance_tests PRIVATE tap_fw)
+  target_compile_options(v3_addwifi_balance_tests PRIVATE -UNDEBUG)
+  add_test(NAME v3_addwifi_balance_tests COMMAND v3_addwifi_balance_tests)
+
   add_executable(motor_feedback_tests tests/motor_feedback_tests.cpp)
   target_link_libraries(motor_feedback_tests PRIVATE tap_fw)
   if(MSVC)

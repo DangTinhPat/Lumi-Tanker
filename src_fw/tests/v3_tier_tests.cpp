@@ -36,6 +36,7 @@
 #include "tap_fw/v3/LegLock.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/V3Controller.hpp"
+#include "tap_fw/v3/AddWifiBalanceProfile.hpp"
 
 namespace {
 
@@ -651,6 +652,18 @@ Result simulate(const Case& c) {
   if (wb_bias_gain_override >= 0) cfg.wb_bias_gain = static_cast<float>(wb_bias_gain_override);
   if (std::getenv("TR_WBFF")) cfg.wb_lean_ff = std::atoi(std::getenv("TR_WBFF")) != 0;
   if (std::getenv("TR_WBSLACK")) cfg.wb_drive_slack_m = static_cast<float>(std::atof(std::getenv("TR_WBSLACK")));
+  // Optional offline comparison of actual boot balance settings. No UART/Wi-Fi model.
+  if (const char* profile = std::getenv("TIER_ADDWIFI_PROFILE")) {
+    cfg.tier.height_exp = .15F;
+    cfg.lqr_lead_adaptive = true;
+    cfg.lqr_lead_tall_s = cfg.lqr_lead_low_s = .09F;
+    cfg.trim_acc = true;
+    cfg.tier.body_damping_s = .08F; cfg.tier.body_damp_lpf_hz = 4.5F;
+    cfg.tier.joint_rate_gain_low = .7F;
+    cfg.tier.knee_follow_hz = 1; cfg.tier.knee_follow_rate_rad_s = .6F;
+    cfg.roll.learn_ref = cfg.roll.cmd_preview = cfg.roll.latch = cfg.roll.gimbal_link = true;
+    tap_fw::v3::applyAddWifiBalanceProfile(cfg, std::atoi(profile) != 0);
+  }
   V3Controller ctrl(cfg);
   ctrl.setWholeBodyTable(c.wb_table);
   V3Controller::Input in{};
@@ -2363,6 +2376,21 @@ void runLayeredRoll(bool all_modes) {
 }
 
 int main() {
+  if (std::getenv("TIER_ADDWIFI_COMPARE")) {
+    // Released standing balance/height changes, not the floor stand-up sequence.
+    for (double h : {.12, .15, .18}) for (double e : {-.02, .02})
+      for (std::size_t hd : {2U, 22U}) for (double wt : {.035, .070}) {
+        Case c = withMode(Case{}, 2);
+        c.name = "1840/addwifi balance diagnostic";
+        c.duration_s = 8; c.seed_error = e; c.hip_delay_ticks = hd; c.wheel_tau = wt;
+        c.heights.push_back({1.0, h});
+        const auto r = simulate(c);
+        std::printf("PROFILE h=%.3f seed=%+.3f hip_ticks=%zu wheel_tau=%.3f fell=%d pitch_rms=%.6f gyro_hf=%.6f hip_hf=%.6f\n",
+                    h,e,hd,wt,r.fell?1:0,r.drive_pitch_rms,r.gyro_hf_rms,r.dhip_hf_rms);
+      }
+    return 0;
+  }
+
   // V1: plant self-check - passive motion (no torques, free hip and knee) conserves
   // energy, so the numeric Kane equations are consistent.
   {

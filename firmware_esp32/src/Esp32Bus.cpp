@@ -269,6 +269,12 @@ bool Esp32UartPort::begin(std::uint32_t baud) noexcept {
   //   workers prio 22, core 1:  control loop late 40%, ctrl tick up to 5.7 ms, pitch rms 3x worse
   // The workers sleep on a task notification / the UART ISR, so priority 24 only takes the core
   // for a transaction.
+#if defined(TAP_V3_ADDWIFI_BALANCE) && TAP_V3_ADDWIFI_BALANCE
+#undef TAP_WHEEL_CORE
+#undef TAP_WHEEL_PRIO
+#define TAP_WHEEL_CORE 1
+#define TAP_WHEEL_PRIO 22
+#endif
 #ifndef TAP_WHEEL_CORE
 #define TAP_WHEEL_CORE 0
 #endif

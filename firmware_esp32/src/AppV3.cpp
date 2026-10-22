@@ -3,6 +3,7 @@
 #define CUSTOM_SETTINGS
 #define INCLUDE_GAMEPAD_MODULE
 #include "tap_hw/AppV3.hpp"
+#include "tap_fw/v3/AddWifiBalanceProfile.hpp"
 
 #include <atomic>
 
@@ -297,6 +298,17 @@ bool AppV3::begin() noexcept {
   // Not shipped: SET tlsrc 1 (lead from the body gyro instead of the hip encoder
   // rate) and SET tgate 1 (reflex gate) are sim-validated alternatives for the
   // standing hip chatter, off until A/B-tested on the robot (HANDOFF 5.41-5.42).
+#if defined(TAP_V3_ADDWIFI_BALANCE) && TAP_V3_ADDWIFI_BALANCE
+  tap_fw::v3::applyAddWifiBalanceProfile(ctrl_.config(), true);
+#endif
+#if defined(TAP_V3_1840_HIP) && TAP_V3_1840_HIP
+  // User-selected follow-up: retain donor UART/roll, restore 18:40t hip gains.
+  ctrl_.config().tier.lean_share = 0.85F;
+  ctrl_.config().tier.disturbance_share = 0.45F;
+#endif
+#if defined(TAP_V3_1840_ROLL) && TAP_V3_1840_ROLL
+  ctrl_.config().roll.enabled = true;
+#endif
   printTunables();
   const std::uint64_t now_us = nowUs();
   next_control_us_ = now_us;
@@ -369,13 +381,10 @@ void AppV3::netTaskEntry(void* arg) noexcept {
 // disables the robot exactly as unplugging USB does); every output record is copied to the
 // client through net_sb_. One client; a new connection replaces the old one.
 void AppV3::netTask() noexcept {
-  constexpr char kSsid[] = "TAP-RB";
-  constexpr char kPass[] = "taprobot123";
   WiFi.persistent(false);
   bool sta = false;
-#if defined(TAP_WIFI_STA_SSID) && !defined(TAP_WIFI_FORCE_AP)
-  // Join the shared network first (laptop and robot on the same router); the own access point
-  // below is the fallback when it is not reachable within 10 s.
+#if defined(TAP_WIFI_STA_SSID)
+  // Station only: never start an access point, even if the configured network is unavailable.
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // modem sleep would add up to ~100 ms to every command
   esp_wifi_set_ps(WIFI_PS_NONE);
@@ -408,8 +417,7 @@ void AppV3::netTask() noexcept {
   sta = WiFi.status() == WL_CONNECTED;
   if (sta && MDNS.begin("tap-rb")) MDNS.addService("tap", "tcp", 8023);
 #endif
-  bool ap = false;
-#if defined(TAP_WIFI_STA_SSID) && !defined(TAP_WIFI_FORCE_AP)
+#if defined(TAP_WIFI_STA_SSID)
   if (!sta) {
     const int found = WiFi.scanNetworks(false, false, false, 300);
     int seen = -1;
@@ -422,18 +430,17 @@ void AppV3::netTask() noexcept {
     WiFi.scanDelete();
   }
 #endif
-  if (!sta) {
-    WiFi.mode(WIFI_AP);
-    ap = WiFi.softAP(kSsid, kPass, 6, 0, 1);
-  }
   WiFiServer server(8023, 1);
   server.begin();
   server.setNoDelay(true);
   char where[96];
-  if (sta) std::snprintf(where, sizeof where, "STA %s ip %s rssi %d tap-rb.local", TAP_WIFI_STA_SSID,
-                         WiFi.localIP().toString().c_str(), static_cast<int>(WiFi.RSSI()));
-  else std::snprintf(where, sizeof where, "AP %s pass %s ip %s", kSsid, kPass, WiFi.softAPIP().toString().c_str());
-  Serial.printf("WIFI %s tcp 8023 ok=%d heap=%u\n", where, (sta || ap) ? 1 : 0,
+#if defined(TAP_WIFI_STA_SSID)
+  std::snprintf(where, sizeof where, "STA %s ip %s rssi %d tap-rb.local", TAP_WIFI_STA_SSID,
+                WiFi.localIP().toString().c_str(), static_cast<int>(WiFi.RSSI()));
+#else
+  std::snprintf(where, sizeof where, "STA credentials not configured; AP disabled");
+#endif
+  Serial.printf("WIFI %s tcp 8023 ok=%d heap=%u\n", where, sta ? 1 : 0,
                 static_cast<unsigned>(ESP.getFreeHeap()));
   // Firmware update over Wi-Fi (pio run -e esp32-s3-v3-ota -t upload): only served while the robot is idle or
   // faulted, so a transfer can never start while it balances. The partition table has two app slots.
@@ -474,10 +481,10 @@ void AppV3::netTask() noexcept {
       const std::uint32_t now_ms = millis();
       if (now_ms - last_beacon_ms >= (have_client ? 5000U : 1000U)) {
         last_beacon_ms = now_ms;
-        const bool up = sta ? WiFi.status() == WL_CONNECTED : ap;
+        const bool up = WiFi.status() == WL_CONNECTED;
         if (up) {
-          const IPAddress ip = sta ? WiFi.localIP() : WiFi.softAPIP();
-          const IPAddress bcast = sta ? WiFi.broadcastIP() : IPAddress(192, 168, 4, 255);
+          const IPAddress ip = WiFi.localIP();
+          const IPAddress bcast = WiFi.broadcastIP();
           char msg[96];
           const int n = std::snprintf(msg, sizeof msg, "TAP-RB 1 %s 8023 tap-rb\n", ip.toString().c_str());
           if (n > 0 && beacon.beginPacket(bcast, 8024)) {
@@ -888,6 +895,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       lying_start_ = v >= 0.5F;
       out_.printf("V3 lying start %s (core hip %+.4f, knee %+.4f at the power-up pose)\n",
                   lying_start_ ? "ON" : "off", homeHip(), homeKnee());
+    }
+    else if (!std::strcmp(key, "addwifibal")) {
+      if (ctrl_.state() != V3Controller::State::Idle || legs_.engaged()) {
+        out_.println("V3 SET addwifibal refused: Idle and DISABLE required");
+        return;
+      }
+      tap_fw::v3::applyAddWifiBalanceProfile(ctrl_.config(), v >= 0.5F);
+      out_.printf("V3 addwifibal=%d: hip shares and roll only; UART affinity requires build selection\n",
+                  tap_fw::v3::isAddWifiBalanceProfile(ctrl_.config()) ? 1 : 0);
     }
     else if (!std::strcmp(key, "standup")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1667,6 +1683,14 @@ bool AppV3::handleHopSet(const char* key, float v) noexcept {
 }
 
 void AppV3::printTunables() noexcept {
+#if defined(TAP_V3_ADDWIFI_BALANCE) && TAP_V3_ADDWIFI_BALANCE
+  constexpr int wheel_core = 1, wheel_priority = 22;
+#else
+  constexpr int wheel_core = TAP_WHEEL_CORE, wheel_priority = TAP_WHEEL_PRIO;
+#endif
+  out_.printf("V3 TUNE addwifibal=%d (SET addwifibal 0/1 at Idle with DISABLE): hip/roll config; motion=a787a73; UART core=%d prio=%d\n",
+              tap_fw::v3::isAddWifiBalanceProfile(ctrl_.config()) ? 1 : 0, wheel_core, wheel_priority);
+
   // The full configuration dump uses many printf float conversions (~8 ms
   // in the active log). Apply SET immediately, but print the full dump only
   // after the robot is inactive. GET/SET cannot stall active motor updates.
