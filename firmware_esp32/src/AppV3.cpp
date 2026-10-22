@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include <esp_timer.h>
+#include <esp_system.h>
 #include <esp_freertos_hooks.h>
 
 #include "robot_hal/MotorFrameCodec.hpp"
@@ -178,6 +179,9 @@ AppV3::AppV3() noexcept
   // the motor supply on in the home pose.
   ctrl_.config().standup = tap_fw::v3::StandUp::tunedRecovery(0.075F);
   ctrl_.config().standup.enabled = true;
+#if defined(TAP_V3_1840_ROLL) && TAP_V3_1840_ROLL
+  ctrl_.config().standup.handoff_prepare = true;
+#endif
 }
 
 bool AppV3::begin() noexcept {
@@ -563,6 +567,8 @@ void AppV3::netTask() noexcept {
           pending_pos += static_cast<std::size_t>(sent);
           stall_since_ms = 0U;
         } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+          net_last_send_errno_.store(errno, std::memory_order_relaxed);
+          net_send_closes_.fetch_add(1U, std::memory_order_relaxed);
           client.stop();
         } else {
           net_eagain_.fetch_add(1U, std::memory_order_relaxed);
@@ -574,6 +580,7 @@ void AppV3::netTask() noexcept {
           else if (now_ms - stall_since_ms > 8000U || ESP.getFreeHeap() < 10000U) {
             // Ride out a stall (a Wi-Fi hiccup of a few seconds recovers by itself); only a long one or a
             // nearly empty heap (a stuck backlog could crash the ESP) drops the connection.
+            net_stall_closes_.fetch_add(1U, std::memory_order_relaxed);
             client.stop();
             stall_since_ms = 0U;
           }
@@ -912,6 +919,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       }
       ctrl_.config().standup.enabled = v >= 0.5F;
       out_.printf("V3 standup %s\n", ctrl_.config().standup.enabled ? "ENABLED" : "off");
+    }
+    else if (!std::strcmp(key, "standprep")) {
+      if (ctrl_.state() != V3Controller::State::Idle) {
+        out_.println("V3 SET standprep refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().standup.handoff_prepare = v >= 0.5F;
+      out_.printf("V3 standprep=%d (stopped handoff lead ramp; tracking and dwell unchanged)\n",
+                  ctrl_.config().standup.handoff_prepare ? 1 : 0);
     }
     else if (!std::strcmp(key, "standguard")) {
       if (ctrl_.state() != V3Controller::State::Idle && ctrl_.state() != V3Controller::State::Fault) {
@@ -1683,6 +1699,17 @@ bool AppV3::handleHopSet(const char* key, float v) noexcept {
 }
 
 void AppV3::printTunables() noexcept {
+  // Keep reset evidence available after boot, including when USB was absent.
+  out_.printf("V3 DIAG reset_reason=%d uptime_ms=%lu heap=%lu min_heap=%lu\n",
+              static_cast<int>(esp_reset_reason()), static_cast<unsigned long>(millis()),
+              static_cast<unsigned long>(ESP.getFreeHeap()),
+              static_cast<unsigned long>(ESP.getMinFreeHeap()));
+#if TAP_WIFI
+  out_.printf("V3 DIAG net_send_errno=%d send_closes=%lu stall_closes=%lu\n",
+              net_last_send_errno_.load(std::memory_order_relaxed),
+              static_cast<unsigned long>(net_send_closes_.load(std::memory_order_relaxed)),
+              static_cast<unsigned long>(net_stall_closes_.load(std::memory_order_relaxed)));
+#endif
 #if defined(TAP_V3_ADDWIFI_BALANCE) && TAP_V3_ADDWIFI_BALANCE
   constexpr int wheel_core = 1, wheel_priority = 22;
 #else
@@ -1814,6 +1841,8 @@ void AppV3::printTunables() noexcept {
                 su.fold_travel_rad, su.skip_pitching ? 1 : 0,
                 su.handoff_settle_s, su.handoff_body_tol_rad, su.handoff_body_rate_tol_rad_s,
                 su.handoff_wheel_tracking_tol_rad_s, su.lift_clearance_m * 1000.0F, su.catch_speed_gain);
+    out_.printf("V3 TUNE standprep=%d (SET standprep): stopped/full-rise lead fade 200 ms, then original tracking/dwell gates\n",
+                su.handoff_prepare ? 1 : 0);
     out_.printf("V3 TUNE standcapture=%d (SET standcapture): legacy body leveling and pitch-zero handoff gate=%d; "
                 "preserve recovery knee/height=%d; hard pitch limits unchanged\n",
                 su.capture_first ? 1 : 0, su.capture_first ? 0 : 1, su.capture_first ? 1 : 0);
@@ -2721,7 +2750,9 @@ void AppV3::controlTick(std::uint64_t now_us) noexcept {
             .str(" accel_obs=").fix(su.wheel_observed_accel_m_s2, 3, true)
             .str(" angular_accel_obs=").fix(su.wheel_observed_angular_accel_rad_s2, 2, true)
             .str(" accel_raw=").fix(su.wheel_raw_accel_m_s2, 3, true)
-            .str(" accel_used=").fix(su.wheel_accel_m_s2, 3, true);
+            .str(" accel_used=").fix(su.wheel_accel_m_s2, 3, true)
+            .str(" prep=").fix(su.handoff_prepare_weight, 3)
+            .str(" lead_s=").fix(su.wheel_lead_s, 3);
         out_.println(wb);
       }
       if (ctrl_.config().standup.catch_capture_velocity) {

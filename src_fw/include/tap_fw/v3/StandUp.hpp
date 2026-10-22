@@ -303,6 +303,9 @@ class StandUp {
     // 18/10 robot log crossed the old capture gate with wheels still lagging.
     // Clearance is a model hypothesis, not a measured contact/knee-lift signal.
     bool guarded_handoff = false;
+    // Opt-in stopped handoff preparation. Fade only the acceleration lead,
+    // leaving the integrated wheel controller and all measured gates active.
+    bool handoff_prepare = false;
     float handoff_settle_s = 0.20F;
     float handoff_body_tol_rad = 0.12F;
     float handoff_body_rate_tol_rad_s = 0.40F;
@@ -369,6 +372,8 @@ class StandUp {
     float hip_measured_rad = 0.0F;
     float capture_lean_rad = 0.0F;
     float wheel_tracking_error_rad_s = 0.0F;  // max of the two wheels
+    float handoff_prepare_weight = 0.0F;  // 0 normal lead, 1 no lead at stopped handoff
+    float wheel_lead_s = 0.0F;
     float settle_s = 0.0F;
     bool handoff_ready = false;
     bool rolling_handoff = false;  // candidate gate, not the actual mode switch
@@ -540,6 +545,7 @@ class StandUp {
     capture_equilibrium_rad_ = capture_equilibrium_dwell_s_ = 0.0F;
     transfer_captured_ = false;
     transfer_dwell_s_ = transfer_weight_ = 0.0F;
+    handoff_prepare_weight_ = 0.0F;
     hip_capture_rate_initialized_ = false;
     hip_capture_rate_filtered_ = 0.0F;
     wheel_predictor_.reset();
@@ -564,6 +570,7 @@ class StandUp {
     capture_equilibrium_rad_ = capture_equilibrium_dwell_s_ = 0.0F;
     transfer_captured_ = false;
     transfer_dwell_s_ = transfer_weight_ = 0.0F;
+    handoff_prepare_weight_ = 0.0F;
     floor_armed_ = false;
     floor_arm_s_ = 0.0F;
     hip_capture_rate_initialized_ = false;
@@ -1159,10 +1166,37 @@ class StandUp {
       const float predicted_lead = config_.catch_measured_braking
           ? std::max(config_.catch_wheel_lead_s, config_.catch_wheel_lag_s)
           : config_.catch_wheel_lag_s;
-      const float wheel_lead = config_.catch_wheel_prediction
+      float wheel_lead = config_.catch_wheel_prediction
           ? config_.catch_wheel_lead_s + out.wheel_prediction_weight *
               (predicted_lead - config_.catch_wheel_lead_s)
           : config_.catch_wheel_lead_s;
+      // Stopped Catching uses v_integral + a*lead. Logs 22/10 193015,
+      // 193102, 193147, 193544: a=+-5 and lead=.075 create +-9.375 rad/s
+      // command excursions, repeatedly resetting the 4 rad/s / 200 ms gate
+      // while measured posture and speed remain captured. Do not waive that
+      // gate: prepare the actual command before testing physical tracking.
+      // Reuse the bounded transfer-ramp pattern above; this is lead scheduling,
+      // not a new balance law. Only a stopped, fully raised robot is eligible.
+      const bool preparing = config_.handoff_prepare && config_.guarded_handoff &&
+          config_.catch_measured_braking && !out.rolling_handoff;
+      if (preparing) {
+        const bool calm = out.handoff_ready &&
+            (!config_.catch_rise || config_.catch_lift || rise_done_) &&
+            out.body_clearance_valid && in.body_clearance_m >= config_.lift_clearance_m &&
+            (config_.capture_first || std::abs(in.pitch_rad) <= config_.handoff_body_tol_rad) &&
+            std::abs(in.pitch_rate_rad_s) <= config_.handoff_body_rate_tol_rad_s &&
+            std::abs(in.hip_measured_rate_rad_s) <= config_.handoff_hip_rate_tol_rad_s &&
+            std::abs(hip_rate_cmd_) <= config_.handoff_hip_rate_tol_rad_s &&
+            std::abs(in.ground_speed_m_s) <= 0.08F &&
+            std::abs(speed_filtered_m_s_) <= 0.08F && !out.hip_limited;
+        handoff_prepare_weight_ = std::clamp(handoff_prepare_weight_ +
+            (calm ? dt : -dt) / 0.20F, 0.0F, 1.0F);
+      } else {
+        handoff_prepare_weight_ = std::max(0.0F, handoff_prepare_weight_ - dt / 0.20F);
+      }
+      if (config_.handoff_prepare) wheel_lead *= 1.0F - handoff_prepare_weight_;
+      out.handoff_prepare_weight = handoff_prepare_weight_;
+      out.wheel_lead_s = wheel_lead;
       float servo_speed = 0.0F;
       if (config_.catch_measured_braking)
         servo_speed = wheel_velocity_m_s_ + accel * wheel_lead;
@@ -1205,6 +1239,7 @@ class StandUp {
           std::abs(speed_filtered_m_s_) > config_.catch_rise_handoff_speed_m_s)
         out.handoff_ready = false;  // never hand a still-rolling robot to the LQR at the tall pose
       rise_gates_ok_ = out.handoff_ready;  // all calm gates, before the rise veto
+      if (preparing && handoff_prepare_weight_ < 0.999F) out.handoff_ready = false;
       if (config_.catch_rise && !config_.catch_lift && !rise_done_) out.handoff_ready = false;
       pitch_settle_s_ = out.handoff_ready ? pitch_settle_s_ + dt : 0.0F;
       // Log 200417: posture transfer is complete, COM/rates are inside the
@@ -1410,6 +1445,7 @@ class StandUp {
     return out;
   }
 
+  float handoff_prepare_weight_ = 0.0F;
   bool catch_leveling_ = true;
   bool transfer_captured_ = false;
   float transfer_dwell_s_ = 0.0F, transfer_weight_ = 0.0F;

@@ -56,6 +56,8 @@ class AppV3 {
   TaskHandle_t net_task_ = nullptr;
   StreamBufferHandle_t net_sb_ = nullptr;
   std::atomic<std::uint32_t> net_gap_max_ms_{0U}, net_eagain_{0U};  // Wi-Fi task: longest loop gap, full-send count
+  std::atomic<int> net_last_send_errno_{0};
+  std::atomic<std::uint32_t> net_send_closes_{0U}, net_stall_closes_{0U};
   std::atomic<std::uint32_t> net_rx_ms_{0U};  // millis() of the last byte from the Wi-Fi client
   void netTask() noexcept;
   void step(bool task) noexcept;

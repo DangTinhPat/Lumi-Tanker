@@ -213,6 +213,100 @@ void peakWindowExpires() {
   assert(out.phase==StandUp::Phase::Failed && !out.wheel_peak_requested);
 }
 
+// Prescribed encoder/gyro noise, not a physical stand-up simulation.
+void stoppedHandoffPreparesActualCommand() {
+  for (bool enabled : {false, true}) {
+    auto su = catching();
+    auto& cfg = su.config();
+    cfg.guarded_handoff = true;
+    cfg.handoff_prepare = enabled;
+    cfg.catch_measured_braking = true;
+    cfg.catch_wheel_prediction = cfg.catch_capture_velocity = true;
+    cfg.catch_hip_gain = cfg.catch_hip_damping_s = 0;
+    cfg.catch_accel_gain = 0;
+    cfg.catch_accel_damping = 25;
+    cfg.catch_accel_max = 5;
+    cfg.catch_wheel_max_rad_s = 20;
+    cfg.catch_wheel_lead_s = .075F;
+    cfg.catch_blend_s = .001F;
+    auto in = sample(.002F);
+    in.body_clearance_valid = true;
+    in.body_clearance_m = .1F;
+    StandUp::Output out{};
+    bool saw_lead_error = false;
+    float previous_weight = 0;
+    for (int i=0; i<500 && su.phase()!=StandUp::Phase::Support; ++i) {
+      in.capture_rate_rad_s = (i/4)%2 ? -.2F : .2F;
+      out = su.update(in);
+      in.hip_measured_rad = out.hip_target_rad;
+      saw_lead_error |= out.wheel_tracking_error_rad_s > 4;
+      assert(std::abs(out.handoff_prepare_weight-previous_weight)<=.01001F);
+      if (out.handoff_prepare_weight < .999F && enabled)
+        assert(out.phase != StandUp::Phase::Support);
+      previous_weight = out.handoff_prepare_weight;
+    }
+    assert(saw_lead_error);  // negative control sees the original gate blocker
+    assert((su.phase()==StandUp::Phase::Support)==enabled);
+    if (enabled) {
+      assert(out.settle_s >= .20F);
+      assert(out.wheel_tracking_error_rad_s <= 4);
+      assert(out.wheel_lead_s < .0001F);
+    } else assert(out.handoff_prepare_weight==0);
+  }
+
+  // Preparation must not veto the calm timer that starts the knee rise.
+  // It must wait for completion, and restore normal lead after lost calm.
+  {
+    auto su=catching();auto& cfg=su.config();
+    cfg.handoff_prepare=cfg.guarded_handoff=cfg.catch_measured_braking=true;
+    cfg.catch_wheel_prediction=cfg.catch_capture_velocity=true;
+    cfg.catch_rise=true;cfg.catch_rise_knee_rad=.02F;
+    cfg.catch_rise_start_dwell_s=.02F;
+    auto in=sample(.002F);in.body_clearance_valid=true;in.body_clearance_m=.1F;
+    StandUp::Output out{};
+    for(int i=0;i<500;++i) {
+      out=su.update(in);
+      in.hip_measured_rad=out.hip_target_rad;in.knee_measured_rad=out.knee_target_rad;
+      if(out.knee_target_rad<.019F)assert(out.handoff_prepare_weight==0);
+      if(out.handoff_prepare_weight>=.4F)break;
+    }
+    assert(out.knee_target_rad>=.019F && out.handoff_prepare_weight>=.4F);
+    in.pitch_rate_rad_s=.5F;
+    const float previous_weight=out.handoff_prepare_weight;
+    out=su.update(in);
+    assert(out.handoff_prepare_weight<previous_weight && !out.handoff_ready);
+    for(int i=0;i<100;++i) {
+      out=su.update(in);in.hip_measured_rad=out.hip_target_rad;
+      assert(out.phase!=StandUp::Phase::Support);
+    }
+    assert(out.handoff_prepare_weight==0 && out.wheel_lead_s>=.074F);
+  }
+
+  // Each bad physical signal still prevents handoff. A prepared command is
+  // never a substitute for measured tracking, valid clearance or safe rates.
+  for (int bad=0; bad<6; ++bad) {
+    auto su=catching();auto& cfg=su.config();
+    cfg.handoff_prepare=cfg.guarded_handoff=cfg.catch_measured_braking=true;
+    cfg.catch_wheel_prediction=cfg.catch_capture_velocity=true;
+    cfg.catch_hip_gain=cfg.catch_hip_damping_s=0;
+    cfg.catch_accel_gain=cfg.catch_accel_damping=0;
+    auto in=sample(.002F);
+    in.body_clearance_valid=true;in.body_clearance_m=.1F;
+    if(bad==0)in.wheel_measured_rad_s={8,-8};
+    if(bad==1)in.body_clearance_valid=false;
+    if(bad==2)in.pitch_rate_rad_s=.5F;
+    if(bad==3)in.hip_measured_rate_rad_s=.6F;
+    if(bad==4)in.ground_speed_m_s=.2F;
+    if(bad==5)in.capture_lean_rad=.3F;
+    for(int i=0;i<500;++i) {
+      const auto out=su.update(in);in.hip_measured_rad=out.hip_target_rad;
+      assert(out.phase!=StandUp::Phase::Support);
+    }
+    su.reset();su.begin(0,0);
+    assert(su.update(sample()).handoff_prepare_weight==0);
+  }
+}
+
 void rollingHandoffSeedsPreview() {
   for (float speed : {-.4F, .4F}) {
     auto cfg=defaultV3Config();
@@ -253,5 +347,6 @@ int main() {
   liftOverlapAndClearance();
   peakWindowExpires();
   rollingHandoffSeedsPreview();
+  stoppedHandoffPreparesActualCommand();
   std::puts("stand-up: autonomous sequencing, bidirectional capture, bounded commands and stop priority passed");
 }

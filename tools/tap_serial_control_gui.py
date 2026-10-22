@@ -252,16 +252,20 @@ class SerialLink:
         with self.write_lock:
             if not self.connected:
                 return False
+            port = self.port
             try:
-                self.port.write((command + "\n").encode("ascii"))
+                port.write((command + "\n").encode("ascii"))
                 if command != "HEARTBEAT":
                     self._log(f">> {command}")
                 return True
             except OSError as exc:  # serial.SerialException is an OSError too
                 self.incoming.put(f"[serial write error] {exc}")
+                self.log_event(f"link write error: {exc}")
                 if self._tcp_target is not None:
                     try:
-                        self.port.close()  # the reader thread sees it and reconnects
+                        # Reconnect may already have installed a different socket.
+                        # Only close the socket whose write actually failed.
+                        port.close()
                     except OSError:
                         pass
                 return False
@@ -323,6 +327,7 @@ class SerialLink:
                 if self.stop_event.is_set():
                     return
                 self.incoming.put(f"[serial read error] {exc}")
+                self.log_event(f"link read error: {exc}")
                 if self._kicked:
                     self.incoming.put("[Wi-Fi: another program connected to the robot and took it over; "
                                       "close the other GUI, then press Kết nối]")
@@ -353,7 +358,11 @@ class SerialLink:
                 new_port = _TcpPort(*self._tcp_target)
             except OSError:
                 continue
-            old, self.port = self.port, new_port
+            with self.write_lock:
+                if self.stop_event.is_set():
+                    new_port.close()
+                    return False
+                old, self.port = self.port, new_port
             try:
                 if old is not None:
                     old.close()
