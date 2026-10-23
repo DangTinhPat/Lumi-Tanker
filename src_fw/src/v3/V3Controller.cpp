@@ -132,6 +132,9 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
   // Roll on: the turn command is slewed (Roll::yaw_accel_rad_s2) so the
   // lean-in can build with the centripetal pull instead of after it.
   Command cmd = cmd_in;
+  if (state_ != State::Balancing || !config_.yaw_hold.enabled || cmd_in.disable) yaw_hold_.reset();
+  if (state_ != State::StandUp || !config_.yaw_hold.enabled || cmd_in.disable)
+    standup_yaw_rate_f_ = standup_yaw_diff_ = 0.0F;
   {
     float ya = config_.tier.yaw_accel_rad_s2;
     if (config_.roll.enabled && config_.roll.yaw_accel_rad_s2 > 0.0F)
@@ -206,12 +209,14 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
   standup_lean_ = theta_v_ + com_line_hang_;
   // Yaw gyro zero-rate offset. Quiet = no turn asked, nearly stopped, body not rocking. Balancing: the wheels' own
   // yaw (R (wR - wL) / track) is the reference, so a robot that really turns is not mistaken for bias. Otherwise
-  // (lying, ready, stand-up) the robot sits still and the gyro itself is the reference.
+  // (lying, ready) the gyro itself is the reference. StandUp is moving, so
+  // retain its entry bias instead of learning a slow physical turn as bias.
   {
     const float tau = config_.tier.yaw_bias_tau_s;
     if (tau <= 1.0e-3F) {
       yaw_bias_ = 0.0F;
-    } else if (raw.dt_s > 0.0F && std::abs(yaw_cmd_) < 0.01F && std::abs(raw.pitch_rate_rad_s) < 0.5F) {
+    } else if (state_ != State::StandUp && raw.dt_s > 0.0F &&
+               std::abs(yaw_cmd_) < 0.01F && std::abs(raw.pitch_rate_rad_s) < 0.5F) {
       const float track = 2.0F * std::max(config_.lqr.half_wheel_base_m, 0.05F);
       const float yaw_wheels = config_.wheel_radius_m * (raw.wheel_rad_s[1] - raw.wheel_rad_s[0]) / track;
       const bool balancing = state_ == State::Balancing;
@@ -219,6 +224,13 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
       const float seen = raw.yaw_rate_rad_s - reference;
       const bool quiet = balancing ? std::abs(ground_v_) < 0.08F && std::abs(yaw_wheels) < 0.3F
                                    : std::abs(raw.yaw_rate_rad_s - yaw_bias_) < 0.15F;
+      // Keep correcting slow Z-gyro bias during quiet Balancing windows.
+      // Freezing it whenever yaw-hold is enabled lets temperature drift look
+      // like real yaw rate; the yaw-rate loop then commands differential wheel
+      // speed and slowly spins an otherwise stationary robot. During balance,
+      // `seen` is gyro minus encoder-derived yaw, and `quiet` requires near-zero
+      // measured translation and differential wheel yaw, so actual turns and
+      // substantial one-wheel slip do not train the bias.
       if (quiet && std::abs(seen) < 0.2F) {
         const float t = balancing ? tau : 0.5F * tau;
         yaw_bias_ += std::clamp(raw.dt_s / t, 0.0F, 1.0F) * (seen - yaw_bias_);
@@ -227,6 +239,13 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
   }
   Input in = raw;
   in.yaw_rate_rad_s = raw.yaw_rate_rad_s - yaw_bias_;
+  if (config_.yaw_hold.enabled && !cmd.disable &&
+      (state_ == State::StandUp || state_ == State::Balancing)) {
+    yaw_feedback_rate_ = yaw_rate_filter_.update(in.yaw_rate_rad_s, in.dt_s, cmd.yaw_rad_s);
+  } else {
+    yaw_rate_filter_.reset();
+    yaw_feedback_rate_ = in.yaw_rate_rad_s;
+  }
   in.pitch_rad = theta_v_;
   in.pitch_rate_rad_s = theta_v_rate_;
   if (state_ != State::Balancing) {
@@ -481,6 +500,28 @@ TAP_HOT V3Controller::Output V3Controller::update(const Input& raw, const Comman
       out.legs_moving = true;
       if (standup_state_.wheels_on) {
         out.wheel_cmd_rad_s = {standup_state_.wheel_rad_s, standup_state_.wheel_rad_s};
+        // Recovery bypasses LQR, including its yaw-rate feedback. Damp body-Z
+        // rotation here without integrating heading or changing the pitch
+        // controller's mean speed. Keep the existing native wheel signs.
+        if (config_.yaw_hold.enabled && std::isfinite(in.yaw_rate_rad_s) &&
+            in.dt_s > 0.0F && in.dt_s <= 0.01F) {
+          standup_yaw_rate_f_ += in.dt_s / (0.05F + in.dt_s) *
+              (yaw_feedback_rate_ - standup_yaw_rate_f_);
+          const float headroom = std::max(0.0F, config_.standup.catch_wheel_max_rad_s -
+              std::abs(standup_state_.wheel_rad_s));
+          const float cap = std::min({1.5F, config_.yaw_hold.wheel_max_rad_s, headroom});
+          const float target = std::clamp(-config_.lqr.left_wheel_sign *
+              config_.lqr.yaw_rate_feedback_kp * standup_yaw_rate_f_ *
+              config_.lqr.half_wheel_base_m / std::max(config_.wheel_radius_m, 1.0e-4F),
+              -cap, cap);
+          const float step = config_.yaw_hold.rise_rad_s2 * in.dt_s;
+          standup_yaw_diff_ = std::clamp(standup_yaw_diff_ +
+              std::clamp(target - standup_yaw_diff_, -step, step), -cap, cap);
+          out.wheel_cmd_rad_s[0] -= standup_yaw_diff_;
+          out.wheel_cmd_rad_s[1] += standup_yaw_diff_;
+        } else {
+          standup_yaw_rate_f_ = standup_yaw_diff_ = 0.0F;
+        }
       }
       out.state = state_;
       return out;
@@ -1167,7 +1208,7 @@ TAP_HOT std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Comm
   state.floor_contact = true;
   state.imu.pitch_rad = in.pitch_rad;
   state.imu.pitch_rate_rad_s = in.pitch_rate_rad_s;
-  state.imu.yaw_rate_rad_s = in.yaw_rate_rad_s;  // the yaw-rate feedback of LqrBalancer (it was left at 0: 2x open loop)
+  state.imu.yaw_rate_rad_s = yaw_feedback_rate_;
   state.wheel.position_m = ground_x_;
   state.wheel.velocity_m_s = pid_v_filt_;
 
@@ -1304,6 +1345,22 @@ TAP_HOT std::array<float, 2> V3Controller::lqrUpdate(const Input& in, const Comm
   std::array<float, 2> sent{
       comp(lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0]),
       comp(lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1])};
+  if (config_.yaw_hold.enabled) {
+    // Independent tanh boosts amplify tiny differential yaw corrections at
+    // each zero crossing. Apply the deadband push to common pitch speed only;
+    // preserve the requested differential without extra near-zero yaw gain.
+    const float left = lqr_out.left_wheel_velocity_rad_s + lead_wheel - carrier[0];
+    const float right = lqr_out.right_wheel_velocity_rad_s + lead_wheel - carrier[1];
+    const float common = comp(.5F * (left + right));
+    const float diff = .5F * (right - left);
+    sent = {common - diff, common + diff};
+    const bool safe = !held_outer_off_ && !held_quiet_ && !recovery_pose_held_ &&
+        !hop_.active() && !hop_arm_ && !lqr_out.fallen &&
+        std::abs(in.pitch_rad - pid_ref_) < .08F && std::abs(in.pitch_rate_rad_s) < .5F;
+    sent = yaw_hold_.update(config_.yaw_hold, sent, in.dt_s, yaw_feedback_rate_,
+        cmd.yaw_rad_s, target_v, safe, vmax/radius,
+        config_.lqr.half_wheel_base_m, radius);
+  }
   if (recovery_bounds) {
     for (auto& w : sent)
       w = std::clamp(w, -config_.standup.catch_wheel_max_rad_s, config_.standup.catch_wheel_max_rad_s);

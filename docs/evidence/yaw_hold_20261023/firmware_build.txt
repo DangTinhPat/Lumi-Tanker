@@ -1,0 +1,13 @@
+Processing esp32-s3-v3 (platform: platformio/espressif32@7.1.3; board: 4d_systems_esp32s3_gen4_r8n16; framework: arduino)
+RAM:   [=====     ]  50.8% (used 166360 bytes from 327680 bytes)
+Flash: [==        ]  23.0% (used 1508209 bytes from 6553600 bytes)
+Processing esp32-s3-v3-single-loop (platform: platformio/espressif32@7.1.3; board: 4d_systems_esp32s3_gen4_r8n16; framework: arduino)
+RAM:   [====      ]  43.7% (used 143308 bytes from 327680 bytes)
+Flash: [==        ]  16.9% (used 1105021 bytes from 6553600 bytes)
+Processing esp32-s3-v3-1840-roll (platform: platformio/espressif32@7.1.3; board: 4d_systems_esp32s3_gen4_r8n16; framework: arduino)
+RAM:   [=====     ]  50.8% (used 166360 bytes from 327680 bytes)
+Flash: [==        ]  23.0% (used 1508217 bytes from 6553600 bytes)
+esp32-s3-v3              SUCCESS   00:00:12.437
+esp32-s3-v3-single-loop  SUCCESS   00:00:11.336
+esp32-s3-v3-1840-roll    SUCCESS   00:00:12.424
+========================= 3 succeeded in 00:00:36.197 =========================

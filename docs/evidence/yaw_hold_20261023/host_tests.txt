@@ -1,0 +1,20 @@
+Internal ctest changing into directory: /tmp/tap-yaw-host
+Test project /tmp/tap-yaw-host
+    Start 17: v3_yaw_hold_tests
+1/7 Test #17: v3_yaw_hold_tests ................   Passed    0.02 sec
+    Start 18: v3_addwifi_balance_tests
+2/7 Test #18: v3_addwifi_balance_tests .........   Passed    0.03 sec
+    Start 19: motor_feedback_tests
+3/7 Test #19: motor_feedback_tests .............   Passed    0.00 sec
+    Start 22: v3_standup_tests
+4/7 Test #22: v3_standup_tests .................   Passed    0.02 sec
+    Start 23: hop_sequence_tests
+5/7 Test #23: hop_sequence_tests ...............   Passed    0.00 sec
+    Start 24: motion_profile_tests
+6/7 Test #24: motion_profile_tests .............   Passed    0.00 sec
+    Start 25: plan_scurve_tests
+7/7 Test #25: plan_scurve_tests ................   Passed    0.20 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Total Test time (real) =   0.28 sec

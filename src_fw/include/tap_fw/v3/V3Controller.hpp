@@ -9,6 +9,7 @@
 #include "tap_fw/v3/HopSequence.hpp"
 #include "tap_fw/v3/LegHeight.hpp"
 #include "tap_fw/v3/StandUp.hpp"
+#include "tap_fw/v3/YawHold.hpp"
 #include "tap_fw/v3/WholeBodyGains.hpp"
 
 namespace tap_fw::v3 {
@@ -532,6 +533,7 @@ class V3Controller {
     Split split{};
     #endif
     Tier tier{};
+    YawHold::Config yaw_hold{};
     Roll roll;
     WheelPredict wheel_pred;
     Height height{};
@@ -845,6 +847,7 @@ class V3Controller {
   }
   [[nodiscard]] float rollSideHeight() const noexcept { return roll_dh_; }  // left +, right -
   [[nodiscard]] float yawCommand() const noexcept { return yaw_cmd_; }
+  [[nodiscard]] const YawHold& yawHold() const noexcept { return yaw_hold_; }
   [[nodiscard]] float yawBias() const noexcept { return yaw_bias_; }  // learned gyro yaw offset (rad/s)
   [[nodiscard]] float levelHip() const noexcept { return level_beta_ * level_i_; }
   [[nodiscard]] float reflexGate() const noexcept { return reflex_w_; }
@@ -1063,6 +1066,10 @@ class V3Controller {
   float roll_v_lp_ = 0.0F, roll_w_lp_ = 0.0F, roll_i_ = 0.0F, roll_e_lp_ = 0.0F;
   float yaw_cmd_ = 0.0F;  // the turn command as used (S-curve profile)
   float yaw_acc_ = 0.0F;  // its acceleration
+  YawHold yaw_hold_{};
+  YawRateFilter yaw_rate_filter_{};
+  float yaw_feedback_rate_ = 0.0F;
+  float standup_yaw_rate_f_ = 0.0F, standup_yaw_diff_ = 0.0F;
   float yaw_bias_ = 0.0F;  // learned yaw-gyro zero-rate offset (Tier::yaw_bias_tau_s)
   float roll_target_ = 0.0F;
   float roll_ref_ = 0.0F;          // learned level reference (IMU roll frame)

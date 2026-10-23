@@ -1,0 +1,2 @@
+36 differential cases: worst final heading on/off ratio 0.0197
+yaw hold: signs, mean preservation, bounded slew/headroom, timeout, stop/turn/safety and 36 delayed differential cases passed

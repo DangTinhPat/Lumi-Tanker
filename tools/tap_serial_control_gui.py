@@ -481,7 +481,7 @@ class TapSerialControlApp:
         top.pack(fill="x")
         ttk.Label(top, text="Cổng ESP32:").pack(side="left")
         self.port_box = ttk.Combobox(top, textvariable=self.port_var,
-                                     width=34, state="readonly")
+                                     width=34, state="normal")
         self.port_box.pack(side="left", padx=6)
         ttk.Button(top, text="Tìm cổng", command=self.refresh_ports).pack(side="left")
         self.connect_button = ttk.Button(top, text="Kết nối", command=self.connect)
@@ -701,13 +701,19 @@ class TapSerialControlApp:
             ports = sorted(glob.glob("/dev/serial/by-id/*CP210*") +
                            glob.glob("/dev/ttyUSB*"))
         ports += ["auto", f"tcp://{WIFI_HOST}:{WIFI_PORT}", f"tcp://tap-rb.local:{WIFI_PORT}"]
+        current = self.port_var.get().strip()
+        if current and current not in ports:
+            ports.insert(0, current)
+        ports.insert(0, "tcp://10.42.0.174:8023")
         self.port_box["values"] = ports
-        if self.port_var.get() not in ports:
+        if not current:
             self.port_var.set(ports[0])
         if serial is None:
             self._append_log("Cần pyserial: python3 -m pip install pyserial")
 
     def _auto_connect(self) -> None:
+        if "--no-auto-connect" in sys.argv:
+            return
         if self.link.connected:
             return
         if "--port" in sys.argv[:-1]:  # --port /dev/ttyUSBn | tcp://host:8023 | wifi

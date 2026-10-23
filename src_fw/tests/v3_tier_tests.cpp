@@ -664,6 +664,7 @@ Result simulate(const Case& c) {
     cfg.roll.learn_ref = cfg.roll.cmd_preview = cfg.roll.latch = cfg.roll.gimbal_link = true;
     tap_fw::v3::applyAddWifiBalanceProfile(cfg, std::atoi(profile) != 0);
   }
+  if (const char* yh = std::getenv("TIER_YAWHOLD")) cfg.yaw_hold.enabled = std::atoi(yh) != 0;
   V3Controller ctrl(cfg);
   ctrl.setWholeBodyTable(c.wb_table);
   V3Controller::Input in{};

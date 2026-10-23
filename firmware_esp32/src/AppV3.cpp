@@ -181,6 +181,7 @@ AppV3::AppV3() noexcept
   ctrl_.config().standup.enabled = true;
 #if defined(TAP_V3_1840_ROLL) && TAP_V3_1840_ROLL
   ctrl_.config().standup.handoff_prepare = true;
+  ctrl_.config().yaw_hold.enabled = true;
 #endif
 }
 
@@ -380,7 +381,7 @@ void AppV3::netTaskEntry(void* arg) noexcept {
 }
 
 #if TAP_WIFI
-// Console over Wi-Fi: the laptop joins the robot's own access point and opens TCP 8023. Lines in
+// Console over Wi-Fi: the laptop joins the same station network and opens TCP 8023. Lines in
 // go to the same queue as the UART's (so HEARTBEAT keeps the 0.5 s session lease and a lost link
 // disables the robot exactly as unplugging USB does); every output record is copied to the
 // client through net_sb_. One client; a new connection replaces the old one.
@@ -388,6 +389,8 @@ void AppV3::netTask() noexcept {
   WiFi.persistent(false);
   bool sta = false;
 #if defined(TAP_WIFI_STA_SSID)
+  const char* sta_ssid = TAP_WIFI_STA_SSID;
+  const char* sta_pass = TAP_WIFI_STA_PASS;
   // Station only: never start an access point, even if the configured network is unavailable.
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // modem sleep would add up to ~100 ms to every command
@@ -400,21 +403,42 @@ void AppV3::netTask() noexcept {
                ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   {  // What the robot hears of the network before it tries to join it (RSSI, channel, security).
     const int found = WiFi.scanNetworks(false, true, false, 400);
+#if defined(TAP_WIFI_ALT_SSID) && defined(TAP_WIFI_ALT_PASS)
+    // Prefer the test-site network when visible at boot; otherwise retain the home network.
+    // Scan only during startup, never in the active control/network loop.
     for (int i = 0; i < found; ++i) {
-      if (WiFi.SSID(i) == TAP_WIFI_STA_SSID) {
-        Serial.printf("WIFI scan: %s ch %d rssi %d auth %d bssid %s\n", TAP_WIFI_STA_SSID, static_cast<int>(WiFi.channel(i)),
+      if (WiFi.SSID(i) == TAP_WIFI_ALT_SSID) {
+        sta_ssid = TAP_WIFI_ALT_SSID;
+        sta_pass = TAP_WIFI_ALT_PASS;
+        break;
+      }
+    }
+#endif
+#if defined(TAP_WIFI_ALT2_SSID) && defined(TAP_WIFI_ALT2_PASS)
+    // Highest-priority optional network, preferred over ALT and primary.
+    for (int i = 0; i < found; ++i) {
+      if (WiFi.SSID(i) == TAP_WIFI_ALT2_SSID) {
+        sta_ssid = TAP_WIFI_ALT2_SSID;
+        sta_pass = TAP_WIFI_ALT2_PASS;
+        break;
+      }
+    }
+#endif
+    for (int i = 0; i < found; ++i) {
+      if (WiFi.SSID(i) == sta_ssid) {
+        Serial.printf("WIFI scan: %s ch %d rssi %d auth %d bssid %s\n", sta_ssid, static_cast<int>(WiFi.channel(i)),
                       static_cast<int>(WiFi.RSSI(i)), static_cast<int>(WiFi.encryptionType(i)), WiFi.BSSIDstr(i).c_str());
       }
     }
     if (found < 0) Serial.printf("WIFI scan failed: %d\n", found);
     WiFi.scanDelete();
   }
-  WiFi.begin(TAP_WIFI_STA_SSID, TAP_WIFI_STA_PASS);
+  WiFi.begin(sta_ssid, sta_pass);
   // Up to 30 s: a hotspot can take a long time to hand out the DHCP lease (status stays 6 until it does).
   for (int i = 0; i < 300 && WiFi.status() != WL_CONNECTED; ++i) {
     vTaskDelay(pdMS_TO_TICKS(100));
     if (i % 50 == 49) {
-      Serial.printf("WIFI STA %s waiting %ds: status=%d reason=%d\n", TAP_WIFI_STA_SSID, (i + 1) / 10,
+      Serial.printf("WIFI STA %s waiting %ds: status=%d reason=%d\n", sta_ssid, (i + 1) / 10,
                     static_cast<int>(WiFi.status()), static_cast<int>(sta_reason));
     }
   }
@@ -426,10 +450,10 @@ void AppV3::netTask() noexcept {
     const int found = WiFi.scanNetworks(false, false, false, 300);
     int seen = -1;
     for (int i = 0; i < found; ++i) {
-      if (WiFi.SSID(i) == TAP_WIFI_STA_SSID) { seen = WiFi.channel(i) * 1000 + (-WiFi.RSSI(i)); break; }
+      if (WiFi.SSID(i) == sta_ssid) { seen = WiFi.channel(i) * 1000 + (-WiFi.RSSI(i)); break; }
     }
     Serial.printf("WIFI STA %s failed: status=%d last_reason=%d scan: %d networks, target %s (channel*1000+(-rssi)=%d)\n",
-                  TAP_WIFI_STA_SSID, static_cast<int>(WiFi.status()), static_cast<int>(sta_reason), found,
+                  sta_ssid, static_cast<int>(WiFi.status()), static_cast<int>(sta_reason), found,
                   seen >= 0 ? "seen" : "NOT seen", seen);
     WiFi.scanDelete();
   }
@@ -439,7 +463,7 @@ void AppV3::netTask() noexcept {
   server.setNoDelay(true);
   char where[96];
 #if defined(TAP_WIFI_STA_SSID)
-  std::snprintf(where, sizeof where, "STA %s ip %s rssi %d tap-rb.local", TAP_WIFI_STA_SSID,
+  std::snprintf(where, sizeof where, "STA %s ip %s rssi %d tap-rb.local", sta_ssid,
                 WiFi.localIP().toString().c_str(), static_cast<int>(WiFi.RSSI()));
 #else
   std::snprintf(where, sizeof where, "STA credentials not configured; AP disabled");
@@ -919,6 +943,15 @@ void AppV3::handleLine(const char* line, std::uint64_t now_us) noexcept {
       }
       ctrl_.config().standup.enabled = v >= 0.5F;
       out_.printf("V3 standup %s\n", ctrl_.config().standup.enabled ? "ENABLED" : "off");
+    }
+    else if (!std::strcmp(key, "yawhold")) {
+      if (ctrl_.state() != V3Controller::State::Idle) {
+        out_.println("V3 SET yawhold refused: DISABLE first");
+        return;
+      }
+      ctrl_.config().yaw_hold.enabled = v >= 0.5F;
+      out_.printf("V3 yawhold=%d (relative straight heading, bounded differential assist)\n",
+                  ctrl_.config().yaw_hold.enabled ? 1 : 0);
     }
     else if (!std::strcmp(key, "standprep")) {
       if (ctrl_.state() != V3Controller::State::Idle) {
@@ -1727,6 +1760,10 @@ void AppV3::printTunables() noexcept {
     return;
   }
   tunables_pending_ = false;
+  out_.printf("V3 TUNE yawhold=%d (SET yawhold at Idle): kp=%.2f extra<=%.2f rad/s/wheel rise=%.2f rad/s2 budget=%.2f s\n",
+              ctrl_.config().yaw_hold.enabled ? 1 : 0, ctrl_.config().yaw_hold.kp,
+              ctrl_.config().yaw_hold.wheel_max_rad_s, ctrl_.config().yaw_hold.rise_rad_s2,
+              ctrl_.config().yaw_hold.support_max_s);
   out_.printf("V3 TUNE wheelprio=%d/%d (SET wheelprio): newest speed first, max 2 writes/read; "
               "read urgency 6 ms, transaction timeout 8 ms; torque-on settle 20 ms; "
               "WT=actual TX, WBUS=queue/ACK timing; motor response delay not measured at boot\n",
@@ -3038,6 +3075,13 @@ void AppV3::report(std::uint64_t now_us) noexcept {
       .str(" idle0=").u32(g_idle0.exchange(0U, std::memory_order_relaxed))
       .str(" rtos=").i32(rtos_ ? 1 : 0).str(" outdrop=").u32(out_.dropped()).str(" cmddrop=").u32(lines_dropped_);
   out_.println(b);
+  if (ctrl_.config().yaw_hold.enabled) {
+    tap_fw::DeferredLine y(line, sizeof line);
+    y.str("YH error=").fix(ctrl_.yawHold().error(), 4, true)
+        .str(" wheel_extra=").fix(ctrl_.yawHold().correction(), 3, true)
+        .str(" blocked=").i32(ctrl_.yawHold().blocked() ? 1 : 0);
+    out_.println(y);
+  }
   // Bounded transport evidence, separate from requested wcmd and controller
   // snapshots. No motor requests or parameter writes are issued here.
   static std::uint32_t wbus_div = 0U;
