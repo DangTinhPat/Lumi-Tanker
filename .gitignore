@@ -1,7 +1,10 @@
 build/
-.pio/
 log/
 __pycache__/
+
+# Hidden files and directories (.agents, .claude, .vscode, .pio, .pytest_cache, ...)
+.*
+!.gitignore
 
 # Large CAD/mesh binaries. Kept out of git deliberately: the STEP assembly is
 # 111 MB (over GitHub's hard 100 MB per-file limit, so a push containing it is
