@@ -5,8 +5,8 @@ description: Adapt TAP CAD robot kinematics, mass properties, COM models and col
 
 # Robot Physics And Kinematics Expert
 
-Read workspace `AGENTS.md` and the current `src/tap_sim/model/{tap_robot.xml,PHYSICS.md,rb_cad_manifest.json,mesh_inertials.yaml}`
-and `src/tap_control/core/include/robot_control/{GeneratedGeometry.hpp,WholeBodyModel.hpp}`.
+Read workspace `AGENTS.md` and the current `simulation/model/{tap_robot.xml,PHYSICS.md,rb_cad_manifest.json,mesh_inertials.yaml}`
+and `controller/core/include/robot_control/{GeneratedGeometry.hpp,WholeBodyModel.hpp}`.
 
 - Preserve CAD zero and native +Y axes on both sides. Build FK using actual
   origins, axes and link inertials; never substitute a mirrored model. Keep
@@ -19,7 +19,7 @@ and `src/tap_control/core/include/robot_control/{GeneratedGeometry.hpp,WholeBody
   generator script is no longer in the repository. After any change to
   geometry, mass allocation or body orientation, update the header consistently
   and validate `WholeBodyModel` against independent FK from `tap_robot.xml`
-  (`src/tap_sim/scripts/validate_model.py`) across symmetric AND asymmetric
+  (`simulation/scripts/validate_model.py`) across symmetric AND asymmetric
   poses. Report the sampled range and the worst errors.
 - Derive COM relative to the contact/axle geometry, including the wheel radius.
   The robot's measured balance angle differs from the CAD prediction (the

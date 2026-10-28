@@ -264,7 +264,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("step", type=Path)
     parser.add_argument("--output", type=Path,
-                        default=root / "src/tap_sim/model/assets")
+                        default=root / "simulation/model/assets")
     parser.add_argument("--deflection-mm", type=float, default=0.20)
     args = parser.parse_args()
     if args.deflection_mm <= 0.0:

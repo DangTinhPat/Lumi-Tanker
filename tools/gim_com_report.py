@@ -165,7 +165,7 @@ def whole_com(body, mass, hip, knee, pitch):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=ROOT / "ROBOT (GIM6010-8).STEP")
+    parser.add_argument("--source", type=Path, default=ROOT / "assets/cad/ROBOT (GIM6010-8).STEP")
     parser.add_argument("--battery", choices=["front", "rear"], required=True)
     parser.add_argument("--body-mass", type=float, default=2.612)
     # Operator-stated masses (18/10): battery 0.25 kg, frame 0.35 kg; the

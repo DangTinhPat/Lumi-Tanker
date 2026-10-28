@@ -14,9 +14,9 @@ from gim_com_report import ROOT, read_parts
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, default=ROOT / 'ROBOT (GIM6010-8).STEP')
+    parser.add_argument('--source', type=Path, default=ROOT / 'assets/cad/ROBOT (GIM6010-8).STEP')
     parser.add_argument('--header', type=Path, default=ROOT /
-                        'src/tap_control/core/include/robot_control/GeneratedBodyEnvelope.hpp')
+                        'controller/core/include/robot_control/GeneratedBodyEnvelope.hpp')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     origin, parts = read_parts(args.source, with_bounds=True)

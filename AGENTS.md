@@ -56,14 +56,14 @@ These are persistent expert instructions, not claims of running agent processes.
   cameras and external localization are excluded from the control design and
   must not become hidden dependencies. Simulator contacts, efforts and pose are
   telemetry only; derive support hypotheses from MPU6500 and encoder data.
-- Re-read the current model and `src/tap_sim/model/PHYSICS.md` before edits;
+- Re-read the current model and `simulation/model/PHYSICS.md` before edits;
   record intentional changes to this contract rather than overwriting newer user
   decisions.
 
 ## Architecture And Evidence
 
 The layout and the firmware/simulator split are in `architecture.md`. The robot
-runs `V3Controller` (`src_fw/src/v3`); the MuJoCo simulator runs the older
+runs `V3Controller` (`controller/v3/src/v3`); the MuJoCo simulator runs the older
 `EmbeddedController`, so a simulator result is not a result about the firmware.
 Keep the control core free of desktop middleware and robot-specific parameters
 explicit. Use portable resource lookup, not machine-specific paths in runtime

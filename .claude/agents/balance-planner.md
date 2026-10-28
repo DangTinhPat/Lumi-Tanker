@@ -55,10 +55,10 @@ quantities derived from the live model over magic numbers.
 Read `CLAUDE.md`, `docs/RULES.md` and `architecture.md` before planning. The
 short version:
 
-- `src/tap_control/core` is portable C++17 and is what ships to an ESP32. It
+- `controller/core` is portable C++17 and is what ships to an ESP32. It
   must not consume simulator pose, contact or constraint data (Rule 1). The
   deployable sensor set is one MPU6500 plus six motor encoders.
-- `src/tap_mujoco/native_runner.cpp` owns physics, sensor shaping and the
+- `simulation/native/native_runner.cpp` owns physics, sensor shaping and the
   actuator loop, and holds most tuning constants.
 - Wheels are balanced by `LqrBalancer`, a four-state reduced inverted pendulum
   `[position, pitch, velocity, pitch_rate]` with ground acceleration as input.

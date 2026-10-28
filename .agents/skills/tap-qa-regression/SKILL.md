@@ -10,7 +10,7 @@ Read workspace `AGENTS.md` and the current test/build entrypoints
 implementation before selecting commands; do not invent a passing run or copy
 thresholds from another project as TAP acceptance limits.
 
-- Model checks: `src/tap_sim/scripts/validate_model.py` (mesh integrity, seven
+- Model checks: `simulation/scripts/validate_model.py` (mesh integrity, seven
   inertial links, six movable joints, native +Y axes, mass sum, rotated body
   COM/tensor, independent FK).
 - Host checks: `ctest` (five failures predate current work and are listed in the

@@ -3,9 +3,9 @@
 
 Reads a ~/tap_logs file written by tools/tap_serial_control_gui.py and takes
 either the old HIPTEST dump ("HT" lines) or a recorder dump ("RC" lines from
-HIPTEST / KNEETEST / KNEETEST FLOOR / REC, see firmware_esp32/src/AppV3.cpp).
+HIPTEST / KNEETEST / KNEETEST FLOOR / REC, see firmware/esp32/src/AppV3.cpp).
 
-Model (the one the two-body sim uses, src_fw/tests/v3_tier_tests.cpp):
+Model (the one the two-body sim uses, controller/v3/tests/v3_tier_tests.cpp):
     q'' = bw * (kp * (cmd(t - delay) - q) - q')
 fitted by a vectorised grid search, then a finer grid around the best point.
 Prints the parameters, the rms error, and the measured vs modelled gain and

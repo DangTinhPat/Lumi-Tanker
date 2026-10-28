@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = ROOT / "src/tap_sim/model"
+MODEL_DIR = ROOT / "simulation/model"
 MANIFEST = MODEL_DIR / "gim_components.json"
 ASSETS = MODEL_DIR / "gim_components"
 OUTPUT = MODEL_DIR / "gim_dynamic.xml"

@@ -11,6 +11,8 @@ __pycache__/
 *.stp
 *.STP
 *.rar
-src/tap_sim/model/assets/*.stl
-src/tap_sim/model/assets/*.STL
-firmware_esp32/include/tap_hw/WifiSecrets.hpp
+simulation/model/assets/*.stl
+simulation/model/assets/*.STL
+
+
+firmware/esp32/include/tap_hw/WifiSecrets.hpp

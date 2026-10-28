@@ -1,6 +1,6 @@
 // Host tests for the leg-jog DRAFT logic:
 //   g++ -std=c++17 -Wall -Wextra -Wpedantic -UNDEBUG
-//     -Itools/leg_jog_fw/src -Isrc/tap_control/hal/include
+//     -Itools/leg_jog_fw/src -Icontroller/hal/include
 //     tools/leg_jog_fw/test/leg_jog_tests.cpp -o /tmp/leg_jog_tests
 
 #include <cassert>

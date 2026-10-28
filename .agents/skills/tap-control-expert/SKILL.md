@@ -7,7 +7,7 @@ description: Review or extend the TAP balance controller (V3Controller tiers, LQ
 
 Read workspace `AGENTS.md`, `architecture.md`, `docs/V3.3_HANDOFF.md` (current
 state, boot configuration, measured hardware facts, rejected ideas) and
-`src_fw/FIRMWARE_V3.md`, then inspect `src_fw/src/v3/V3Controller.cpp`.
+`controller/v3/FIRMWARE_V3.md`, then inspect `controller/v3/src/v3/V3Controller.cpp`.
 
 - Keep the deterministic algorithm portable and bounded (Rule 4): no dynamic
   allocation or parsing in the control path, worst-case cycle time measured, the

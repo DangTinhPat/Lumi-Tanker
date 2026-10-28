@@ -27,12 +27,12 @@ from OCP.gp import gp_Trsf, gp_Vec
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "ROBOT (GIM6010-8).STEP"
-ASSETS = ROOT / "src/tap_sim/model/gim_visual"
-MODEL = ROOT / "src/tap_sim/model/gim_visual.xml"
-COMPONENT_ASSETS = ROOT / "src/tap_sim/model/gim_components"
-COMPONENT_MODEL = ROOT / "src/tap_sim/model/gim_components.xml"
-COMPONENT_MANIFEST = ROOT / "src/tap_sim/model/gim_components.json"
+SOURCE = ROOT / "assets/cad/ROBOT (GIM6010-8).STEP"
+ASSETS = ROOT / "simulation/model/gim_visual"
+MODEL = ROOT / "simulation/model/gim_visual.xml"
+COMPONENT_ASSETS = ROOT / "simulation/model/gim_components"
+COMPONENT_MODEL = ROOT / "simulation/model/gim_components.xml"
+COMPONENT_MANIFEST = ROOT / "simulation/model/gim_components.json"
 MAX_TRIANGLES_PER_MESH = 180_000
 MATERIALS = {
     "structure": ("structure", "0.68 0.70 0.72 1"),

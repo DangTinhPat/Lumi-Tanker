@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-project(tap_native LANGUAGES CXX)
+project(tap_controller LANGUAGES CXX)
 
-# Canonical native build.  The robot model and simulator are native MuJoCo
-# assets; the build has no middleware dependency.
+# Controller host build, independent of desktop middleware.
+# Enable TAP_BUILD_SIMULATOR explicitly to include the MuJoCo runners.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 include(CTest)
-add_subdirectory(src/tap_control/hal)
-add_subdirectory(src/tap_control/core)
-add_subdirectory(src_fw)
-option(TAP_BUILD_SIMULATOR "Build MuJoCo simulator and its contracts" ON)
+add_subdirectory(controller/hal)
+add_subdirectory(controller/core)
+add_subdirectory(controller/v3)
+option(TAP_BUILD_SIMULATOR "Build MuJoCo simulator and its contracts" OFF)
 if(TAP_BUILD_SIMULATOR)
-  add_subdirectory(src/tap_sim)
+  add_subdirectory(simulation)
 endif()

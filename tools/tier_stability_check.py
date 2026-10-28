@@ -56,7 +56,7 @@ def main() -> int:
         return cp.stdout
 
     sources = [str(p.relative_to(ROOT)) for folder in
-               ("src_fw", "src/tap_control/core", "src/tap_control/hal")
+               ("controller/v3", "controller/core", "controller/hal")
                for p in sorted((ROOT / folder).rglob("*"))
                if p.is_file() and p.suffix in (".cpp", ".hpp", ".h", ".txt")]
     sources += ["CMakeLists.txt", "tools/tier_stability_check.py", "tools/tier_sim_view.py"]

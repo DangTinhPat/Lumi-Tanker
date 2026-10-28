@@ -42,11 +42,11 @@ you need to know which step did it.
 
 Read `CLAUDE.md` and `docs/RULES.md` first.
 
-- `src/tap_control/core` is portable C++17 that ships to an ESP32. It may not
+- `controller/core` is portable C++17 that ships to an ESP32. It may not
   read simulator pose, contact or constraint data - only the MPU6500 and the six
   encoders (Rule 1). If a change seems to need ground truth, that is a design
   problem: report it rather than reaching for the field.
-- `src/tap_mujoco/native_runner.cpp` owns physics, sensor shaping and the
+- `simulation/native/native_runner.cpp` owns physics, sensor shaping and the
   actuator loop, and holds most tuning constants.
 - Actuator commands must cross the frame-level HAL (`MotorFrameCodec`,
   `SimActuatorBus`), which is bit-exact against the real driver protocols. Never

@@ -7,7 +7,7 @@ Boot configuration: hip lean share 0.85, hip disturbance share 0.45,
 roll enabled, wheel UART workers on CPU 1 with priority 22. MOVE/TURN,
 finite motion, yaw, hop and portable controller sources remain from 18:40t.
 Wi-Fi is station-only; AP fallback is removed. Local credentials belong in
-ignored `firmware_esp32/include/tap_hw/WifiSecrets.hpp` (see the example header).
+ignored `firmware/esp32/include/tap_hw/WifiSecrets.hpp` (see the example header).
 
 The three explicit environments retain the comparison sequence:
 

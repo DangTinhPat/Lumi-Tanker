@@ -8,8 +8,8 @@ import mujoco.viewer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = ROOT / "src/tap_sim/model/gim_visual.xml"
-ASSETS = ROOT / "src/tap_sim/model/gim_visual"
+MODEL = ROOT / "simulation/model/gim_visual.xml"
+ASSETS = ROOT / "simulation/model/gim_visual"
 
 
 def main() -> None:

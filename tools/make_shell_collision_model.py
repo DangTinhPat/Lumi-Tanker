@@ -11,9 +11,9 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = ROOT / "src/tap_sim/model/gim_dynamic.xml"
-OUTPUT = ROOT / "src/tap_sim/model/gim_dynamic_shell.xml"
-ENVELOPE = ROOT / "src/tap_control/core/include/robot_control/GeneratedBodyEnvelope.hpp"
+MODEL = ROOT / "simulation/model/gim_dynamic.xml"
+OUTPUT = ROOT / "simulation/model/gim_dynamic_shell.xml"
+ENVELOPE = ROOT / "controller/core/include/robot_control/GeneratedBodyEnvelope.hpp"
 
 
 def main():
