@@ -1,0 +1,1 @@
+measured_raw_gyro valid=0; zero_bias_control valid=1

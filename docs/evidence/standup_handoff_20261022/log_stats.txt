@@ -1,6 +1,0 @@
-tap_20261022_192736.log: n=20 raw_error>4=4 (20.0%) base_error>4=0 base_max=1.123 max_sampled_settle=0.139
-tap_20261022_193258.log: n=29 raw_error>4=8 (27.6%) base_error>4=0 base_max=1.144 max_sampled_settle=0.181
-tap_20261022_193015.log: n=231 raw_error>4=126 (54.5%) base_error>4=0 base_max=1.701 max_sampled_settle=0.111
-tap_20261022_193102.log: n=150 raw_error>4=85 (56.7%) base_error>4=0 base_max=1.667 max_sampled_settle=0.159
-tap_20261022_193147.log: n=227 raw_error>4=126 (55.5%) base_error>4=0 base_max=1.965 max_sampled_settle=0.097
-tap_20261022_193544.log: n=240 raw_error>4=124 (51.7%) base_error>4=0 base_max=2.294 max_sampled_settle=0.148

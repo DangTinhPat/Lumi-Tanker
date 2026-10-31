@@ -1,0 +1,170 @@
+[
+  {
+    "metadata": {
+      "kind": "GOOD",
+      "available": "1",
+      "serial": "13",
+      "tick_hz": "10000000",
+      "status": "000600ec",
+      "irq": "00000000",
+      "id": "1",
+      "inst": "02",
+      "addr": "24",
+      "error": "0",
+      "tx": "ffff0104022406ce",
+      "echo": "ffff0104022406ce"
+    },
+    "decoded": {
+      "bytes": "ffff0104022406ceffff010b00040224090200001100",
+      "frames": [
+        {
+          "byte": "ff",
+          "start_us": 0.0,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "ff",
+          "start_us": 10.0,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "01",
+          "start_us": 20.0,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "04",
+          "start_us": 30.0,
+          "start_low_us": 3.0
+        },
+        {
+          "byte": "02",
+          "start_us": 40.0,
+          "start_low_us": 2.0
+        },
+        {
+          "byte": "24",
+          "start_us": 50.0,
+          "start_low_us": 3.0
+        },
+        {
+          "byte": "06",
+          "start_us": 60.0,
+          "start_low_us": 2.0
+        },
+        {
+          "byte": "ce",
+          "start_us": 70.0,
+          "start_low_us": 2.0
+        },
+        {
+          "byte": "ff",
+          "start_us": 117.4,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "ff",
+          "start_us": 127.3,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "01",
+          "start_us": 137.3,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "0b",
+          "start_us": 147.3,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "00",
+          "start_us": 157.2,
+          "start_low_us": 9.0
+        },
+        {
+          "byte": "04",
+          "start_us": 167.2,
+          "start_low_us": 3.0
+        },
+        {
+          "byte": "02",
+          "start_us": 177.1,
+          "start_low_us": 2.0
+        },
+        {
+          "byte": "24",
+          "start_us": 187.1,
+          "start_low_us": 3.0
+        },
+        {
+          "byte": "09",
+          "start_us": 197.1,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "02",
+          "start_us": 207.0,
+          "start_low_us": 2.0
+        },
+        {
+          "byte": "00",
+          "start_us": 217.0,
+          "start_low_us": 8.9
+        },
+        {
+          "byte": "00",
+          "start_us": 226.9,
+          "start_low_us": 9.0
+        },
+        {
+          "byte": "11",
+          "start_us": 236.9,
+          "start_low_us": 1.0
+        },
+        {
+          "byte": "00",
+          "start_us": 246.9,
+          "start_low_us": 8.9
+        }
+      ],
+      "short_low_pulses": [],
+      "errors": [
+        {
+          "start_us": 256.8,
+          "error": "capture_truncated"
+        }
+      ],
+      "runs": 88,
+      "captured_us": 263.8,
+      "zero_terminated": true
+    },
+    "pad_starts_with_tx": true
+  },
+  {
+    "metadata": {
+      "kind": "FAIL",
+      "available": "1",
+      "serial": "203454",
+      "tick_hz": "10000000",
+      "status": "000600c0",
+      "irq": "00000000",
+      "id": "1",
+      "inst": "02",
+      "addr": "24",
+      "error": "4",
+      "tx": "ffff0104022406ce",
+      "echo": ""
+    },
+    "decoded": {
+      "bytes": "",
+      "frames": [],
+      "short_low_pulses": [],
+      "errors": [],
+      "runs": 0,
+      "captured_us": 0.0,
+      "zero_terminated": true
+    },
+    "pad_starts_with_tx": false
+  }
+]

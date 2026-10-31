@@ -1,0 +1,4 @@
+uptime 356.49 146.88
+
+API 200 {"epoch":2380349885,"mode":"FAULT","phase":"Idle","fault_code":2,"reason":"IMU/encoder/calibration validity missing","policy_steps":0,"handoff_us":null,"inference_max_ms":0.0,"consecutive_deadline_misses":0,"counters":{"telemetry":0,"telemetry_received":68510,"rejected":22,"inferences":0,"deadline_misses":0},"link":true,"last_telemetry_flags":2,"transport":"serial","parser_errors":4,"max_handler_ms":4.96591600000329,"max_telemetry_ms":4.96591600000329,"updated_monotonic":355.756660419,"runtime_online":true,"status_age_s":0.8326832500000023}
+bind_mount True

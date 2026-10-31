@@ -1,0 +1,25 @@
+{
+  "epoch": 1272265387,
+  "mode": "FAULT",
+  "phase": "Idle",
+  "fault_code": 3,
+  "reason": "driver_fault",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 0,
+    "telemetry_received": 201,
+    "rejected": 0,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "link": true,
+  "last_telemetry_flags": 65,
+  "transport": "serial",
+  "parser_errors": 0,
+  "max_handler_ms": 0.6720000001223525,
+  "max_telemetry_ms": 0.6720000001223525,
+  "updated_monotonic": 2032.544037177
+}

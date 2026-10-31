@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-30",
+  "firmware_environment": "esp32-s3-hybrid-mcu",
+  "backend": "BlMotorBackend/EspBlMotor",
+  "build_passed": true,
+  "ram_static_bytes": 53812,
+  "flash_program_bytes": 769445,
+  "runtime_tests_passed": 22,
+  "gateway_contract_asan_ubsan_passed": true,
+  "motor_backend_asan_ubsan_passed": true,
+  "lf_core_actual_motor_backend_interop_cycles": 2700,
+  "interop_simulated_seconds": 13.5,
+  "mock_first_home_ack_us": 5600,
+  "mock_ack_timing_is_not_hardware_measurement": true,
+  "matched_contract_pairs": 5,
+  "release_hashes_verified": 35,
+  "audited_source_hashes": 80,
+  "physical_uart_or_motor_tested": false,
+  "flashed": false,
+  "new_motor_backend_hil_with_mechanical_plant": false,
+  "lf_control_model_behavior_modified": false,
+  "protected_architecture_rules_modified": false,
+  "firmware_sha256": "c38820807b34ba7b7be434234086321b941d38ca19d2a45fbeac2c27f956076a",
+  "tests": {
+    "motor": "motor_tests.log",
+    "gateway": "gateway_tests.log",
+    "runtime": "runtime_tests.log",
+    "build": "build.log"
+  },
+  "remaining": [
+    "Manual model-coordinate home/zero on actual robot",
+    "Confirm wheel target register READ 0x20 and electrical bus timing",
+    "Measure actual gains, force limits and servo response vs MuJoCo",
+    "NPU jitter fault observed in earlier audit remains unresolved"
+  ]
+}

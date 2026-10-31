@@ -1,0 +1,265 @@
+HCR1 lower layer; HELP for commands
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=123575 applied=94123 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=87 gravity=[-0.0056 -0.0026 -1.0000] tick_max_us=650 missed=2586 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-59
+IO rx_bytes=10204252 tx_bytes=18829060 rx0_level=0 imu_id=0x70 imu_samples=315310 imu_valid=1 accel=[0.03651 0.03771 9.75996] raw_gyro=[0.00959 -0.23236 0.01039]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00084 -0.00328 -0.00233]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2405 1612 1154] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[6279 5223 4788] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=123715 applied=94263 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=81 gravity=[-0.0056 -0.0028 -1.0000] tick_max_us=650 missed=2587 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-56
+IO rx_bytes=10214816 tx_bytes=18850188 rx0_level=0 imu_id=0x70 imu_samples=315660 imu_valid=1 accel=[0.05028 0.02933 9.77553] raw_gyro=[0.00746 -0.23102 0.01199]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00130 -0.00195 -0.00073]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4702 3848 3521] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1878 864 383] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=123915 applied=94464 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=81 gravity=[-0.0056 -0.0025 -1.0000] tick_max_us=650 missed=2591 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10230056 tx_bytes=18880588 rx0_level=1 imu_id=0x70 imu_samples=316160 imu_valid=1 accel=[0.04369 0.01137 9.80007] raw_gyro=[0.00879 -0.23049 0.01279]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00004 -0.00142 0.00007]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1883 724 358] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3806 2699 2363] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124015 applied=94565 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=7 gravity=[-0.0055 -0.0027 -1.0000] tick_max_us=650 missed=2592 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-56
+IO rx_bytes=10236556 tx_bytes=18893508 rx0_level=1 imu_id=0x70 imu_samples=316410 imu_valid=1 accel=[0.04250 0.02215 9.78929] raw_gyro=[0.00933 -0.23129 0.01226]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00057 -0.00222 -0.00046]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1889 791 394] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1760 634 312] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124115 applied=94665 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=81 gravity=[-0.0056 -0.0027 -1.0000] tick_max_us=650 missed=2593 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-56
+IO rx_bytes=10245296 tx_bytes=18910988 rx0_level=1 imu_id=0x70 imu_samples=316660 imu_valid=1 accel=[0.05088 0.03412 9.84137] raw_gyro=[0.00906 -0.23236 0.01119]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00030 -0.00328 -0.00153]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3889 3077 2670] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3744 2625 2271] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124315 applied=94866 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=81 gravity=[-0.0055 -0.0023 -1.0000] tick_max_us=650 missed=2598 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-55
+IO rx_bytes=10260536 tx_bytes=18941364 rx0_level=1 imu_id=0x70 imu_samples=317160 imu_valid=1 accel=[0.04070 0.02634 9.80306] raw_gyro=[0.00746 -0.23076 0.01226]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00130 -0.00168 -0.00046]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3762 2745 2300] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3902 2560 2235] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124455 applied=95007 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=33 gravity=[-0.0055 -0.0026 -1.0000] tick_max_us=650 missed=2601 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10270532 tx_bytes=18961298 rx0_level=1 imu_id=0x70 imu_samples=317510 imu_valid=1 accel=[0.03591 0.03412 9.77792] raw_gyro=[0.00959 -0.22969 0.01119]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00084 -0.00062 -0.00153]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2608 1761 1272] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2333 1413 1063] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124516 applied=95068 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=82 gravity=[-0.0053 -0.0025 -1.0000] tick_max_us=650 missed=2602 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10275852 tx_bytes=18971916 rx0_level=1 imu_id=0x70 imu_samples=317660 imu_valid=1 accel=[0.02334 0.03112 9.78869] raw_gyro=[0.00959 -0.23262 0.01092]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00084 -0.00355 -0.00180]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2749 1768 1328] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4720 3709 3278] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124715 applied=95268 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=82 gravity=[-0.0054 -0.0025 -1.0000] tick_max_us=650 missed=2607 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10291092 tx_bytes=19002340 rx0_level=1 imu_id=0x70 imu_samples=318160 imu_valid=1 accel=[0.03831 0.00180 9.79588] raw_gyro=[0.00986 -0.23049 0.01306]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00110 -0.00142 0.00034]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1322 390 59] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1576 758 248] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124894 applied=95448 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=17 gravity=[-0.0055 -0.0024 -1.0000] tick_max_us=650 missed=2611 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-55
+IO rx_bytes=10303672 tx_bytes=19027572 rx0_level=1 imu_id=0x70 imu_samples=318610 imu_valid=1 accel=[0.03831 0.02634 9.76595] raw_gyro=[0.00746 -0.23049 0.00933]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00130 -0.00142 -0.00339]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4153 3307 2778] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1777 886 557] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=124915 applied=95469 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=82 gravity=[-0.0054 -0.0024 -1.0000] tick_max_us=650 missed=2611 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10306256 tx_bytes=19032740 rx0_level=1 imu_id=0x70 imu_samples=318660 imu_valid=1 accel=[0.03352 0.02634 9.77373] raw_gyro=[0.00906 -0.23156 0.01306]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00030 -0.00248 0.00034]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1668 730 394] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[8323 7299 6798] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125114 applied=95669 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=82 gravity=[-0.0056 -0.0024 -1.0000] tick_max_us=650 missed=2616 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10321420 tx_bytes=19062988 rx0_level=1 imu_id=0x70 imu_samples=319160 imu_valid=1 accel=[0.05387 0.01437 9.82880] raw_gyro=[0.00853 -0.22996 0.01252]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00023 -0.00088 -0.00020]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3162 2381 2020] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3320 2231 1900] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125314 applied=95870 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=82 gravity=[-0.0054 -0.0021 -1.0000] tick_max_us=650 missed=2623 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10336736 tx_bytes=19093516 rx0_level=1 imu_id=0x70 imu_samples=319660 imu_valid=1 accel=[0.03950 0.01437 9.78750] raw_gyro=[0.01066 -0.23342 0.01252]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00190 -0.00435 -0.00020]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1337 420 86] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1586 756 267] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125334 applied=95890 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=11 gravity=[-0.0054 -0.0021 -1.0000] tick_max_us=650 missed=2624 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10337192 tx_bytes=19094428 rx0_level=1 imu_id=0x70 imu_samples=319710 imu_valid=1 accel=[0.04908 0.03651 9.79228] raw_gyro=[0.00879 -0.23156 0.01279]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00004 -0.00248 0.00007]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1848 662 267] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3616 2625 2225] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125514 applied=96071 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=82 gravity=[-0.0053 -0.0024 -1.0000] tick_max_us=650 missed=2630 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-52
+IO rx_bytes=10351976 tx_bytes=19123916 rx0_level=1 imu_id=0x70 imu_samples=320160 imu_valid=1 accel=[0.05028 0.04070 9.80126] raw_gyro=[0.00879 -0.23076 0.01172]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00004 -0.00168 -0.00100]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2590 1771 1245] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2310 1385 834] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125714 applied=96272 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=82 gravity=[-0.0056 -0.0025 -1.0000] tick_max_us=650 missed=2631 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10367140 tx_bytes=19154188 rx0_level=1 imu_id=0x70 imu_samples=320660 imu_valid=1 accel=[0.04369 0.02634 9.76655] raw_gyro=[0.00826 -0.22942 0.01039]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00050 -0.00035 -0.00233]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3337 2208 1875] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3194 2357 1936] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125774 applied=96333 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=8 gravity=[-0.0055 -0.0025 -1.0000] tick_max_us=650 missed=2631 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10370676 tx_bytes=19161180 rx0_level=1 imu_id=0x70 imu_samples=320810 imu_valid=1 accel=[0.04369 0.05028 9.79827] raw_gyro=[0.00933 -0.23236 0.01226]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00057 -0.00328 -0.00046]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[1860 773 361] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[3902 2896 2530] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=125914 applied=96473 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=83 gravity=[-0.0055 -0.0025 -1.0000] tick_max_us=650 missed=2637 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10382456 tx_bytes=19184740 rx0_level=1 imu_id=0x70 imu_samples=321160 imu_valid=1 accel=[0.04729 0.01317 9.79947] raw_gyro=[0.00826 -0.23315 0.01332]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00050 -0.00408 0.00060]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[5556 4671 4053] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[5214 4229 3784] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=126114 applied=96674 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=84 gravity=[-0.0054 -0.0025 -1.0000] tick_max_us=650 missed=2640 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10397696 tx_bytes=19215140 rx0_level=0 imu_id=0x70 imu_samples=321660 imu_valid=1 accel=[0.03711 0.02334 9.78391] raw_gyro=[0.00853 -0.23156 0.01306]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00023 -0.00248 0.00034]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4238 3208 2783] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4610 3401 2910] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=126214 applied=96775 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=51 gravity=[-0.0055 -0.0027 -1.0000] tick_max_us=650 missed=2642 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-54
+IO rx_bytes=10404804 tx_bytes=19229276 rx0_level=1 imu_id=0x70 imu_samples=321910 imu_valid=1 accel=[0.04729 0.01616 9.78271] raw_gyro=[0.00933 -0.23156 0.01172]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00057 -0.00248 -0.00100]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2845 1758 1407] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[4799 3885 3403] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=126314 applied=96875 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=84 gravity=[-0.0054 -0.0027 -1.0000] tick_max_us=650 missed=2644 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-52
+IO rx_bytes=10412936 tx_bytes=19245516 rx0_level=1 imu_id=0x70 imu_samples=322160 imu_valid=1 accel=[0.06225 0.02813 9.78570] raw_gyro=[0.00906 -0.23102 0.01332]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[0.00030 -0.00195 0.00060]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[5094 4273 3760] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[6856 5741 5407] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+HCR uart=1 tx=43 rx=44 baud=921600 link=1 epoch=3694660816 armed=0 enabled=0 motors=1 flags=0x07 lf_mode=1 lf_fault=0 local_fault=0 targets=126514 applied=97076 rejected=0 crc=0 queue_err=0 imu_age_ms=0 report_age_ms=84 gravity=[-0.0054 -0.0027 -1.0000] tick_max_us=650 missed=2647 cmd=102 result=1
+OTA supported=1 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app1 next=app0 elf_sha256=f5bf991c10cec3a01a2eb5fc5db547b76d4ab1e5642db7050fff19c4ddf44931 build=Oct 31 2026_09:41:55
+NET connected=1 ssid=LUMI ip=10.10.61.85 mac=70:04:1D:A8:CA:FC hostname=lf-mcu.local rssi=-53
+IO rx_bytes=10428176 tx_bytes=19275940 rx0_level=1 imu_id=0x70 imu_samples=322660 imu_valid=1 accel=[0.03531 0.02155 9.78211] raw_gyro=[0.00773 -0.23342 0.01306]
+UART_DIAG stale_tx=0 rx_queue_full=0 tx_queue_full=0 sent_queue_full=0 pump_gap_max_us=4593
+IMU_CAL manual=0 samples=501 bias_rad_s=[0.00876 -0.22907 0.01272] corrected_gyro=[-0.00103 -0.00435 0.00034]
+MOTOR side=L uart=2 gpio=15 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[0.01879 -0.20517 5.70641] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[7378 6564 6228] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10792
+MOTOR_DIAG side=L local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=L tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=
+MOTOR side=R uart=1 gpio=17 configured=1 off=1 homed=1 prepared=0 fault=0 raw_rad=[-0.21667 0.17104 1.10447] raw_rad_s=[0.00000 0.00000 0.00000] sample_age_us=[2347 1405 1056] kp_max=[20000 40000] kd_max=[120 260] bus_err=0 cycle_max_us=10576
+MOTOR_DIAG side=R local_fault=0 first_fail_id=0 inst=0x00 addr=0x00 bus_stage=0 recovered_writes=0 enable_readback=[0 0 0] startup_goal_rpm=0
+BUS_TRACE side=R tx_us=0 echo_us=0 total_us=0 echo_bytes=0 reply_bytes=0 expected=0 rx=

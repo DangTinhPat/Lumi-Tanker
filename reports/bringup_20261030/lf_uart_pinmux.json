@@ -1,0 +1,30 @@
+{
+  "serial2_alias": "/serial@ff4c0000",
+  "ttyS2_node": "/sys/firmware/devicetree/base/serial@ff4c0000",
+  "status": "okay",
+  "pinctrl_phandles": [
+    79
+  ],
+  "pin_nodes": [
+    {
+      "node": "/sys/firmware/devicetree/base/pinctrl/uart2",
+      "phandle": "",
+      "pins": []
+    },
+    {
+      "node": "/sys/firmware/devicetree/base/pinctrl/uart2/uart2m1-xfer",
+      "phandle": "0000004f",
+      "pins": [
+        1,
+        11,
+        2,
+        115,
+        1,
+        10,
+        2,
+        115
+      ]
+    }
+  ],
+  "serial_stats": "serinfo:1.0 driver revision:\n1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1405 rx:675 RTS|CTS|DTR\n2: uart:16550A mmio:0xFF4C0000 irq:37 tx:1620 rx:1080 RTS|DTR\n"
+}

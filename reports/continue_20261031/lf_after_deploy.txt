@@ -1,0 +1,27 @@
+{
+  "epoch": 251640586,
+  "mode": "FAULT",
+  "phase": "Idle",
+  "fault_code": 3,
+  "reason": "driver_fault",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 0,
+    "rejected": 0,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "transport": "serial",
+  "parser_errors": 1,
+  "max_handler_ms": 1.859082999999373,
+  "max_telemetry_ms": 1.859082999999373,
+  "updated_monotonic": 252.346127033
+}
+{"event": "mode", "epoch": 2636707564, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "unix", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 15.448271674}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 251640586, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 245.326241489}
+{"event": "mode", "epoch": 251640586, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.23975000001996705, "max_telemetry_ms": 0.0, "updated_monotonic": 245.331512489}
+{"event": "mode", "epoch": 251640586, "mode": "FAULT", "phase": "Idle", "fault_code": 3, "reason": "driver_fault", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.6037500000104501, "max_telemetry_ms": 0.6037500000104501, "updated_monotonic": 245.338200989}

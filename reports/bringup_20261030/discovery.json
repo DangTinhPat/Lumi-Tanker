@@ -1,0 +1,4 @@
+{
+  "sender": "10.10.61.85",
+  "beacon": "HCR1 MCU ip=10.10.61.85 console=8023 uart=UART0 motors=BL4012e"
+}

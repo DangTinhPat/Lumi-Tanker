@@ -1,0 +1,43 @@
+Processing esp32-s3-hybrid-mcu (platform: platformio/espressif32@7.1.3; board: 4d_systems_esp32s3_gen4_r8n16; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/4d_systems_esp32s3_gen4_r8n16.html
+PLATFORM: Espressif 32 (7.1.3) > 4D Systems GEN4-ESP32 16MB (ESP32S3-R8N16)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 16MB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, esp-bridge, esp-builtin, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - framework-arduinoespressif32 @ 4.20017.260907+sha.dcc1105b 
+ - tool-esptoolpy @ 2.41100.260830 (4.11.0) 
+ - tool-openocd-esp32 @ 2.1100.20220706 (11.0) 
+ - toolchain-riscv32-esp @ 8.4.0+2021r2-patch5 
+ - toolchain-xtensa-esp32s3 @ 8.4.0+2021r2-patch5
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 33 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- ArduinoOTA @ 2.0.0
+|-- ESPmDNS @ 2.0.0
+|-- WiFi @ 2.0.0
+|-- SPI @ 2.0.0
+Building in release mode
+Compiling .pio/build/esp32-s3-hybrid-mcu/src/EspBlMotor.cpp.o
+Compiling .pio/build/esp32-s3-hybrid-mcu/src/HybridGatewayApp.cpp.o
+Linking .pio/build/esp32-s3-hybrid-mcu/firmware.elf
+Retrieving maximum program size .pio/build/esp32-s3-hybrid-mcu/firmware.elf
+Checking size .pio/build/esp32-s3-hybrid-mcu/firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.4% (used 60404 bytes from 327680 bytes)
+Flash: [=         ]  12.0% (used 785645 bytes from 6553600 bytes)
+Building .pio/build/esp32-s3-hybrid-mcu/firmware.bin
+esptool.py v4.11.0
+Creating esp32s3 image...
+Merged 2 ELF sections
+Successfully created esp32s3 image.
+manifest([".pio/build/esp32-s3-hybrid-mcu/firmware.bin"], [".pio/build/esp32-s3-hybrid-mcu/firmware.elf"])
+========================= [SUCCESS] Took 4.08 seconds =========================
+
+Environment          Status    Duration
+-------------------  --------  ------------
+esp32-s3-hybrid-mcu  SUCCESS   00:00:04.080
+========================= 1 succeeded in 00:00:04.080 =========================

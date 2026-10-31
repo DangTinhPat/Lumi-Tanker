@@ -1,0 +1,60 @@
+{
+  "artifact_hashes": {
+    "models/model_19500.onnx": true,
+    "models/beni512_dfp16.rknn": true,
+    "models/beni512_19500_normalizer.json": true
+  },
+  "http_status": 200,
+  "web_status": {
+    "epoch": 3694660816,
+    "mode": "DISARMED",
+    "phase": "Idle",
+    "fault_code": 0,
+    "reason": "",
+    "policy_steps": 0,
+    "handoff_us": null,
+    "inference_max_ms": 0.0,
+    "consecutive_deadline_misses": 0,
+    "counters": {
+      "telemetry": 99631,
+      "telemetry_received": 99631,
+      "rejected": 0,
+      "inferences": 0,
+      "deadline_misses": 0
+    },
+    "link": true,
+    "last_telemetry_flags": 7,
+    "transport": "serial",
+    "parser_errors": 0,
+    "max_handler_ms": 2.2819999999228457,
+    "max_telemetry_ms": 2.2819999999228457,
+    "updated_monotonic": 1587.229330863,
+    "runtime_online": true,
+    "status_age_s": 0.16770016700002088
+  },
+  "config": {
+    "backend": "rknn",
+    "realtime_priority": 20,
+    "transport": "serial",
+    "socket": "/tmp/rb-hybrid-runtime.sock",
+    "serial_port": "/dev/ttyS2",
+    "baud": 921600,
+    "status_file": "/tmp/rb-hybrid-status.json",
+    "telemetry_timeout_ms": 30,
+    "target_ack_timeout_ms": 30,
+    "inference_deadline_ms": 10,
+    "inference_hard_deadline_ms": 15,
+    "max_consecutive_deadline_misses": 3,
+    "home_hold_s": 3.0,
+    "warmup_start_s": 12.5,
+    "handoff_earliest_s": 13.0,
+    "warmup_steps": 50,
+    "home_joints": [
+      2.35706715,
+      2.35706715,
+      0.0,
+      0.0
+    ],
+    "home_tolerance_rad": 0.15
+  }
+}

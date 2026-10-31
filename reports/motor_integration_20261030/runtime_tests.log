@@ -1,0 +1,27 @@
+test_c_encode_matches_python (test_codec_c.CodecInterop.test_c_encode_matches_python) ... ok
+test_python_encode_c_decode_and_latched_watchdog (test_codec_c.CodecInterop.test_python_encode_c_decode_and_latched_watchdog) ... ok
+test_action_and_joint_contract (test_core.ProtocolTests.test_action_and_joint_contract) ... ok
+test_fragmentation_corruption_resync (test_core.ProtocolTests.test_fragmentation_corruption_resync) ... ok
+test_absolute_policy_schedule_tolerates_timestamp_jitter (test_core.StateTests.test_absolute_policy_schedule_tolerates_timestamp_jitter) ... ok
+test_future_ack_cannot_keep_motor_link_alive (test_core.StateTests.test_future_ack_cannot_keep_motor_link_alive) ... ok
+test_hybrid_warmup_handoff_preserves_state (test_core.StateTests.test_hybrid_warmup_handoff_preserves_state) ... ok
+test_invalid_sensor_and_estop (test_core.StateTests.test_invalid_sensor_and_estop) ... ok
+test_late_first_policy_prediction_does_not_handoff (test_core.StateTests.test_late_first_policy_prediction_does_not_handoff) ... ok
+test_late_predictions_are_held_and_repeated_lateness_faults (test_core.StateTests.test_late_predictions_are_held_and_repeated_lateness_faults) ... ok
+test_mcu_reboot_starts_new_epoch_despite_old_sequence (test_core.StateTests.test_mcu_reboot_starts_new_epoch_despite_old_sequence) ... ok
+test_missing_target_feedback_and_inference_deadline_fault (test_core.StateTests.test_missing_target_feedback_and_inference_deadline_fault) ... ok
+test_replayed_and_old_epoch_data_do_not_refresh_watchdog (test_core.StateTests.test_replayed_and_old_epoch_data_do_not_refresh_watchdog) ... ok
+test_timeout_fault_latches_until_reset (test_core.StateTests.test_timeout_fault_latches_until_reset) ... ok
+test_actual_onnx_tensors_and_100_recurrent_reference_steps (test_flow_contract.ActualModelContractTests.test_actual_onnx_tensors_and_100_recurrent_reference_steps) ... ok
+test_action_decode_has_four_absolute_angles_two_angular_rates (test_flow_contract.FlowContractTests.test_action_decode_has_four_absolute_angles_two_angular_rates) ... ok
+test_both_control_owners_use_the_same_target_contract (test_flow_contract.FlowContractTests.test_both_control_owners_use_the_same_target_contract) ... ok
+test_disabled_zero_payload_does_not_mean_move_to_zero (test_flow_contract.FlowContractTests.test_disabled_zero_payload_does_not_mean_move_to_zero) ... ok
+test_observation_uses_relative_knee_feedback_not_crank_targets (test_flow_contract.FlowContractTests.test_observation_uses_relative_knee_feedback_not_crank_targets) ... ok
+test_target_wire_offsets_do_not_contain_a_torque_command (test_flow_contract.FlowContractTests.test_target_wire_offsets_do_not_contain_a_torque_command) ... ok
+test_uart_full_duplex_on_pty (test_transport.TransportTests.test_uart_full_duplex_on_pty) ... ok
+test_writer_preserves_partial_frame (test_transport.TransportTests.test_writer_preserves_partial_frame) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 0.541s
+
+OK

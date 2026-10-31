@@ -1,0 +1,48 @@
+{
+  "boot_ms": 184.18399999995927,
+  "runs": [
+    {
+      "run": 0,
+      "reset_ms": 0.5136249999395659,
+      "first_ms": 0.7335420000345039,
+      "max_ms": 1.9830420000062077,
+      "reset_equivalent": true
+    },
+    {
+      "run": 1,
+      "reset_ms": 0.4497500000297805,
+      "first_ms": 0.6384580000258211,
+      "max_ms": 0.9041659999411422,
+      "reset_equivalent": true
+    },
+    {
+      "run": 2,
+      "reset_ms": 0.5532920000632657,
+      "first_ms": 0.7180830000379501,
+      "max_ms": 0.7180830000379501,
+      "reset_equivalent": true
+    },
+    {
+      "run": 3,
+      "reset_ms": 0.4993329999933849,
+      "first_ms": 0.7425839999086747,
+      "max_ms": 0.7778749999260981,
+      "reset_equivalent": true
+    },
+    {
+      "run": 4,
+      "reset_ms": 0.5072080000445567,
+      "first_ms": 0.6883329999709531,
+      "max_ms": 0.7291670000313388,
+      "reset_equivalent": true
+    },
+    {
+      "run": 5,
+      "reset_ms": 0.5045839999411328,
+      "first_ms": 0.721291999980167,
+      "max_ms": 0.7697089999965101,
+      "reset_equivalent": true
+    }
+  ],
+  "pass": true
+}

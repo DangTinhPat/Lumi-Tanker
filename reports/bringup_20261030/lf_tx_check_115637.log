@@ -1,0 +1,25 @@
+{
+  "before": "serinfo:1.0 driver revision:\n1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1289 rx:711 RTS|CTS|DTR\n2: uart:16550A mmio:0xFF4C0000 irq:37 tx:0 rx:36 RTS|DTR\n",
+  "after": "serinfo:1.0 driver revision:\n1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1289 rx:711 RTS|CTS|DTR\n2: uart:16550A mmio:0xFF4C0000 irq:37 tx:360 rx:396 RTS|DTR\n",
+  "written_bytes": 360,
+  "rx_bytes": 360,
+  "frame_types": {
+    "1": 10
+  },
+  "crc_errors": 0,
+  "samples": [
+    {
+      "type": 1,
+      "payload": "00000000c800640048435231"
+    },
+    {
+      "type": 1,
+      "payload": "00000000c800640048435231"
+    },
+    {
+      "type": 1,
+      "payload": "00000000c800640048435231"
+    }
+  ],
+  "enabled_targets_sent": 0
+}

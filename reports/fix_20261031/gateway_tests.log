@@ -1,0 +1,5 @@
+PASS: attitude, mapping, missing-driver gate, applied ACK, TTL, replay, stale source, epoch/reset, estop, driver failure, finite data, CRC/resync
+PASS: bench UART CLI over virtual serial, telemetry and DISABLED-only targets
+PASS: real LF Core + MCU core, 2700 telemetry exchanges, HOME/STANDUP/WARMUP/MODEL and applied ACK
+PASS: estop survives LF RESET/new epoch; local clear required
+PASS: absent motors -> honest validity, LF invalid-telemetry FAULT, ARM refused

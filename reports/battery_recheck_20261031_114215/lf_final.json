@@ -1,0 +1,25 @@
+{
+  "epoch": 2111003656,
+  "mode": "FAULT",
+  "phase": "Folding",
+  "fault_code": 3,
+  "reason": "driver_fault",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 4995,
+    "telemetry_received": 20036,
+    "rejected": 1,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "link": true,
+  "last_telemetry_flags": 65,
+  "transport": "serial",
+  "parser_errors": 1,
+  "max_handler_ms": 1.5586669999976266,
+  "max_telemetry_ms": 1.5586669999976266,
+  "updated_monotonic": 113.248342095
+}

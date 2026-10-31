@@ -1,0 +1,45 @@
+#pragma once
+#ifdef ARDUINO
+#include "gateway/BlMotor.hpp"
+#include "joint_bus.h"
+#include <driver/gpio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+namespace gateway {
+class EspMotorCritical final : public MotorCritical {
+ public:
+  void enter() noexcept override { portENTER_CRITICAL(&mux_); }
+  void leave() noexcept override { portEXIT_CRITICAL(&mux_); }
+ private:
+  portMUX_TYPE mux_=portMUX_INITIALIZER_UNLOCKED;
+};
+class EspMotorBus final : public MotorBus {
+ public:
+  bool begin(uart_port_t uart, gpio_num_t data, gpio_num_t unused_rx) noexcept;
+  std::uint64_t now() const noexcept override;
+  BusError lastError() const noexcept override { return error_; }
+  BusTrace trace() const noexcept override { return trace_; }
+  BusStats stats() const noexcept override;
+  bool request(BusFormat, std::uint8_t, std::uint8_t, const std::uint8_t*,
+               std::size_t, std::size_t, BusReply&) noexcept override;
+ private:
+  joint_bus_t bus_{};
+  bool initialized_=false;
+  BusError error_=BusError::None;
+  BusTrace trace_{};
+};
+class EspBlMotor {
+ public:
+  EspBlMotor() : backend(lock), left(backend,0,left_bus), right(backend,1,right_bus) {}
+  bool begin() noexcept;
+  EspMotorCritical lock;
+  BlMotorBackend backend;
+ private:
+  static void workerTask(void* arg);
+  EspMotorBus left_bus, right_bus;
+  BlMotorWorker left, right;
+  TaskHandle_t left_task=nullptr, right_task=nullptr;
+};
+} // namespace gateway
+#endif

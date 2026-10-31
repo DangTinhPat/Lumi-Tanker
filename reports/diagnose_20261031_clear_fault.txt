@@ -1,0 +1,27 @@
+HCR1 lower layer; HELP for commands
+QUEUED; HCR cmd/result reports accepted=1 or refused=2
+HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=3970596597 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=5 targets=3000 applied=3001 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=14 gravity=[0.0000 0.0000 -1.0000] tick_max_us=435 missed=1174 cmd=103 result=1
+OTA supported=0 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app0 next=app1 build=Oct 31 2026_08:21:52
+IO rx_bytes=235867 tx_bytes=523984 rx0_level=1 imu_id=0x70 imu_samples=372708 imu_valid=0 accel=[0.28850 0.07422 9.78690] raw_gyro=[-0.00533 -0.21850 0.01545]
+MOTOR side=L uart=2 gpio=15 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[-0.02761 -0.07593 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[186137 183189 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=2 cycle_max_us=25733
+MOTOR side=R uart=1 gpio=17 configured=0 off=0 homed=0 prepared=0 fault=1 raw_rad=[0.00000 0.00000 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[999999 999999 999999] kp_max=[0 0] kd_max=[0 0] bus_err=18 cycle_max_us=28650
+HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=3970596597 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=5 targets=3000 applied=3001 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=15 gravity=[0.0000 0.0000 -1.0000] tick_max_us=435 missed=1175 cmd=103 result=1
+OTA supported=0 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app0 next=app1 build=Oct 31 2026_08:21:52
+IO rx_bytes=235867 tx_bytes=524056 rx0_level=1 imu_id=0x70 imu_samples=373208 imu_valid=0 accel=[0.30945 0.14605 9.89224] raw_gyro=[0.01252 -0.21743 0.01359]
+MOTOR side=L uart=2 gpio=15 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[-0.02761 -0.07593 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[1186598 1183650 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=2 cycle_max_us=25733
+MOTOR side=R uart=1 gpio=17 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[0.00805 0.16989 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[719091 716114 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=53 cycle_max_us=28650
+HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=3970596597 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=5 targets=3000 applied=3001 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=14 gravity=[0.0000 0.0000 -1.0000] tick_max_us=435 missed=1175 cmd=103 result=1
+OTA supported=0 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app0 next=app1 build=Oct 31 2026_08:21:52
+IO rx_bytes=235867 tx_bytes=524128 rx0_level=1 imu_id=0x70 imu_samples=373708 imu_valid=0 accel=[0.22087 0.14006 9.79528] raw_gyro=[0.03224 -0.21237 0.01679]
+MOTOR side=L uart=2 gpio=15 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[-0.02761 -0.07593 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[2186139 2183191 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=2 cycle_max_us=25733
+MOTOR side=R uart=1 gpio=17 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[0.00805 0.16989 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[1718632 1715655 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=53 cycle_max_us=28650
+HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=3970596597 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=5 targets=3000 applied=3001 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=14 gravity=[0.0000 0.0000 -1.0000] tick_max_us=435 missed=1175 cmd=103 result=1
+OTA supported=0 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app0 next=app1 build=Oct 31 2026_08:21:52
+IO rx_bytes=235867 tx_bytes=524200 rx0_level=1 imu_id=0x70 imu_samples=374208 imu_valid=0 accel=[0.23044 0.17238 9.80066] raw_gyro=[0.00053 -0.22196 0.01439]
+MOTOR side=L uart=2 gpio=15 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[-0.02761 -0.07593 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[3186057 3183109 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=2 cycle_max_us=25733
+MOTOR side=R uart=1 gpio=17 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[0.00805 0.16989 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[2718550 2715573 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=53 cycle_max_us=28650
+HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=3970596597 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=5 targets=3000 applied=3001 rejected=0 crc=0 queue_err=0 imu_age_ms=1 report_age_ms=14 gravity=[0.0000 0.0000 -1.0000] tick_max_us=435 missed=1175 cmd=103 result=1
+OTA supported=0 maintenance=0 off_confirmed=0 ready=0 port=3232 uploading=0 progress=0 error=-1 running=app0 next=app1 build=Oct 31 2026_08:21:52
+IO rx_bytes=235867 tx_bytes=524272 rx0_level=1 imu_id=0x70 imu_samples=374708 imu_valid=0 accel=[0.28611 0.11911 9.76415] raw_gyro=[0.01226 -0.21663 0.01252]
+MOTOR side=L uart=2 gpio=15 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[-0.02761 -0.07593 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[4186113 4183165 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=2 cycle_max_us=25733
+MOTOR side=R uart=1 gpio=17 configured=0 off=1 homed=0 prepared=0 fault=1 raw_rad=[0.00805 0.16989 0.00000] raw_rad_s=[0.00000 0.00000 0.00000] age_us=[3718606 3715629 999999] kp_max=[20000 40000] kd_max=[120 260] bus_err=53 cycle_max_us=28650

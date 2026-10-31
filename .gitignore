@@ -2,20 +2,19 @@ build/
 log/
 __pycache__/
 
-# Hidden files and directories (.agents, .claude, .vscode, .pio, .pytest_cache, ...)
+# Hidden files and directories (.claude, .vscode, .pio, .local ...)
 .*
 !.gitignore
 
-# Large CAD/mesh binaries. Kept out of git deliberately: the STEP assembly is
-# 111 MB (over GitHub's hard 100 MB per-file limit, so a push containing it is
-# rejected outright) and the MuJoCo STL assets add another 97 MB, which would
-# grow this repo from 8 MB to ~210 MB permanently - undoing that needs a
-# history rewrite. Track them with git-lfs if they need to be versioned.
-*.stp
-*.STP
-*.rar
-simulation/model/assets/*.stl
-simulation/model/assets/*.STL
+# Local credentials: never committed
+include/gateway/WifiSecrets.hpp
+include/gateway/OtaSecrets.hpp
+include/gateway/HcrWifiSecrets.hpp
+.local/hybrid_ota.json
 
-
-firmware/esp32/include/tap_hw/WifiSecrets.hpp
+# Firmware binaries in reports/ embed the Wi-Fi password and the OTA key hash
+# they were built with. Keep them local; never commit them.
+reports/**/*.bin
+reports/**/*.elf
+reports/**/*.map
+reports/**/*.ota.json

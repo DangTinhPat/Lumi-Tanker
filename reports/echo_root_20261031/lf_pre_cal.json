@@ -1,0 +1,25 @@
+{
+  "epoch": 2685781313,
+  "mode": "FAULT",
+  "phase": "Idle",
+  "fault_code": 2,
+  "reason": "IMU/encoder/calibration validity missing",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 4995,
+    "telemetry_received": 184215,
+    "rejected": 1,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "link": true,
+  "last_telemetry_flags": 2,
+  "transport": "serial",
+  "parser_errors": 1,
+  "max_handler_ms": 1.5586669999976266,
+  "max_telemetry_ms": 1.5586669999976266,
+  "updated_monotonic": 951.798779578
+}

@@ -1,0 +1,9 @@
+....Maintenance ready; all motors confirmed OFF. Uploading...
+.Maintenance ready; all motors confirmed OFF. Uploading...
+..Maintenance ready; all motors confirmed OFF. Uploading...
+PASS: expected firmware is running on the same MCU, DISARMED.
+.
+----------------------------------------------------------------------
+Ran 8 tests in 0.002s
+
+OK

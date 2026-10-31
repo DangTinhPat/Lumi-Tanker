@@ -1,0 +1,58 @@
+{
+  "lf": "10.10.60.232",
+  "uart": "/dev/ttyS2",
+  "esp": "10.10.61.85",
+  "baud": 921600,
+  "format": "8N1",
+  "duration_s": 15.0,
+  "enabled_targets_sent": 0,
+  "esp_status": "HCR uart=1 tx=43 rx=44 baud=921600 link=0 epoch=91889746 armed=0 enabled=0 motors=0 flags=0x40 lf_mode=1 lf_fault=0 local_fault=3 targets=10771 applied=2999 rejected=0 crc=0 queue_err=2 imu_age_ms=0 report_age_ms=12 gravity=[0.0000 0.0000 -1.0000] tick_max_us=528 missed=965 cmd=0 result=0",
+  "esp_io": {
+    "rx_bytes": "1138620",
+    "tx_bytes": "1686720",
+    "rx0_level": "1",
+    "imu_id": "0x70",
+    "imu_samples": "153189",
+    "imu_valid": "0",
+    "accel": "[0.32920",
+    "raw_gyro": "[0.01279"
+  },
+  "peer_output": [
+    "{\"link\": true, \"frames\": 1, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 0, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 202, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 140, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 403, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 398, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 604, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 604, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 805, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 802, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 1006, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 1006, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 1206, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 1206, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 1407, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 1406, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 1608, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 1608, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 1808, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 1808, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 2009, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 2009, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 2210, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 2210, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 2411, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 2411, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 2612, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 2612, \"crc_errors\": 0}",
+    "{\"link\": true, \"frames\": 2812, \"flags\": 64, \"gravity\": [0.0, 0.0, -1.0], \"gyro\": [0.0, 0.0, 0.0], \"accel\": [0.0, 0.0, 0.0], \"encoders_valid\": false, \"applied_seq\": 2812, \"crc_errors\": 0}",
+    "{\"link\": true, \"lf_rx_frames\": {\"2\": 1, \"3\": 2999}, \"lf_rx_bytes\": 455884, \"lf_tx_bytes\": 227924, \"hello_requests\": 0, \"hello_acks\": 1, \"telemetry_frames\": 2999, \"mean_hz\": 199.9293774107141, \"crc_errors\": 0, \"enabled_targets_sent\": 0, \"last_sample_age_s\": 0.0008994999999458742}"
+  ],
+  "peer_error": "",
+  "peer_exit_code": 0,
+  "peer": {
+    "link": true,
+    "lf_rx_frames": {
+      "2": 1,
+      "3": 2999
+    },
+    "lf_rx_bytes": 455884,
+    "lf_tx_bytes": 227924,
+    "hello_requests": 0,
+    "hello_acks": 1,
+    "telemetry_frames": 2999,
+    "mean_hz": 199.9293774107141,
+    "crc_errors": 0,
+    "enabled_targets_sent": 0,
+    "last_sample_age_s": 0.0008994999999458742
+  },
+  "esp_console_connected": true,
+  "pass": true
+}

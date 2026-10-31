@@ -1,169 +1,139 @@
-# Lumi-Tanker — TAP RB R1
+# Luckfox Gateway — firmware ESP32-S3 (tầng dưới)
 
-Robot hai bánh chân (wheel-legged) RB R1. Repo gồm hai phần dùng chung một
-lõi C++17:
+Firmware chạy trên board ESP32-S3 N16R8 của robot hai bánh chân RB R1. Nó là
+**tầng dưới**: đọc cảm biến, điều khiển motor và chuyển dữ liệu cho **tầng trên**
+chạy trên Luckfox (LF). Mọi quyết định điều khiển (đứng dậy, cân bằng, policy)
+nằm ở LF. ESP32 chỉ thực hiện lệnh và bảo vệ phần cứng.
 
-1. **Firmware V3 cho ESP32-S3** (điều khiển robot thật, nhánh `v3.7`): bánh cân
-   bằng con lắc ngược bằng LQR, hông và gối giữ thân ngang và hấp thụ nhiễu
-   loạn; có đứng dậy từ tư thế nằm và bước nhảy `HopSequence`. Đây là thứ chạy
-   trên robot.
-2. **Mô phỏng MuJoCo native + GUI** để quan sát và thử nghiệm. Runner
-   `tap_mujoco_gim_v3` chạy chính `V3Controller` của firmware trên model CAD
-   `GIM6010-8` (`gim_dynamic.xml`). Runner cũ `tap_mujoco_native` chạy
-   `EmbeddedController` và model RB R1 cũ; nó không còn được dùng (xem mục Mô
-   phỏng).
+```
+Luckfox (LF) ── UART0 921600 8N1, giao thức HCR1 ──▶ ESP32-S3 ──┬─ bus trái  UART2/GPIO15 ─ hip ID2, crank ID3, bánh ID1
+  controller đứng dậy + policy                      MPU6500 (SPI) │
+  gửi: 4 góc hip/crank + 2 vận tốc bánh              Console TCP  └─ bus phải  UART1/GPIO17 ─ hip ID2, crank ID3, bánh ID1
+  nhận: IMU, encoder, trạng thái (200 Hz)            8023, OTA 3232
+```
 
-Một kết quả mô phỏng chỉ là bằng chứng cho model và actuator giả lập mà nó dùng,
-không phải bằng chứng về khả năng của robot thật.
-
-Bản đồ thư mục, ranh giới giữa hai phần và hợp đồng cảm biến nằm ở
-[`architecture.md`](architecture.md). Quy tắc bắt buộc nằm ở
-[`docs/RULES.md`](docs/RULES.md). Trạng thái hiện tại của firmware (cấu hình
-boot, số đo phần cứng, hướng đã loại, việc còn mở) nằm ở
-[`docs/V3.3_HANDOFF.md`](docs/V3.3_HANDOFF.md).
+- LF → ESP32: bốn góc tuyệt đối hip/crank (rad) và hai vận tốc bánh (rad/s). **Không có torque command.**
+- ESP32 → LF: telemetry 200 Hz (gyro, vector trọng lực, accel, góc và vận tốc khớp, cờ hợp lệ).
+- Lệnh TARGET hết hạn sau 20 ms. Mất lệnh thì ESP32 tự tắt motor.
 
 ## Bố cục thư mục
 
-```text
-controller/          Thuật toán điều khiển và test C++ trên host
-  v3/                V3Controller, LegLock, HopSequence, StandUp, giao tiếp motor, test firmware
-  core/              Lõi điều khiển dùng chung, bộ ước lượng
-  hal/               Giao diện trừu tượng phần cứng (mapping motor, codec khung)
-  examples/          Chương trình ví dụ
-firmware/esp32/      Điểm vào ESP32, driver board (CAN, UART, MPU6500), cấu hình build
-gui/                 GUI robot, GUI mô phỏng, thư viện Python và test
-simulation/          MuJoCo runner, model CAD GIM, script và test mô phỏng
-assets/              CAD (STEP) và datasheet động cơ
-tools/               Công cụ build model, phân tích log, chẩn đoán
-tests/               Test tích hợp cấp repository
-docs/                Tài liệu thiết kế và hướng dẫn
-```
+| Thư mục / file | Vai trò |
+|---|---|
+| `src/` | Mã nguồn C++ của firmware (5 file, xem bảng bên dưới) |
+| `include/gateway/` | Header của firmware và giao thức: `hcr/hcr_protocol.h` (khung HCR1, CRC), `BlMotor.hpp`, `HybridGatewayCore.hpp`, `HybridAttitude.hpp`, `ImuBiasStore.hpp`… Chứa cả file bí mật (xem mục Cấu hình) |
+| `include/board/` | Cấu hình riêng của board: chân GPIO (`BoardConfig.hpp`), hướng lắp IMU (`ImuMount.hpp`), mapping dấu motor (`MotorMapping.hpp`), hình học (`GeneratedGeometry.hpp`) |
+| `drivers/bl4012e/` | Driver bus một dây cho motor BL4012e (`src/joint_bus.c`). Bản kế thừa từ dự án bench `3in1`; `upstream/` là bản gốc nguyên văn, `PROVENANCE.md` ghi những gì đã sửa |
+| `scripts/` | Hook của PlatformIO khi build: biên dịch driver và sinh manifest OTA (`*.ota.json`) |
+| `tools/` | Công cụ chạy trên laptop: `ota_upload.py` (nạp qua Wi-Fi), `check_hcr_uart.py` và `hcr_uart_peer.py` (kiểm UART với LF), `decode_motor_wave.py` |
+| `tests/` | Test chạy trên máy tính (không cần robot): giao thức, backend motor, driver bus, công cụ OTA |
+| `docs/` | Tài liệu thiết kế và kết quả kiểm chứng (xem mục Tài liệu) |
+| `reports/` | Nhật ký thực nghiệm theo ngày (log, kết quả đo, bản chụp mã trước khi sửa trong `before/`). Là bằng chứng, không phải mã đang dùng |
+| `platformio.ini` | Cấu hình build, chỉ có môi trường `esp32-s3-hybrid-mcu` |
+| `.local/` (ẩn, git-ignored) | Khóa OTA của laptop và MAC đích |
+| `.pio/` (ẩn) | Thư mục build do PlatformIO sinh ra |
 
-Chi tiết và bảng đối chiếu đường dẫn cũ: [PROJECT_LAYOUT.md](docs/PROJECT_LAYOUT.md).
-`architecture.md` và các tài liệu lịch sử giữ nguyên nội dung nên có thể còn
-đường dẫn theo bố cục cũ. Vision đã được gỡ khỏi dự án.
+### Các file trong `src/`
 
-## Phần cứng
+| File | Việc |
+|---|---|
+| `HybridGatewayApp.cpp` | Điểm vào chương trình: UART0 tới LF, hàng đợi, console USB/TCP 8023, Wi-Fi, OTA, tác vụ service 2 kHz |
+| `HybridGatewayCore.cpp` | Logic giao thức: bắt tay HELLO/ACK, epoch, telemetry, nhận TARGET, TTL, E-stop, latch lỗi |
+| `BlMotor.cpp` | Giao thức motor BL4012e: đọc/ghi thanh ghi, mapping dấu và zero, retry, ACK theo batch của cả hai bus |
+| `EspBlMotor.cpp` | Gắn backend motor vào phần cứng: UART2 (trái) và UART1 (phải), hai tác vụ worker |
+| `Mpu6500Spi.cpp` | Đọc IMU MPU6500 qua SPI |
 
-- Board ESP32-S3-WROOM-1 N16R8 tuỳ biến, một MPU6500 (SPI).
-- Bốn khớp chân: SteadyWin GDS68 (GIM6010-8, hộp số 8:1) trên CAN 500 kbit/s.
-  Lệnh vị trí (chế độ POS) gửi theo vòng rotor, tức đã nhân tỉ số 8
-  (`controller/v3/src/v3/LegLock.cpp`).
-- Hai bánh: Kpower BL4012, mỗi bánh một bus UART một dây (half-duplex),
-  1 Mbaud; bánh trái ID 2 (GPIO15), bánh phải ID 1 (GPIO17), xem
-  `controller/hal/include/robot_hal/MotorMapping.hpp`. HANDOFF còn nhiều ghi chú
-  theo BL4820 cũ; bánh hiện tại là BL4012.
-- Cảm biến triển khai được: một MPU6500 và sáu encoder động cơ. Dữ liệu mô
-  phỏng (pose, tiếp xúc, lực ràng buộc) không bao giờ đi vào quyết định điều
-  khiển.
+Header `HybridAttitude.hpp` ước lượng vector trọng lực và bias gyro; `ImuBiasStore.hpp`
+lưu bias vào flash (NVS).
 
-## Model CAD đang dùng
+## Phần cứng và chân
 
-Nguồn hình học là [`assets/cad/ROBOT (GIM6010-8).STEP`](assets/cad) (59
-occurrence, SHA256
-`81c3dfe090b4341f626831b87c8fc556116255c740ac562b5a866b49be00343b`). Model cũ RB
-R1 (`tap_robot.xml`, `rb_cad_manifest.json`, `mesh_inertials.yaml`) không còn
-là model của robot.
+| Chức năng | Chân |
+|---|---|
+| Liên kết LF (HCR1) | UART0, TX GPIO43, RX GPIO44, 921600 baud |
+| Bus motor trái | UART2, GPIO15 (DATA, 1 Mbaud, một dây) |
+| Bus motor phải | UART1, GPIO17 (DATA, 1 Mbaud, một dây) |
+| IMU MPU6500 | SPI, GPIO10–14 |
+| Console | TCP 8023 (Wi-Fi LUMI), hoặc USB native GPIO19/20 |
 
-| Tệp (trong `simulation/model/`) | Vai trò |
-| --- | --- |
-| `gim_dynamic.xml` | Model động lực học mà GUI và `tap_mujoco_gim_v3` nạp: root tự do và 6 hinge (`hip_*`, `knee_*`, `wheel_*`); hông/gối có ma sát khô 0,1 N·m, gối giới hạn 0–1,9722 rad |
-| `gim_visual.xml`, `gim_visual/` | Model chỉ để xem |
-| `gim_components.xml`, `gim_components.json`, `gim_components/` | 59 STL theo từng chi tiết CAD |
-| `gim_mass_properties.yaml` | Khối lượng, ma sát, trục khớp và giới hạn gối do người vận hành cung cấp |
-| `gim_dynamic_shell.xml` | Biến thể `gim6010_v3_shell_contact` |
-
-Số liệu chính (từ `gim_mass_properties.yaml` và
-[`docs/GIM_COM_20261018.md`](docs/GIM_COM_20261018.md)):
-
-- Thứ tự khớp `[LH, LK, LW, RH, RK, RW]`; mọi trục native là `+Y` ở cả hai bên
-  (trái `+Y`, phải `-Y` về vị trí). Gốc khớp là tư thế CAD; firmware lấy tư thế
-  lúc cấp nguồn làm gốc và cộng mốc hông/gối của khung chân thẳng.
-- Bán kính bánh `0.040 m`, khoảng cách tâm trục `0.2654 m`
-  (`controller/core/.../GeneratedGeometry.hpp`).
-- Khối lượng `3.232 kg`: cụm thân `2.612` (bốn motor khớp 1,6; pin 0,25 ở khoang
-  trước; khung 0,35; PCB/dây/ốc 0,412), mỗi đùi `0.05`, mỗi ống cẳng `0.04`,
-  mỗi motor bánh `0.20`, mỗi bánh `0.02`. Tất cả là khối lượng gán, chưa cân; COM
-  thân ước lượng x = +5,3 mm, z = 15,1 mm.
-- Gối: hông quay tự do; gối giới hạn góc trong của khớp 22°–135°. Trong
-  controller, góc gối tính từ tư thế gối co (22°) nên dải điều khiển là
-  `0 → 1,9722 rad` (0 → 113°). Chân thẳng hết cỡ cho chiều cao hông–trục bánh
-  184,8 mm; ở gối 22° hình học cho 38 mm (dải làm việc của controller hẹp hơn,
-  xem HANDOFF).
-- Ma sát bánh–đất 0,8; ma sát khô mỗi khớp hông/gối 0,1 N·m.
+CP2102 cũng nối GPIO43/44. Khi dùng UART0 cho LF thì phải tách TX của CP2102
+khỏi GPIO44, và tách LF khỏi RX0 khi nạp bằng cáp USB.
 
 ## Build và kiểm tra
 
-Test host (không cần MuJoCo):
+Chạy từ thư mục gốc của repository (nếu `pio` không có trong PATH thì dùng
+`~/.platformio/penv/bin/pio`):
 
 ```bash
-cmake -S . -B build/host -DBUILD_TESTING=ON -DTAP_BUILD_SIMULATOR=OFF
-cmake --build build/host -j4
-ctest --test-dir build/host --output-on-failure
+pio run -e esp32-s3-hybrid-mcu          # build, ra .pio/build/esp32-s3-hybrid-mcu/firmware.bin
+
+python3 tests/check_hybrid_gateway.py   # giao thức, ACK, TTL, E-stop, UART giả lập
+python3 tests/check_bl_motor.py         # backend motor hai bus với driver giả lập
+python3 tests/check_inherited_bus.py    # driver bus: echo, phản hồi muộn, deadline
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Một số test lỗi từ trước, không do thay đổi gần đây; danh sách và nguyên nhân ở
-HANDOFF (cập nhật lần cuối ngày 08/10/2026, nên hãy chạy `ctest` để biết trạng
-thái hiện tại). Các bài sim của firmware chọn bằng biến môi trường, ví dụ
-`TIER_ACCEL=1 build/host/bin/v3_tier_tests`.
+Các test trên chạy bằng mô phỏng phần mềm. Chúng không chứng minh thời gian thực
+của bus, đáp ứng cơ học của motor hay khả năng cân bằng của robot.
 
-Firmware:
+## Cấu hình thông tin riêng
+
+Ba file trong `include/gateway/` chứa mật khẩu và không được commit. Tạo từ bản mẫu:
 
 ```bash
-~/.platformio/penv/bin/pio run -e esp32-s3-v3-1840-roll  # build mặc định hiện tại
-~/.platformio/penv/bin/pio run -e esp32-s3-v3-1840-roll -t upload --upload-port /dev/ttyUSB0
+cd include/gateway
+cp WifiSecrets.example.hpp WifiSecrets.hpp          # Wi-Fi mặc định
+cp HcrWifiSecrets.example.hpp HcrWifiSecrets.hpp    # mạng LUMI (ưu tiên)
+cp OtaSecrets.example.hpp OtaSecrets.hpp            # hash khóa OTA
 ```
 
-Chỉ nạp firmware hoặc gửi lệnh động cơ khi bạn chủ động yêu cầu. Đóng GUI trước
-khi nạp; cổng hay đổi giữa `ttyUSB0` và `ttyUSB1`. Các môi trường khác trong
-`platformio.ini`: `esp32-s3-v3` (gốc), `-single-loop` (vòng lặp đơn thay cho
-task FreeRTOS), `-ap`, `-nowifi`, `-ota`, `-1840-addwifi`, `-1840-hip`.
+Khóa OTA phía laptop nằm ở `.local/hybrid_ota.json`. Thiếu các file này vẫn build
+được nhưng bản build không có Wi-Fi và OTA.
 
-## Điều khiển robot và log
+## Vận hành
+
+Console (TCP 8023, `nc <ip> 8023`, `HELP` để xem lệnh): `STATUS`, `CAL_IMU`,
+`MOTOR_HOME`, `MOTOR_ZERO`, `CLEAR_FAULT`, `ESTOP`, `MOTOR_BUS_TEST`.
+ARM, DISARM, RESET và VELOCITY không đi qua ESP32: chúng được gửi tới LF.
+
+Trình tự trước khi ARM (sau mỗi lần ESP32 reset phải làm lại):
+
+1. `CAL_IMU` khi robot được giữ hoàn toàn yên, để đo bias gyro.
+2. `CLEAR_FAULT` nếu còn lỗi cục bộ (lệnh này xóa cả home).
+3. `MOTOR_HOME` khi hai chân đã ở tư thế home.
+4. `RESET` trên LF để thoát FAULT, rồi ARM từ GUI của LF.
+
+Nạp qua Wi-Fi:
 
 ```bash
-python3 gui/robot_gui.py --port tcp://10.10.60.68:8023
-# Hoặc USB: python3 gui/robot_gui.py --port /dev/ttyUSB0
+python3 tools/ota_upload.py --status --host <ip>          # chỉ đọc trạng thái
+python3 tools/ota_upload.py --build --host <ip>           # build, kiểm, rồi nạp
 ```
 
-GUI gửi `START`, `GO`, `DRIVE`, `HMOVE`, `MOVE`, `TURN`, `DISABLE`, `ESTOP`,
-`SET`, `GET`, `REC` qua cổng nối tiếp (921600 baud) hoặc TCP và ghi mọi dòng vào
-`~/tap_logs/`. Mở cổng nối tiếp làm ESP32 reset và mất mọi `SET` đang chạy.
-Phân tích log: `tools/tr_rest_stats.py`, `tools/hip_chatter_stats.py`,
-`tools/hf_vibration_stats.py`. Tham chiếu lệnh, khoá `SET` và trường log:
-[`controller/v3/FIRMWARE_V3.md`](controller/v3/FIRMWARE_V3.md).
+Công cụ từ chối nạp khi robot đang ARM hoặc motor chưa xác nhận OFF.
 
-## Mô phỏng MuJoCo native
+## Giới hạn và vấn đề đã biết
 
-Cần MuJoCo 3 (`pip install mujoco` hoặc đặt `MUJOCO_ROOT`):
+- Bias IMU và zero home chỉ nằm trong RAM, mất khi ESP32 reset. Bản có lưu bias vào NVS
+  đã viết và qua test host, **chưa được nạp lên robot**.
+- Bản đang chạy trên robot không nhận được OTA (báo `Aborted`, `error=4` ở bước kết thúc,
+  kể cả khi nạp lại chính nó), nên lần nạp tiếp theo phải bằng USB. Xem
+  [docs/validation-bus-recovery.md](docs/validation-bus-recovery.md).
+- Một lỗi bus hoặc lỗi feedback bị latch cho tới `CLEAR_FAULT` (và làm mất home). Hai bus từng
+  mất phản hồi luân phiên, nghi do nguồn hoặc đầu nối. Phân tích trong
+  [docs/validation-bus-recovery.md](docs/validation-bus-recovery.md).
+- Chưa ARM, chưa chạy chuyển động và chưa kiểm đáp ứng motor trên robot trong các đợt tích hợp.
 
-```bash
-cmake -S . -B build/simulation -DBUILD_TESTING=ON -DTAP_BUILD_SIMULATOR=ON
-cmake --build build/simulation -j4
-build/simulation/bin/tap_mujoco_gim_v3 --model simulation/model/gim_dynamic.xml --run-for 5
-python3 gui/simulator_gui.py --rate 3000
-```
+## Tài liệu
 
-GUI tìm `tap_mujoco_gim_v3` trong `build/simulation/bin`, `build/native/bin` hoặc
-`build/bin`, và nạp `simulation/model/gim_dynamic.xml`; đặt `TAP_SIM_MODEL=<xml>`
-để dùng model khác (ví dụ địa hình gồ ghề từ `tools/build_rough_terrain.py`).
-Runner có thêm tuỳ chọn `--wheel-delay`, `--wheel-lag`, `--sensor-noise`,
-`--control`, `--realtime`. Hướng dẫn runtime: [`docs/NATIVE_RUNTIME.md`](docs/NATIVE_RUNTIME.md)
-(tài liệu đó còn mô tả runner cũ).
-
-Lưu ý còn tồn tại từ model cũ:
-
-- `tap_mujoco_native` và các bài `simulation/tests/native_*_test.py` trong
-  `simulation/CMakeLists.txt` vẫn trỏ tới `tap_robot.xml`. Model này cần các STL
-  `body_detail_*.stl` mà repo không còn, nên nó không nạp được. Đừng dùng nó
-  làm bằng chứng cho robot hiện tại.
-- Mô-men bánh mô phỏng bị chặn ở ±0,13 N·m theo `ctrlrange` của `gim_dynamic.xml`
-  (runner có chế độ what-if để mở rộng). Đây là giới hạn của model, chưa được đối
-  chiếu với BL4012 trên robot.
-
-## Mức bằng chứng
-
-Phải báo cáo riêng từng mức: kiểm tra source/model, build, unit/contract test,
-sim phẳng của firmware, sim MuJoCo/GUI, log robot thật. Không mức nào tự chứng
-nhận khả năng của robot thật; hiển thị GUI đúng cũng không chứng minh ước
-lượng hay cân bằng.
+| File | Nội dung |
+|---|---|
+| [docs/overview.md](docs/overview.md) | Tổng quan tầng dưới, UART, console, luồng chạy, bring-up |
+| [docs/hcr1-protocol.md](docs/hcr1-protocol.md) | Giao thức HCR1 giữa LF và ESP32 |
+| [docs/motor-integration.md](docs/motor-integration.md) | Luồng motor, mapping, gain, quy trình zero |
+| [docs/ota.md](docs/ota.md) | Nạp firmware qua Wi-Fi |
+| [docs/audit-data-flow.md](docs/audit-data-flow.md) | Đối chiếu luồng dữ liệu theo mã nguồn |
+| [docs/validation-gateway.md](docs/validation-gateway.md) | Kết quả kiểm chứng gateway |
+| [docs/validation-bus-recovery.md](docs/validation-bus-recovery.md) | Phục hồi bus, các lần OTA lỗi |
+| [docs/validation-bl4012e-reuse.md](docs/validation-bl4012e-reuse.md) | Kiểm chứng việc tái dùng driver BL4012e |
+| [drivers/bl4012e/PROVENANCE.md](drivers/bl4012e/PROVENANCE.md) | Nguồn gốc và thay đổi của driver bus |

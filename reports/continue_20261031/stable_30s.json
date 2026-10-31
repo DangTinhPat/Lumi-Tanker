@@ -1,0 +1,23 @@
+{
+  "seconds": 30,
+  "hcr_samples": 30,
+  "motor_samples": 60,
+  "imu_valid_final": "1",
+  "motor_configured_all": true,
+  "motor_fault_max": 1,
+  "motor_bus_errors_max": 1,
+  "crc_max": 0,
+  "queue_err_max": 0,
+  "armed_any": false,
+  "uart_diag_last": {
+    "stale_tx": "0",
+    "rx_queue_full": "0",
+    "tx_queue_full": "0",
+    "sent_queue_full": "0",
+    "pump_gap_max_us": "6937"
+  },
+  "targets_first_last": [
+    "5159",
+    "10957"
+  ]
+}

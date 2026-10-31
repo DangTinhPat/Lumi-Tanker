@@ -1,0 +1,15 @@
+START TX GPIO1_B2 UART2_M1 /dev/ttyS2 921600 8N1 HELLO 10Hz for 60s
+serinfo:1.0 driver revision:
+1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1289 rx:711 RTS|CTS|DTR
+2: uart:16550A mmio:0xFF4C0000 irq:37 tx:360 rx:396 RTS|DTR
+
+{"sent_packets": 100, "tx_bytes": 3600, "rx_bytes": 720, "rx_types": {"1": 20}, "crc_errors": 0}
+{"sent_packets": 200, "tx_bytes": 7200, "rx_bytes": 1476, "rx_types": {"1": 41}, "crc_errors": 0}
+{"sent_packets": 300, "tx_bytes": 10800, "rx_bytes": 2232, "rx_types": {"1": 62}, "crc_errors": 0}
+{"sent_packets": 400, "tx_bytes": 14400, "rx_bytes": 2988, "rx_types": {"1": 83}, "crc_errors": 0}
+{"sent_packets": 500, "tx_bytes": 18000, "rx_bytes": 3744, "rx_types": {"1": 104}, "crc_errors": 0}
+DONE {"sent_packets": 576, "tx_bytes": 20736, "rx_bytes": 4320, "rx_types": {"1": 120}, "crc_errors": 0, "enabled_targets_sent": 0}
+serinfo:1.0 driver revision:
+1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1289 rx:711 RTS|CTS|DTR
+2: uart:16550A mmio:0xFF4C0000 irq:37 tx:21096 rx:4716 RTS|DTR
+

@@ -1,0 +1,20 @@
+{
+  "pre_motion_status.txt": "fe7e1d492f54e6d0194eec9bf29eb1484240abbfc51eca37ee9922da7d5f5047",
+  "wave_motion_decoded.json": "09fab6f0bbca391a39e8914f2ba9037a84428f23118c11bd02abc8162f12af7c",
+  "motion_console.txt": "69a1423de7dc1263af4829f17b8979fa822fd08db399bbed453e90adb090dc57",
+  "build.log": "17b0c3629eedea7a3c0ba09fc4c6294056e026f92327a5bbd474c16b1fefa60a",
+  "wave_off_decoded.json": "761b207a4ab89674fd77008fb90b947e64ca0245b41a44962f382bb17bcdbafc",
+  "cal_imu.txt": "a75cce586560ca081dccc3a4464e4a50159c9444cbfea12e53850cfece9f229d",
+  "lf_pre_cal.json": "d6d73a7d11446ae0ffb56f4a3d0fec1dbb214834b547a3c3873b35431d0e7fb1",
+  "RESULTS.md": "1610ed3a7a1583f76869b435765fb9108d9ca68af16ecb4ca2725664124e8d45",
+  "idf_v4.4.7_uart_hal.c": "cab1847f3a3b0c6066dc1bd584da1917dbf148afd313f91351c70f77dcc93b68",
+  "idf_v4.4.7_rmt.c": "296168565bec32bc59ac25578c913165218c5ee45b42d9f64d6d6a8f9c237df6",
+  "idf_v4.4.7_uart.c": "bd3dc562dd597d04ef2702915b2a9e1096483127e008f1e053c6eee4426b6be6",
+  "ota.log": "45cddf7f9022aaeb4e2613891d0de4bc0f0ae0857375266cb01cdc9e9da60aa0",
+  "wave_motion.txt": "fcb7f61bd4e81b42c58d83d504200aa55b5e5f1455db67076247b5d1cd399ffb",
+  "lf_pre_motion.json": "e243c3c421bba8b191c4dc5367f714625239732a2d11d6d1624c00cc03fc2834",
+  "lf_final.json": "5caa04b7e2ad997bb90a6300f78ecff4289dcfdd3a58ffce5d9db029712947bb",
+  "motion_lf.log": "69f395b35e9394b873757b24680d5f16afa3de537632bc4a4ceef7f3e4e63665",
+  "motor_home.txt": "3ea6ee6c28bd5841fe5adbcaf0c00fd3bc8ebc3bc2f1f23408e793e5a077207c",
+  "wave_off.txt": "1d02dc2452642db9549f29141628b09f46447b579d4e16693e426ea355963ee0"
+}

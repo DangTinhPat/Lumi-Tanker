@@ -1,0 +1,24 @@
+{
+  "port": "/dev/ttyUSB0",
+  "flash_written": false,
+  "checks": [
+    {
+      "reset": "ClassicReset",
+      "baud": 115200,
+      "boot_log": "ESP-ROM:esp32s3-20210327\r\nBuild:Mar 27 2021\r\nrst:0x1 (POWERON),boot:0x20 (DOWNLOAD(USB/UART0))\r\nwaiting for download\r\n",
+      "sync_bytes_written": 138,
+      "sync_reply_bytes": 0,
+      "reply_hex": "",
+      "output_pending": 0
+    },
+    {
+      "reset": "UnixTightReset",
+      "baud": 115200,
+      "boot_log": "ESP-ROM:esp32s3-20210327\r\nBuild:Mar 27 2021\r\nrst:0x1 (POWERON),boot:0x20 (DOWNLOAD(USB/UART0))\r\nwaiting for download\r\n",
+      "sync_bytes_written": 138,
+      "sync_reply_bytes": 0,
+      "reply_hex": "",
+      "output_pending": 0
+    }
+  ]
+}

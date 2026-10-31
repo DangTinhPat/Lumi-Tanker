@@ -1,0 +1,51 @@
+{
+  "HCR": {
+    "uart": "1",
+    "tx": "43",
+    "rx": "44",
+    "baud": "921600",
+    "link": "0",
+    "epoch": "0",
+    "armed": "0",
+    "enabled": "0",
+    "motors": "0",
+    "flags": "0x40",
+    "lf_mode": "0",
+    "lf_fault": "0",
+    "local_fault": "3",
+    "targets": "0",
+    "applied": "0",
+    "rejected": "0",
+    "crc": "0",
+    "queue_err": "0",
+    "imu_age_ms": "0",
+    "report_age_ms": "33",
+    "gravity": "[0.0000",
+    "tick_max_us": "406",
+    "missed": "672",
+    "cmd": "0",
+    "result": "0"
+  },
+  "OTA": {
+    "supported": "1",
+    "maintenance": "1",
+    "off_confirmed": "1",
+    "ready": "1",
+    "port": "3232",
+    "uploading": "0",
+    "progress": "0",
+    "error": "4",
+    "running": "app0",
+    "next": "app1",
+    "elf_sha256": "6819ec8f86c6c058acb0a150abbbacb70d8d3e05562575359342840778125f93",
+    "build": "Oct"
+  },
+  "NET": {
+    "connected": "1",
+    "ssid": "LUMI",
+    "ip": "10.10.61.85",
+    "mac": "70:04:1D:A8:CA:FC",
+    "hostname": "lf-mcu.local",
+    "rssi": "-47"
+  }
+}

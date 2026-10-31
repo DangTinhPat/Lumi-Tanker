@@ -1,0 +1,998 @@
+--- before/.gitignore
++++ after/.gitignore
+@@ -20,4 +20,5 @@
+ 
+ firmware/esp32/include/tap_hw/WifiSecrets.hpp
+ firmware/esp32/include/tap_hw/OtaSecrets.hpp
++firmware/esp32/include/tap_hw/HcrWifiSecrets.hpp
+ .local/hybrid_ota.json
+--- before/firmware/esp32/HCR1_PROTOCOL.md
++++ after/firmware/esp32/HCR1_PROTOCOL.md
+@@ -54,6 +54,8 @@
+    bus/driver hoặc vòng điều khiển motor vật lý đạt 2000 Hz.
+ 6. Khi LF báo lỗi hoặc hết TTL, ESP32 bỏ enable theo cơ chế an toàn phần cứng.
+    RESET tạo epoch mới, bắt tay lại, ARM lại. Lỗi được latch, DISARM không xóa lỗi.
++   E-stop/lỗi driver cục bộ trên ESP cần CLEAR_FAULT sau verified OFF; epoch
++   mới không tự xóa hai lỗi này.
+ 
+ LF giữ home 3 s; chạy logic từ 3 s; warm-up model từ 12.5 s; bàn giao từ 13 s
+ khi logic đã `Support` và đã có ít nhất 50 lượt warm-up. GRU không reset khi bàn giao.
+--- before/firmware/esp32/HYBRID_MCU.md
++++ after/firmware/esp32/HYBRID_MCU.md
+@@ -3,7 +3,7 @@
+ Bản build `esp32-s3-hybrid-mcu` chạy IMU, ước lượng vector trọng lực, HCR1 qua
+ UART0, console USB native/Wi-Fi và backend BL4012e thật: `BlMotorBackend` cùng
+ hai worker bus UART2/GPIO15 (trái), UART1/GPIO17 (phải). Đã build/test phần mềm;
+-chưa flash hoặc vận hành robot. Manual home và feedback hợp lệ là điều kiện ARM.
++đã flash bản trước và đo UART hai chiều; xem báo cáo sửa 2026-10-31 cho bản mới. Manual home và feedback hợp lệ là điều kiện ARM.
+ Chi tiết ở [MOTOR_INTEGRATION.md](MOTOR_INTEGRATION.md).
+ 
+ Logic đứng dậy, model và quyết định chuyển pha nằm trên LF. Bản build này không
+@@ -37,7 +37,9 @@
+ - Wi-Fi TCP port **8023**, hostname `lf-mcu.local`; discovery UDP port **8024**.
+ - USB **native** GPIO19/20 nếu board có đưa ra cổng. Cổng USB nối CP2102 không
+   còn là console của bản build này.
+-- Wi-Fi dùng `include/tap_hw/WifiSecrets.hpp` (git-ignored), như bản nháp;
++- Bản hybrid triển khai dùng `include/tap_hw/HcrWifiSecrets.hpp` để chọn LUMI,
++  ưu tiên tuyệt đối trước các mạng legacy. Khi không có file này, Wi-Fi dùng
++  `include/tap_hw/WifiSecrets.hpp` (git-ignored), như bản nháp;
+   hỗ trợ primary/ALT/ALT2, ALT2 ưu tiên cao nhất khi thấy lúc boot. File cấu hình
+   local được sao chép từ workspace Lumi-Tanker; không đưa mật khẩu vào tài liệu.
+   Nếu clone mới, chép `WifiSecrets.example.hpp` thành `WifiSecrets.hpp` và cấu hình.
+@@ -46,7 +48,7 @@
+ |---|---|
+ | `STATUS` / `GET` | Link/epoch, validity, mode/fault LF, local fault, bộ đếm và gravity |
+ | `HELP` | Danh sách lệnh |
+-| `CAL_IMU` | Hiệu chuẩn lại khi disarmed; giữ IMU yên ít nhất 0,5 s |
++| `CAL_IMU` | Hiệu chuẩn lại khi disarmed; verified OFF, giữ IMU hoàn toàn yên để thu ít nhất 500 mẫu và 1 s ổn định |
+ | `MOTOR_HOME` | Chụp zero ở tư thế home model khi OFF và đứng yên; không làm motor di chuyển |
+ | `MOTOR_ZERO hipL hipR kneeL kneeR` | Chụp zero tại tư thế model đã đo, đơn vị rad |
+ | `ESTOP` | Latch E-stop cục bộ; LF nhận cờ E-stop trong telemetry |
+@@ -57,9 +59,9 @@
+ pha HOME khi telemetry và home hợp lệ. ESP vẫn lặp lại kiểm tra driver, cảm biến,
+ tư thế home trước khi nhận TARGET bật đầu tiên.
+ 
+-Lệnh vận tốc hết hạn 500 ms tự gửi `(0,0)`. ARM bị từ chối khi chưa có động cơ;
+-`cmd=1 result=2` trong STATUS nghĩa là yêu cầu ARM đã bị từ chối. `result=1`
+-chỉ là MCU chấp nhận/gửi yêu cầu; xem `lf_mode` để biết LF đã chấp nhận chưa.
++Lệnh vận tốc trên LF hết hạn 500 ms tự gửi `(0,0)`. Trên ESP, cmd/result
++chỉ báo lệnh cục bộ: 100 ESTOP, 101 CAL_IMU, 102 MOTOR_HOME/ZERO,
++103 CLEAR_FAULT; result=1 chấp nhận, 2 từ chối. Không có ARM console trên ESP.
+ 
+ ## 2. Tổ chức firmware
+ 
+@@ -104,7 +106,7 @@
+ 
+ Motor nhận hip/crank target tuyệt đối; feedback knee hinge=`phi-hip`. Crank
+ velocity FF=hip FF+knee FF. Wheel rad/s đổi sang RPM có sign. Gain mặc định
+-10/.7 theo GUI và tách theo HOME/RECOVERY/POLICY; nếu vượt gain max driver thì
++10/.120 theo giới hạn hip đã đọc và tách theo HOME/RECOVERY/POLICY; nếu vượt gain max driver thì
+ fault, không tự kẹp. Chưa có torque feedback thật nên TORQUE_VALID luôn clear.
+ 
+ Home LF là `[2.35706715,2.35706715,0,0]` rad (hipL/R,kneeL/R); cả MCU và LF
+@@ -180,4 +182,21 @@
+ Công cụ UART peer cũng được chạy qua pseudoterminal trên máy tính: nhận telemetry
+ và chỉ trả TARGET DISABLED, không dùng cổng serial phần cứng.
+ 
+-Chưa nạp board hoặc đo UART/IMU trên phần cứng trong lượt triển khai này.
++Đã nạp USB và thử OTA trên LUMI ngày 2026-10-31, xác minh firmware sau reboot.
++UART hai chiều đã đo ở bản trước; lần nạp này chưa kiểm lại LF. Lỗi bus motor
++và hiệu chuẩn IMU/home vẫn cần xử lý; xem reports/fix_20261031/RESULTS.md.
++
++## Hiệu chuẩn IMU và OTA (2026-10-31)
++
++Boot giữ ngưỡng gyro <.20 rad/s. CAL_IMU thủ công cho phép norm <.35 rad/s
++để hiệu chuẩn bias đo được Y≈-.2201 rad/s. Cần accel gần 1g ±.8 m/s²; thay
++đổi mỗi trục so mẫu đầu ≤.20 m/s² accel và ≤.025 rad/s gyro trong cả cửa sổ.
++Ngoài ngưỡng phải thu lại; NaN hoặc gap >20 ms hủy quyền hiệu chuẩn thủ công.
++`IMU_CAL` báo số mẫu, bias và gyro đã trừ bias. Sáu trục không phân biệt được
++quay yaw đều với bias: CAL_IMU là xác nhận robot đang được giữ hoàn toàn yên.
++Bias nằm trong RAM, mất sau reboot. Command accepted chưa có nghĩa calibration
++đã xong; cần imu_valid=1. Motor homing là bước riêng.
++
++E-stop và lỗi driver cục bộ không bị xóa bởi phiên LF mới; CLEAR_FAULT sau
++verified OFF mới xóa. OTA vào maintenance khóa điều khiển tới reboot và buộc
++đọc lại OFF. Hướng dẫn nạp: [OTA.md](OTA.md).
+--- before/firmware/esp32/HYBRID_MCU_VALIDATION.md
++++ after/firmware/esp32/HYBRID_MCU_VALIDATION.md
+@@ -1,6 +1,9 @@
+ # Kiểm chứng tầng dưới
+ 
+-## Tích hợp motor ngày 2026-10-30 (trạng thái mới nhất)
++Bản sửa motor/IMU/E-stop và OTA ngày 2026-10-31: xem
++[báo cáo hiện tại](../../reports/fix_20261031/RESULTS.md).
++
++## Tích hợp motor ngày 2026-10-30 (lịch sử)
+ 
+ Firmware đã dùng `BlMotorBackend`/`EspBlMotor` cho cả hai bus; LEFT UART2/GPIO15,
+ RIGHT UART1/GPIO17 theo đính chính của người dùng. Có homing thủ công, encoder
+--- before/firmware/esp32/MOTOR_INTEGRATION.md
++++ after/firmware/esp32/MOTOR_INTEGRATION.md
+@@ -3,7 +3,8 @@
+ Backend motor đã được tích hợp vào target `esp32-s3-hybrid-mcu`. App khởi tạo
+ `EspBlMotor`, hai worker bus và `BlMotorBackend`; không còn dùng
+ `UnavailableMotors` trong bản firmware này. Bản tích hợp đã được flash và bắt đầu kiểm tra kết nối, chưa kiểm chứng đáp ứng
+-chuyển động. Bản sửa gain và chẩn đoán bên dưới đã build/test, đang chờ nạp lại.
++chuyển động. Bản sửa motor/IMU/E-stop và OTA ngày 2026-10-31 đã build/test, nạp USB và
++nạp OTA thực tế thành công. Lỗi bus vật lý vẫn còn; xem báo cáo hiện tại.
+ 
+ ## Ánh xạ đã chốt
+ 
+@@ -72,9 +73,30 @@
+ tròn và wheel reference sau lọc, không sao chép mù raw target từ LF.
+ 
+ Tắt cũng bất đồng bộ: `disable()` hủy generation và yêu cầu OFF; `disabled()`
+-chỉ true sau reply OFF của cả sáu motor. Kênh bị bỏ enable không được ghi lệnh
++chỉ true sau READ thanh ghi Torque Enable `0x18` bằng 0 của cả sáu motor.
++E-stop buộc ghi/đọc lại mọi driver; disarmed kiểm lại định kỳ 100 ms. OFF là
++trạng thái thanh ghi, không phải phép đo lực cơ khí hoặc bánh quay tự do. Kênh bị bỏ enable không được ghi lệnh
+ motion; wheel applied=0, các góc giữ reference cuối đã chốt (hoặc góc đo nếu
+ chưa có reference). Không diễn giải zero của DISABLED thành góc đích 0.
++
++## Sửa tích hợp ngày 2026-10-31
++
++Boot/configure khi disarmed không ghi wheel speed, chỉ OFF và đọc feedback.
++Khi đã được phép điều khiển, nếu speed write thiếu reply thì đọc lại target
++`0x20`; RPM phải khớp mới công nhận. Echo/TX/CRC/status lỗi, readback không
++khớp hoặc timeout vẫn fault. READ present `0x24` chứng minh feedback, không
++chứng minh target đã latch. TTL 20 ms và điều kiện cả hai bus hoàn tất giữ
++nguyên; nhánh readback thêm độ trễ cần đo thực tế.
++
++`MOTOR_DIAG` tách lỗi từng bus khỏi lỗi chung. `first_fail_id/inst/addr/bus_stage`
++giữ giao dịch lỗi đầu tiên tới khi reset backend; OFF retries không ghi đè.
++Stages: 0=none/status, 1=unavailable, 2=packet, 3=TX, 4=echo timeout,
++5=echo mismatch, 6=reply timeout, 7=reply invalid, 8=readback mismatch.
++`recovered_writes` đếm mất ACK nhưng readback đúng. `enable_readback` theo
++hip/crank/wheel; 255=unknown. OFF mất ACK nhưng readback đúng có thể xuất hiện
++trong first_fail mà không latch lỗi; đối chiếu cả local_fault và off.
++
++Xem [báo cáo](../../reports/fix_20261031/RESULTS.md) cho mức kiểm chứng hiện tại.
+ 
+ ## Khởi động bánh và watchdog
+ 
+@@ -142,8 +164,9 @@
+ 3. Kiểm tra chiều/mốc feedback theo model bằng dữ liệu thật trước khi ARM.
+    Zero chỉ giữ trong RAM: reboot/mất encoder/driver fault phải hiệu chuẩn lại.
+ 4. Nếu LF đã fault vì trước đó thiếu calibration, gửi `RESET` sau home, đợi
+-   DISARMED rồi `ARM`. RESET thông thường giữ home hợp lệ; RESET sau lỗi motor
+-   xóa home và yêu cầu worker OFF/configure lại. Khi đó làm lại bước2 rồi RESET LF.
++   DISARMED rồi `ARM`. RESET thông thường giữ home hợp lệ; CLEAR_FAULT cục bộ sau lỗi motor
++   xóa home và yêu cầu worker OFF/configure lại. RESET LF không xóa E-stop/lỗi
++   driver cục bộ; CLEAR_FAULT chỉ được chấp nhận sau verified OFF. Khi đó làm lại bước2 rồi RESET LF.
+ 5. `DISARM` hoặc `ESTOP` yêu cầu OFF mọi motor. RESET không tự ARM.
+ 
+ Bằng chứng tích hợp ban đầu nằm tại `reports/motor_integration_20261030/`;
+--- before/firmware/esp32/include/tap_hw/BlMotor.hpp
++++ after/firmware/esp32/include/tap_hw/BlMotor.hpp
+@@ -18,6 +18,7 @@
+   ~MotorGuard() { lock.leave(); }
+ };
+ enum class BusFormat { Joint, Wheel };
++enum class BusError : std::uint8_t { None, Unavailable, Packet, Tx, EchoTimeout, EchoMismatch, ReplyTimeout, ReplyInvalid, ReadbackMismatch };
+ struct BusReply {
+   std::uint8_t status = 0;
+   std::int16_t position = 0;
+@@ -28,6 +29,7 @@
+  public:
+   virtual ~MotorBus() = default;
+   virtual std::uint64_t now() const noexcept = 0;
++  virtual BusError lastError() const noexcept { return BusError::Unavailable; }
+   virtual bool request(BusFormat, std::uint8_t id, std::uint8_t instruction,
+                        const std::uint8_t* params, std::size_t count,
+                        std::size_t read_count, BusReply&) noexcept = 0;
+@@ -69,7 +71,7 @@
+   std::int16_t wheel_rpm = 0;
+ };
+ struct MotorRequest {
+-  bool active = false, wheel_enable = false;
++  bool active = false, wheel_enable = false, maintenance = false;
+   std::uint32_t generation = 1, reset_generation = 0;
+   std::uint64_t lease_us = 0;
+   MotorBatch batch{};
+@@ -83,6 +85,10 @@
+   std::array<std::uint8_t,3> status{};
+   std::uint64_t completed = 0;
+   std::uint32_t transactions = 0, errors = 0, cycle_max_us = 0;
++  std::uint32_t recovered_writes = 0;
++  std::uint8_t failed_id = 0, failed_instruction = 0, failed_address = 0;
++  BusError bus_error = BusError::None;
++  std::array<std::uint8_t,3> torque_enable{{255,255,255}};
+   MotorError error = MotorError::None;
+ };
+ struct BlMotorDiagnostics {
+@@ -103,6 +109,8 @@
+   bool disabled() const noexcept override;
+   MotorFeedback feedback(std::uint64_t now) noexcept override;
+   void disable() noexcept override;
++  void emergencyStop() noexcept override;
++  void beginMaintenance() noexcept override;
+   bool resetFault() noexcept override;
+   ApplyResult apply(const HcrTarget&, std::uint32_t seq,
+                     std::uint64_t deadline, std::uint64_t now,
+@@ -128,7 +136,7 @@
+   MotorApplied completed_{}, pending_{};
+   std::uint64_t token_ = 0, applied_at_ = 0, pending_at_ = 0;
+   std::uint32_t latest_epoch_ = 0, latest_seq_ = 0;
+-  bool homed_ = false, in_flight_ = false, have_complete_ = false, have_latest_ = false;
++  bool homed_ = false, in_flight_ = false, have_complete_ = false, have_latest_ = false, maintenance_ = false;
+   MotorError error_ = MotorError::None;
+ };
+ 
+@@ -153,6 +161,7 @@
+   bool off() noexcept;
+   bool allowed(const MotorRequest&, bool batch) noexcept;
+   void fail(MotorError) noexcept;
++  void recordFailure(unsigned motor, std::uint8_t instruction, std::uint8_t address, BusError) noexcept;
+   BlMotorBackend& owner_;
+   unsigned side_;
+   MotorBus& bus_;
+@@ -161,7 +170,7 @@
+   std::array<std::int16_t,2> previous_joint_{};
+   std::uint16_t previous_wheel_ = 0;
+   std::int64_t wheel_counts_ = 0;
+-  std::uint64_t wheel_enabled_at_ = 0, last_idle_poll_ = 0, last_off_attempt_ = 0;
++  std::uint64_t wheel_enabled_at_ = 0, last_idle_poll_ = 0, last_off_attempt_ = 0, last_off_verify_ = 0;
+   bool wheel_sample_ = false, wheel_zero_verified_ = false;
+ };
+ } // namespace tap_hw::hybrid
+--- before/firmware/esp32/include/tap_hw/EspBlMotor.hpp
++++ after/firmware/esp32/include/tap_hw/EspBlMotor.hpp
+@@ -18,6 +18,7 @@
+  public:
+   bool begin(uart_port_t uart, gpio_num_t data, gpio_num_t unused_rx) noexcept;
+   std::uint64_t now() const noexcept override;
++  BusError lastError() const noexcept override { return error_; }
+   bool request(BusFormat, std::uint8_t, std::uint8_t, const std::uint8_t*,
+                std::size_t, std::size_t, BusReply&) noexcept override;
+  private:
+@@ -27,6 +28,7 @@
+   gpio_num_t pin_=GPIO_NUM_17;
+   std::uint32_t tx_signal_=0;
+   bool initialized_=false;
++  BusError error_=BusError::None;
+ };
+ class EspBlMotor {
+  public:
+--- before/firmware/esp32/include/tap_hw/HybridAttitude.hpp
++++ after/firmware/esp32/include/tap_hw/HybridAttitude.hpp
+@@ -15,6 +15,12 @@
+ class GravityEstimator {
+  public:
+   void reset() noexcept { *this = GravityEstimator{}; }
++  // Explicit operator assertion: the robot is held still. Constant yaw cannot
++  // be distinguished from bias by a six-axis IMU alone; never enable this at boot.
++  void calibrateStationary() noexcept { reset(); manual_ = true; }
++  unsigned calibrationSamples() const noexcept { return count_; }
++  bool manualCalibration() const noexcept { return manual_; }
++  const std::array<float,3>& bias() const noexcept { return bias_; }
+   ImuObservation update(const std::array<float, 3>& accel,
+                         const std::array<float, 3>& gyro,
+                         std::uint64_t now) noexcept {
+@@ -29,17 +35,26 @@
+     last_us_ = now;
+     out.accel = accel;
+     const float norm = length(accel);
+-    const bool quiet = std::abs(norm-9.80665F) < .8F && length(gyro) < .20F;
++    const bool quiet = std::abs(norm-9.80665F) < .8F && length(gyro) < (manual_ ? .35F : .20F);
+     if (!seeded_) {
+-      if (!quiet) { count_ = 0; sum_a_ = {}; sum_w_ = {}; return out; }
++      if (!quiet) { clearWindow(); return out; }
++      // Bound variation against the first sample so slow drift cannot hide
++      // behind a moving average. Applies to automatic and manual calibration.
++      if (!count_) { first_a_=accel; first_w_=gyro; started_us_=now; }
++      for (unsigned i=0;i<3;++i)
++        if (std::abs(accel[i]-first_a_[i])>.20F || std::abs(gyro[i]-first_w_[i])>.025F) {
++          clearWindow(); return out;
++        }
+       for (unsigned i = 0; i < 3; ++i) { sum_a_[i] += accel[i]; sum_w_[i] += gyro[i]; }
+-      if (++count_ < 250) return out;  // 0.5 s of fresh stationary 500 Hz samples.
++      ++count_;
++      if (count_ < (manual_ ? 500U : 250U) || now-started_us_ < (manual_ ? 998000U : 498000U))
++        return out; // fresh samples AND elapsed time, independent of call rate
+       const float n = length(sum_a_);
+       if (n < 1) { reset(); return out; }
+       for (unsigned i = 0; i < 3; ++i) {
+         g_[i] = -sum_a_[i]/n; bias_[i] = sum_w_[i]/count_;
+       }
+-      seeded_ = true;
++      seeded_ = true; manual_ = false;
+     } else {
+       std::array<float, 3> w{};
+       for (unsigned i = 0; i < 3; ++i) w[i] = gyro[i]-bias_[i];
+@@ -65,6 +80,7 @@
+     return out;
+   }
+  private:
++  void clearWindow() noexcept { count_=0; sum_a_={}; sum_w_={}; started_us_=0; }
+   static float length(const std::array<float, 3>& a) noexcept {
+     return std::sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
+   }
+@@ -72,9 +88,9 @@
+     const float n = length(g_);
+     for (auto& v : g_) v /= n;
+   }
+-  std::uint64_t last_us_ = 0;
++  std::uint64_t last_us_ = 0, started_us_ = 0;
+   unsigned count_ = 0;
+-  bool seeded_ = false;
+-  std::array<float, 3> g_{0,0,-1}, bias_{}, sum_a_{}, sum_w_{};
++  bool seeded_ = false, manual_ = false;
++  std::array<float, 3> g_{0,0,-1}, bias_{}, sum_a_{}, sum_w_{}, first_a_{}, first_w_{};
+ };
+ }  // namespace tap_hw::hybrid
+--- before/firmware/esp32/include/tap_hw/HybridGatewayCore.hpp
++++ after/firmware/esp32/include/tap_hw/HybridGatewayCore.hpp
+@@ -33,10 +33,13 @@
+   void setImu(const ImuObservation& imu) noexcept { imu_ = imu; }
+   void tick(std::uint64_t now) noexcept;
+   void stop(LocalFault reason = LocalFault::None) noexcept;
+-  void estop() noexcept { stop(LocalFault::Estop); }
++  void estop() noexcept { stop(LocalFault::Estop); motor_.emergencyStop(); }
+   bool clearLocalFault() noexcept;
+   // Sticky until reboot. No session/RESET/ARM can escape OTA maintenance.
+-  void enterMaintenance() noexcept { maintenance_ = true; stop(); }
++  void enterMaintenance() noexcept {
++    if (maintenance_) return;
++    maintenance_ = true; stop(); motor_.beginMaintenance();
++  }
+   bool maintenance() const noexcept { return maintenance_; }
+   bool maintenanceReady() const noexcept {
+     return maintenance_ && !armed_ && !enabled_ && motor_.disabled();
+--- before/firmware/esp32/include/tap_hw/HybridMotorBackend.hpp
++++ after/firmware/esp32/include/tap_hw/HybridMotorBackend.hpp
+@@ -35,6 +35,8 @@
+   // nonblocking. Bus workers must enforce the original receipt deadline even
+   // if this service task stalls. Driver-side power-loss protection is separate.
+   virtual void disable() noexcept = 0;
++  virtual void emergencyStop() noexcept { disable(); }
++  virtual void beginMaintenance() noexcept { emergencyStop(); }
+   // disable() requests cancellation; only disabled() confirms physical replies.
+   virtual bool disabled() const noexcept = 0;
+   virtual bool resetFault() noexcept { return true; }
+--- before/firmware/esp32/ota_manifest.py
++++ after/firmware/esp32/ota_manifest.py
+@@ -5,6 +5,7 @@
+ import json
+ from pathlib import Path
+ import re
++import struct
+ 
+ 
+ def manifest(source, target, env):
+@@ -12,8 +13,13 @@
+     header = Path(env.subst("$PROJECT_DIR")) / "firmware/esp32/include/tap_hw/OtaSecrets.hpp"
+     match = re.search(r'#define HCR_OTA_PASSWORD_HASH "([0-9a-f]{32})"',
+                       header.read_text() if header.exists() else "")
+-    record = {"environment": env.subst("$PIOENV"), "bytes": binary.stat().st_size,
+-              "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
++    data = binary.read_bytes()
++    # ESP image header (24 B), first segment header (8 B), esp_app_desc_t.
++    if len(data) < 288 or data[0] != 0xe9 or struct.unpack_from('<I',data,32)[0] != 0xabcd5432:
++        raise RuntimeError('Missing ESP application descriptor; cannot identify OTA image')
++    record = {"environment": env.subst("$PIOENV"), "bytes": len(data),
++              "sha256": hashlib.sha256(data).hexdigest(),
++              "elf_sha256": data[176:208].hex(),
+               "ota_auth_hash": match.group(1) if match else None}
+     binary.with_suffix(".ota.json").write_text(json.dumps(record, indent=2) + "\n")
+ 
+--- before/firmware/esp32/src/BlMotor.cpp
++++ after/firmware/esp32/src/BlMotor.cpp
+@@ -75,7 +75,7 @@
+ }
+ bool BlMotorBackend::ready() const noexcept {
+   MotorGuard guard(lock_);
+-  return homed_ && error_==MotorError::None && state_[0].configured && state_[1].configured;
++  return !maintenance_ && homed_ && error_==MotorError::None && state_[0].configured && state_[1].configured;
+ }
+ bool BlMotorBackend::disabled() const noexcept {
+   MotorGuard guard(lock_);
+@@ -107,8 +107,20 @@
+   in_flight_=have_complete_=have_latest_=false; applied_at_=0;
+ }
+ void BlMotorBackend::disable() noexcept { MotorGuard guard(lock_); cancel(); }
++void BlMotorBackend::emergencyStop() noexcept {
++  MotorGuard guard(lock_); cancel();
++  // A new explicit E-stop rechecks all drivers even if our cached state is OFF.
++  for (auto& r:request_) ++r.generation;
++}
++void BlMotorBackend::beginMaintenance() noexcept {
++  MotorGuard guard(lock_);
++  if (maintenance_) return;
++  cancel(); maintenance_=true;
++  for (auto& r:request_) { r.maintenance=true; ++r.generation; }
++}
+ bool BlMotorBackend::resetFault() noexcept {
+   MotorGuard guard(lock_); cancel();
++  if (maintenance_) return false;
+   if (!validMotorConfig(config_)) return false;
+   if (error_==MotorError::None) return true; // LF RESET must not erase a good manual home
+   error_=MotorError::None; homed_=false;
+@@ -132,7 +144,7 @@
+ }
+ bool BlMotorBackend::captureHome(const std::array<float,4>& q, std::uint64_t now) noexcept {
+   MotorGuard guard(lock_);
+-  if (request_[0].active || request_[1].active || error_!=MotorError::None ||
++  if (maintenance_ || request_[0].active || request_[1].active || error_!=MotorError::None ||
+       !state_[0].off || !state_[1].off ||
+       state_[0].generation!=request_[0].generation ||
+       state_[1].generation!=request_[1].generation || !sensorsFresh(now)) return false;
+@@ -203,6 +215,7 @@
+                                    std::uint64_t deadline, std::uint64_t now,
+                                    MotorApplied& out) noexcept {
+   MotorGuard guard(lock_);
++  if (maintenance_) { cancel(); return ApplyResult::Fault; }
+   if (error_!=MotorError::None || !homed_ || !sensorsFresh(now) || now>=deadline) {
+     if (error_==MotorError::None) error_=now>=deadline?MotorError::Expired:MotorError::Feedback;
+     cancel(); return ApplyResult::Fault;
+@@ -235,6 +248,12 @@
+ void BlMotorWorker::fail(MotorError e) noexcept {
+   if (state_.error==MotorError::None) state_.error=e;
+   state_.prepared=false; ++state_.errors; owner_.trip(e);
++}
++void BlMotorWorker::recordFailure(unsigned j, std::uint8_t inst, std::uint8_t addr, BusError error) noexcept {
++  // Preserve the first failed transaction; OFF retries must not obscure it.
++  if (state_.failed_id) return;
++  state_.failed_id=owner_.config().id[j]; state_.failed_instruction=inst;
++  state_.failed_address=addr; state_.bus_error=error;
+ }
+ void BlMotorWorker::jointSample(unsigned j, const BusReply& r) noexcept {
+   const auto now=bus_.now();
+@@ -254,36 +273,62 @@
+   BusReply reply{}; ++state_.transactions;
+   if (!bus_.request(j==2?BusFormat::Wheel:BusFormat::Joint,
+                     owner_.config().id[j],inst,p,n,read,reply)) {
++    recordFailure(j,inst,n?p[0]:0,bus_.lastError());
+     fail(MotorError::Bus); return false;
+   }
+   state_.status[j]=reply.status;
+-  if (reply.status) { fail(MotorError::Status); return false; }
++  if (reply.status) { recordFailure(j,inst,n?p[0]:0,BusError::None); fail(MotorError::Status); return false; }
+   if (j<2) jointSample(j,reply);
+   if (out) *out=reply;
+   return state_.error==MotorError::None;
+ }
+ bool BlMotorWorker::torque(unsigned j, bool enable) noexcept {
+   const std::uint8_t p[2]={0x18,static_cast<std::uint8_t>(enable)};
+-  // OFF must still work after a latched fault. Don't hide nonzero status, but
+-  // a valid OFF reply confirms the disable write even while reporting a fault.
++  // OFF works after a latched fault. Verify the actual enable register rather
++  // than treating a transmitted packet or a write ACK as physical release.
+   if (!enable) {
+-    BusReply reply{}; ++state_.transactions;
+-    const bool ok=bus_.request(j==2?BusFormat::Wheel:BusFormat::Joint,
+-                              owner_.config().id[j],3,p,2,0,reply);
+-    if (ok) { on_[j]=false; state_.status[j]=reply.status; }
+-    else { ++state_.errors; owner_.trip(MotorError::Bus); }
+-    return ok;
++    BusReply reply{}; const auto fmt=j==2?BusFormat::Wheel:BusFormat::Joint;
++    const auto id=owner_.config().id[j]; ++state_.transactions;
++    const bool wrote=bus_.request(fmt,id,3,p,2,0,reply);
++    if (!wrote) recordFailure(j,3,0x18,bus_.lastError());
++    const std::uint8_t read[2]={0x18,1}; ++state_.transactions;
++    const bool read_ok=bus_.request(fmt,id,2,read,2,1,reply);
++    state_.torque_enable[j]=read_ok?reply.data[0]:255;
++    if (read_ok) state_.status[j]=reply.status;
++    if (read_ok && !reply.data[0]) { on_[j]=false; return true; }
++    on_[j]=true;
++    recordFailure(j,2,0x18,read_ok?BusError::ReadbackMismatch:bus_.lastError());
++    fail(read_ok?MotorError::Configuration:MotorError::Bus); return false;
+   }
+   on_[j]=true; // an unacknowledged enable may still have reached the driver
++  state_.torque_enable[j]=255;
+   return transact(j,3,p,2);
+ }
+ bool BlMotorWorker::wheelSpeed(std::int16_t rpm) noexcept {
+-  std::uint8_t p[3]={0x20,0,0}; put(p+1,rpm); return transact(2,3,p,3);
++  std::uint8_t p[3]={0x20,0,0}; put(p+1,rpm);
++  BusReply reply{}; ++state_.transactions;
++  if (bus_.request(BusFormat::Wheel,owner_.config().id[2],3,p,3,0,reply)) {
++    state_.status[2]=reply.status;
++    if (reply.status) { recordFailure(2,3,0x20,BusError::None); fail(MotorError::Status); return false; }
++    return true;
++  }
++  const auto error=bus_.lastError();
++  // BL4012e does not require a speed-write ACK. HCR additionally requires
++  // evidence of the latched target: only a missing reply may use readback.
++  if (error!=BusError::ReplyTimeout) {
++    recordFailure(2,3,0x20,error); fail(MotorError::Bus); return false;
++  }
++  const std::uint8_t read[2]={0x20,2};
++  if (!transact(2,2,read,2,2,&reply)) return false;
++  if (static_cast<std::int16_t>(u16(reply.data.data()))!=rpm) {
++    recordFailure(2,2,0x20,BusError::ReadbackMismatch); fail(MotorError::Configuration); return false;
++  }
++  ++state_.recovered_writes; return true;
+ }
+ bool BlMotorWorker::verifyWheelZero() noexcept {
+   const std::uint8_t p[2]={0x20,2}; BusReply r{};
+   if (!transact(2,2,p,2,2,&r)) return false;
+-  if (u16(r.data.data())!=0) { fail(MotorError::Configuration); return false; }
++  if (u16(r.data.data())!=0) { recordFailure(2,2,0x20,BusError::ReadbackMismatch); fail(MotorError::Configuration); return false; }
+   wheel_zero_verified_=true; return true;
+ }
+ bool BlMotorWorker::wheelRead() noexcept {
+@@ -312,6 +357,7 @@
+   // Wheel first; every motor is attempted even when the first one is absent.
+   for (unsigned j:{2U,0U,1U}) if (on_[j] && !torque(j,false)) ok=false;
+   state_.off=ok && !on_[0] && !on_[1] && !on_[2];
++  if (state_.off) last_off_verify_=bus_.now();
+   return state_.off;
+ }
+ bool BlMotorWorker::configure() noexcept {
+@@ -329,7 +375,8 @@
+       }
+     if (!transact(j,3,mode,2)) return false;
+   }
+-  if (!wheelSpeed(0) || !wheelRead()) return false;
++  // Like the bench: disarmed setup only reads the wheel, never writes speed.
++  if (!wheelRead()) return false;
+   state_.configured=true; return true;
+ }
+ bool BlMotorWorker::poll(const MotorRequest* active) noexcept {
+@@ -355,13 +402,18 @@
+     state_={}; state_.reset_generation=r.reset_generation;
+     on_={true,true,true}; wheel_sample_=false; wheel_enabled_at_=0; wheel_zero_verified_=false;
+   }
++  if (!r.active && state_.generation!=r.generation) { on_={true,true,true}; state_.off=false; }
+   state_.generation=r.generation;
+   if (!r.active) {
++    // Detect a driver reboot/external enable even when cached OFF was true.
++    if (!r.maintenance && state_.off && started-last_off_verify_>=100000) { on_={true,true,true}; state_.off=false; }
+     if ((!state_.off || on_[0] || on_[1] || on_[2]) &&
+         (!last_off_attempt_ || started-last_off_attempt_>=1000)) {
+       off(); last_off_attempt_=started;
+     }
+-    if (state_.error==MotorError::None) {
++    // Once maintenance OFF is verified, stop all bus traffic during flash
++    // writes. The backend's sticky latch rejects apply/reset until reboot.
++    if (!r.maintenance && state_.error==MotorError::None) {
+       if (!state_.configured) configure();
+       else if (started-last_idle_poll_>=3000) { poll(); last_idle_poll_=started; }
+     }
+@@ -397,7 +449,7 @@
+           std::uint8_t p[11]={0x1a}; std::memcpy(p+1,r.batch.joint[j].data(),10);
+           // A full MIT block auto-enables the joint. Mark unknown/on BEFORE
+           // writing, so timeout/CRC failure still causes an OFF attempt.
+-          on_[j]=true; ok=transact(j,3,p,11);
++          on_[j]=true; state_.torque_enable[j]=255; ok=transact(j,3,p,11);
+         } else if (on_[j]) ok=torque(j,false);
+       }
+       if (ok && allowed(r,true)) {
+@@ -414,6 +466,7 @@
+   // Cancellation may arrive during any bus wait; disable before publishing.
+   const auto after=owner_.request(side_);
+   if (!after.active || after.generation!=r.generation || state_.error!=MotorError::None) {
++    if (after.generation!=r.generation) on_={true,true,true};
+     if (on_[0] || on_[1] || on_[2]) off();
+     state_.prepared=false; state_.generation=after.generation;
+   }
+--- before/firmware/esp32/src/EspBlMotor.cpp
++++ after/firmware/esp32/src/EspBlMotor.cpp
+@@ -43,10 +43,11 @@
+ bool EspMotorBus::request(BusFormat fmt, std::uint8_t id, std::uint8_t inst,
+                            const std::uint8_t* p, std::size_t n,
+                            std::size_t reads, BusReply& reply) noexcept {
+-  if (!initialized_ || reads>reply.data.size()) return false;
++  error_=BusError::None;
++  if (!initialized_ || reads>reply.data.size()) { error_=BusError::Unavailable; return false; }
+   std::array<std::uint8_t,48> tx{}, echo{}, rx{};
+   const auto length=motorPacket(id,inst,p,n,tx);
+-  if (!length) return false;
++  if (!length) { error_=BusError::Packet; return false; }
+   // A single overall budget prevents partial reads from repeatedly renewing
+   // the timeout. At 1 Mbaud even the largest supported TX takes < 0.5 ms.
+   const auto deadline=now()+(fmt==BusFormat::Wheel?8000:4000);
+@@ -55,11 +56,15 @@
+   const int sent=uart_write_bytes(uart_,tx.data(),length);
+   const auto done=uart_wait_tx_done(uart_,pdMS_TO_TICKS(2));
+   release(); // always release the one-wire pad, including failure paths
+-  if (sent!=static_cast<int>(length) || done!=ESP_OK ||
+-      !readExact(echo.data(),length,deadline) || std::memcmp(echo.data(),tx.data(),length)) return false;
++  if (sent!=static_cast<int>(length) || done!=ESP_OK) { error_=BusError::Tx; return false; }
++  if (!readExact(echo.data(),length,deadline)) { error_=BusError::EchoTimeout; return false; }
++  if (std::memcmp(echo.data(),tx.data(),length)) { error_=BusError::EchoMismatch; return false; }
+   const auto count=(fmt==BusFormat::Wheel?9U:11U)+reads;
+-  if (!readExact(rx.data(),count,deadline)) return false;
+-  return motorReply(fmt,id,inst,n?p[0]:0,tx[3],rx.data(),count,reads,reply);
++  if (!readExact(rx.data(),count,deadline)) { error_=BusError::ReplyTimeout; return false; }
++  if (!motorReply(fmt,id,inst,n?p[0]:0,tx[3],rx.data(),count,reads,reply)) {
++    error_=BusError::ReplyInvalid; return false;
++  }
++  return true;
+ }
+ void EspBlMotor::workerTask(void* arg) {
+   auto& worker=*static_cast<BlMotorWorker*>(arg);
+--- before/firmware/esp32/src/HybridGatewayApp.cpp
++++ after/firmware/esp32/src/HybridGatewayApp.cpp
+@@ -18,6 +18,9 @@
+ #include "tap_hw/Mpu6500Spi.hpp"
+ #include "tap_hw/HybridGatewayCore.hpp"
+ #include "tap_hw/EspBlMotor.hpp"
++#if __has_include("tap_hw/HcrWifiSecrets.hpp")
++#include "tap_hw/HcrWifiSecrets.hpp"
++#endif
+ #if __has_include("tap_hw/OtaSecrets.hpp")
+ #include "tap_hw/OtaSecrets.hpp"
+ #endif
+@@ -62,6 +65,9 @@
+   ImuObservation imu{};
+   BlMotorDiagnostics motor{};
+   std::array<float,3> raw_gyro{};
++  std::array<float,3> gyro_bias{};
++  unsigned calibration_samples = 0;
++  bool calibration_manual = false;
+   std::uint32_t imu_samples = 0;
+   std::uint8_t imu_id = 0;
+   std::uint32_t service_max_us = 0, missed_ticks = 0, command_result = 0, command_op = 0;
+@@ -156,8 +162,8 @@
+         report.command_result = !core.diagnostics(now).armed &&
+             motors.captureHome(command.pose,now) ? 1 : 2;
+       } else if (command.op == kCalibrate) {
+-        if (core.diagnostics(now).armed) report.command_result = 2;
+-        else { attitude.reset(); imu = {}; core.setImu(imu); }
++        if (core.diagnostics(now).armed || !motors.disabled()) report.command_result = 2;
++        else { attitude.calibrateStationary(); imu = {}; core.setImu(imu); }
+       } else report.command_result = 2;
+     }
+     if (due(now, next_hello, 500000)) {
+@@ -171,6 +177,8 @@
+     if (due(now, next_report, 100000)) {
+       report.stamp_us = now;
+       report.state = core.diagnostics(now); report.imu = imu;
++      report.gyro_bias=attitude.bias(); report.calibration_samples=attitude.calibrationSamples();
++      report.calibration_manual=attitude.manualCalibration();
+       report.motor = motors.diagnostics();
+       (void)xQueueOverwrite(report_queue, &report);
+     }
+@@ -178,7 +186,7 @@
+ }
+ 
+ struct TextBuffer {
+-  char bytes[2048]{}; std::size_t used = 0;
++  char bytes[4096]{}; std::size_t used = 0;
+   void append(const char* line) {
+     const auto n = std::strlen(line);
+     if (used+n <= sizeof bytes) { std::memcpy(bytes+used, line, n); used += n; }
+@@ -238,7 +246,7 @@
+     });
+     ArduinoOTA.onError([](ota_error_t error) {
+       Update.abort(); ota_uploading = false;
+-      ota_error = static_cast<int>(error);
++      if (ota_error<100) ota_error = static_cast<int>(error);
+       printLine("OTA failed; maintenance stays locked, retry or OTA_REBOOT\n");
+       flushConsoles();
+     });
+@@ -275,11 +283,21 @@
+   printLine(line);
+   const auto* running = esp_ota_get_running_partition();
+   const auto* next = esp_ota_get_next_update_partition(nullptr);
++  char elf_hash[65]{};
++  // The convenience API is configured to return only 16 hex characters on
++  // this Arduino build. Report the entire descriptor hash for OTA verification.
++  const auto* description=esp_ota_get_app_description();
++  for (unsigned i=0;i<32;++i)
++    std::snprintf(elf_hash+2*i,3,"%02x",description->app_elf_sha256[i]);
+   std::snprintf(line,sizeof line,
+-      "OTA supported=%d maintenance=%d off_confirmed=%d ready=%d port=3232 uploading=%d progress=%u error=%d running=%s next=%s build=%s_%s\n",
+-      std::strlen(HCR_OTA_PASSWORD_HASH)==32,maintenance_requested.load(),
++      "OTA supported=%d maintenance=%d off_confirmed=%d ready=%d port=3232 uploading=%d progress=%u error=%d running=%s next=%s elf_sha256=%s build=%s_%s\n",
++      std::strlen(HCR_OTA_PASSWORD_HASH)==32 && next,maintenance_requested.load(),
+       maintenance_ready.load(),ota_started && otaSafe(),ota_uploading,ota_percent,ota_error,
+-      running?running->label:"none",next?next->label:"none",__DATE__,__TIME__);
++      running?running->label:"none",next?next->label:"none",elf_hash,__DATE__,__TIME__);
++  printLine(line);
++  std::snprintf(line,sizeof line,"NET connected=%d ssid=%s ip=%s mac=%s hostname=lf-mcu.local rssi=%d\n",
++      WiFi.status()==WL_CONNECTED,WiFi.SSID().c_str(),WiFi.localIP().toString().c_str(),
++      WiFi.macAddress().c_str(),WiFi.RSSI());
+   printLine(line);
+   std::snprintf(line,sizeof line,
+       "IO rx_bytes=%u tx_bytes=%u rx0_level=%d imu_id=0x%02x imu_samples=%u imu_valid=%d "
+@@ -290,6 +308,11 @@
+       latest_report.raw_gyro[1],latest_report.raw_gyro[2]);
+   printLine(line);
+   const auto& motor = latest_report.motor;
++  std::snprintf(line,sizeof line,"IMU_CAL manual=%d samples=%u bias_rad_s=[%.5f %.5f %.5f] corrected_gyro=[%.5f %.5f %.5f]\n",
++      latest_report.calibration_manual,latest_report.calibration_samples,
++      latest_report.gyro_bias[0],latest_report.gyro_bias[1],latest_report.gyro_bias[2],
++      latest_report.imu.gyro[0],latest_report.imu.gyro[1],latest_report.imu.gyro[2]);
++  printLine(line);
+   for (unsigned side=0;side<2;++side) {
+     const auto& m=motor.leg[side];
+     std::snprintf(line,sizeof line,
+@@ -304,6 +327,11 @@
+       static_cast<unsigned long long>(m.stamp[2]?now-m.stamp[2]:999999),
+       m.kp_max[0],m.kp_max[1],m.kd_max[0],m.kd_max[1],m.errors,m.cycle_max_us);
+     printLine(line);
++    std::snprintf(line,sizeof line,
++      "MOTOR_DIAG side=%s local_fault=%u first_fail_id=%u inst=0x%02x addr=0x%02x bus_stage=%u recovered_writes=%u enable_readback=[%u %u %u]\n",
++      side?"R":"L",static_cast<unsigned>(m.error),m.failed_id,m.failed_instruction,m.failed_address,
++      static_cast<unsigned>(m.bus_error),m.recovered_writes,m.torque_enable[0],m.torque_enable[1],m.torque_enable[2]);
++    printLine(line);
+   }
+ }
+ 
+@@ -312,6 +340,7 @@
+   if (!std::strcmp(line, "STATUS") || !std::strcmp(line, "GET")) { status(); return; }
+   if (!std::strcmp(line, "HELP")) {
+     printLine("Commands: STATUS, ESTOP, CLEAR_FAULT, CAL_IMU, MOTOR_HOME, MOTOR_ZERO hipL hipR kneeL kneeR (rad). ARM/DISARM/RESET/VELOCITY use the LF local command socket.\n");
++    printLine("CAL_IMU: hold robot completely still, motors confirmed OFF; collect 1 s of stable samples. No automatic acceptance of large gyro bias at boot.\n");
+     printLine("OTA_BEGIN: lock motion until reboot, wait OFF then accept OTA. OTA_REBOOT: reboot only after confirmed OFF. STATUS: OTA readiness.\n");
+     return;
+   }
+@@ -441,7 +470,10 @@
+   }
+   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false);
+   WiFi.setAutoReconnect(true); WiFi.setHostname("lf-mcu");
+-#if defined(TAP_WIFI_STA_SSID) && defined(TAP_WIFI_STA_PASS)
++#if defined(HCR_WIFI_SSID) && defined(HCR_WIFI_PASSWORD)
++  // Dedicated deployment network: legacy ALT credentials cannot override it.
++  WiFi.begin(HCR_WIFI_SSID,HCR_WIFI_PASSWORD);
++#elif defined(TAP_WIFI_STA_SSID) && defined(TAP_WIFI_STA_PASS)
+   const char* ssid = TAP_WIFI_STA_SSID;
+   const char* password = TAP_WIFI_STA_PASS;
+ #if defined(TAP_WIFI_ALT_SSID) || defined(TAP_WIFI_ALT2_SSID)
+--- before/firmware/esp32/src/HybridGatewayCore.cpp
++++ after/firmware/esp32/src/HybridGatewayCore.cpp
+@@ -23,11 +23,13 @@
+ 
+ void GatewayCore::newSession(std::uint32_t epoch) noexcept {
+   stop();
+-  (void)motor_.resetFault();
+   epoch_ = epoch; tx_seq_ = rx_seq_ = applied_seq_ = target_seq_ = 0;
+   rx_stamp_ = deadline_ = 0;
+   connected_ = true; have_rx_ = reset_pending_ = false;
+-  fault_ = LocalFault::None;
++  // Reconnection may clear transport/session faults, never a local E-stop or
++  // driver fault. Those require an explicit CLEAR_FAULT after verified OFF.
++  if (fault_ != LocalFault::Estop && fault_ != LocalFault::Driver)
++    fault_ = LocalFault::None;
+   history_ = {}; history_next_ = 0; target_ = {}; applied_ = {};
+   remote_mode_ = remote_fault_ = 0;
+ }
+--- before/firmware/esp32/tests/bl_motor_tests.cpp
++++ after/firmware/esp32/tests/bl_motor_tests.cpp
+@@ -23,25 +23,31 @@
+   std::function<void()> hook;
+   int fail_id=0, fail_addr=-1, fail_inst=0;
+   bool corrupt=false;
++  bool drop_speed_write=false, ignore_off=false;
++  BusError error=BusError::None, injected_error=BusError::ReplyTimeout;
+   std::uint8_t status=0;
+   std::uint16_t gain_cap=5000;
+   std::uint32_t latency=50;
+   explicit FakeBus(std::uint64_t& time):clock(time) {}
+   std::uint64_t now() const noexcept override { return clock; }
++  BusError lastError() const noexcept override { return error; }
+   bool request(BusFormat fmt,std::uint8_t id,std::uint8_t inst,const std::uint8_t* p,
+                std::size_t n,std::size_t read,BusReply& out) noexcept override {
++    error=BusError::None;
+     std::array<std::uint8_t,48> tx{};
+     const auto size=motorPacket(id,inst,p,n,tx); assert(size);
+     frames.emplace_back(tx.begin(),tx.begin()+size); clock+=latency;
+     if (hook) { auto f=std::move(hook);hook=nullptr;f(); }
+     const unsigned j=id==2?0:id==3?1:2;
+     // The physical write can succeed while its reply is lost.
+-    if (inst==3 && n>=2 && p[0]==0x18) enabled[j]=p[1];
++    if (inst==3 && n>=2 && p[0]==0x18 && (p[1] || !ignore_off)) enabled[j]=p[1];
+     if (inst==3 && n==11 && p[0]==0x1a) {
+       position[j]=static_cast<std::int16_t>(p[5]|(std::uint16_t(p[6])<<8)); enabled[j]=true;
+     }
+-    if (inst==3 && n==3 && p[0]==0x20) wheel_rpm=static_cast<std::int16_t>(p[1]|(std::uint16_t(p[2])<<8));
+-    if (fail_id==id && (fail_addr<0 || (n && p[0]==fail_addr)) && (!fail_inst || fail_inst==inst)) return false;
++    if (inst==3 && n==3 && p[0]==0x20 && !drop_speed_write) wheel_rpm=static_cast<std::int16_t>(p[1]|(std::uint16_t(p[2])<<8));
++    if (fail_id==id && (fail_addr<0 || (n && p[0]==fail_addr)) && (!fail_inst || fail_inst==inst)) {
++      error=injected_error; return false;
++    }
+     const unsigned echo=fmt==BusFormat::Wheel?5:7, count=echo+4+read;
+     std::array<std::uint8_t,48> rx{};
+     rx[0]=rx[1]=255;rx[2]=id;rx[3]=count-4;rx[4]=status;
+@@ -49,6 +55,7 @@
+     rx[echo]=n+2;rx[echo+1]=inst;rx[echo+2]=n?p[0]:0;
+     auto* data=rx.data()+echo+3;
+     if (read && p[0]==0x10) data[0]=2;
++    if (read && p[0]==0x18) data[0]=enabled[j];
+     if (read && p[0]==0x32) { data[0]=0xff;data[1]=0xff;data[2]=gain_cap&255;data[3]=gain_cap>>8; }
+     if (read && p[0]==0x20) { data[0]=wheel_rpm&255;data[1]=(std::uint16_t(wheel_rpm)>>8)&255; }
+     if (read && p[0]==0x24) {
+@@ -57,7 +64,9 @@
+     }
+     unsigned sum=0;for(unsigned i=2;i<count-1;++i)sum+=rx[i];
+     rx[count-1]=~sum;if(corrupt)rx[count-1]^=1;
+-    return motorReply(fmt,id,inst,n?p[0]:0,n+2,rx.data(),count,read,out);
++    const bool ok=motorReply(fmt,id,inst,n?p[0]:0,n+2,rx.data(),count,read,out);
++    if (!ok) error=BusError::ReplyInvalid;
++    return ok;
+   }
+   const std::vector<std::uint8_t>& last(unsigned id,unsigned address) const {
+     for(auto i=frames.rbegin();i!=frames.rend();++i)
+@@ -155,7 +164,7 @@
+     while(r.now<now) {
+       r.now=std::min(now,r.now+500);r.workers();sensor();
+     }
+-    // RESET after E-stop preserves a valid home, as on the actual backend.
++    // LF RESET preserves home, but cannot clear the local E-stop latch.
+     sensor();WirePacket reply{};
+     if(op=='F') {
+       std::string hex;in>>hex;
+@@ -167,7 +176,7 @@
+       reply=core.telemetry(now);
+       if(reply.size){auto f=decode(reply);core.telemetrySent(hcr_u32(f.payload),f.seq,f.stamp_us);}
+     } else if(op=='C') {
+-      unsigned code;in>>code;f={};f.type=HCR_STATUS;f.size=16;f.seq=2;f.stamp_us=now;
++      unsigned code;in>>code;HcrFrame f{};f.type=HCR_STATUS;f.size=16;f.seq=2;f.stamp_us=now;
+       hcr_put32(f.payload,7);hcr_put32(f.payload+4,code==1?2:1);reply=core.receive(f,now);
+     } else if(op=='E')core.estop();
+     if(!reply.size)std::cout<<'-';
+@@ -239,14 +248,84 @@
+     r.now+=21000;r.workers();assert(r.motor.diagnostics().error==MotorError::Expired);
+     assert(r.motor.disabled());for(auto on:r.left.enabled)assert(!on);
+   }
+-  { // Lost wheel write response: fail BOTH buses, no ACK, including if write landed.
++  { // Lost speed-write reply is accepted ONLY after matching target readback.
+     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+     r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;
++    t.target[4]=3;++seq;
++    const auto a=r.run(t,seq);close(a.target[4],3.036873F);
++    assert(r.motor.diagnostics().error==MotorError::None);
++    assert(r.motor.diagnostics().leg[0].recovered_writes>0);
++  }
++  { // A dropped write must not be ACKed merely because present-state reads work.
++    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
++    r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.drop_speed_write=true;
++    t.target[4]=3;
+     ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
+-    assert(r.motor.diagnostics().error==MotorError::Bus && r.motor.disabled());
++    assert(r.motor.diagnostics().error==MotorError::Configuration && r.motor.disabled());
++    assert(r.motor.diagnostics().leg[0].bus_error==BusError::ReadbackMismatch);
+     for(auto on:r.left.enabled)assert(!on);
+   for(auto on:r.right.enabled)assert(!on);
+     r.left.fail_id=0;assert(r.motor.resetFault());r.idle();assert(!r.motor.ready());r.home();
++  }
++  { // Boot/disarmed must not write speed, including repeated OFF verification.
++    Rig r;for(unsigned i=0;i<200;++i)r.idle(); // >1 s, includes periodic verification
++    assert(r.motor.diagnostics().error==MotorError::None && r.motor.feedback(r.now).encoders_valid);
++    for (auto* bus:{&r.left,&r.right}) for (const auto& f:bus->frames)
++      assert(!(f[2]==1 && f[4]==3 && f[5]==0x20));
++    r.left.enabled[2]=true; r.motor.emergencyStop();
++    assert(!r.motor.disabled()); r.workers();
++    assert(r.motor.disabled() && !r.left.enabled[2]);
++    r.right.enabled[0]=true;r.now+=100000;r.workers();
++    assert(!r.right.enabled[0]);
++  }
++  { // An ACKed OFF which the driver did not apply cannot claim disabled.
++    Rig r;r.left.enabled[2]=true;r.left.ignore_off=true;r.motor.emergencyStop();r.workers();
++    assert(!r.motor.disabled() && r.left.enabled[2]);
++    const auto d=r.motor.diagnostics();
++    assert(d.leg[0].failed_id==1 && d.leg[0].failed_address==0x18);
++    assert(d.leg[0].torque_enable[2]==1 && d.leg[0].bus_error==BusError::ReadbackMismatch);
++    r.left.ignore_off=false;r.now+=2000;r.workers();assert(r.motor.disabled());
++  }
++  { // Maintenance verifies OFF once, then keeps bus quiet during flash writes.
++    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
++    r.motor.beginMaintenance();assert(!r.motor.disabled());r.workers();
++    assert(r.motor.disabled() && !r.motor.ready() && !r.motor.resetFault());
++    const auto left_frames=r.left.frames.size(),right_frames=r.right.frames.size();
++    for(unsigned i=0;i<200;++i)r.idle();
++    assert(r.left.frames.size()==left_frames && r.right.frames.size()==right_frames);
++    MotorApplied a{};assert(r.motor.apply(t,++seq,r.now+20000,r.now,a)==ApplyResult::Fault);
++    r.workers();assert(r.motor.disabled());
++    assert(!r.motor.captureHome({2.35706715F,2.35706715F,0,0},r.now));
++  }
++  { // Maintenance cannot freeze a false OFF state when readback failed.
++    Rig r;r.left.fail_id=1;r.left.fail_addr=0x18;r.left.fail_inst=2;
++    r.motor.beginMaintenance();r.workers();assert(!r.motor.disabled());
++    r.left.fail_id=0;r.now+=2000;r.workers();assert(r.motor.disabled());
++  }
++  { // Unknown OFF readback stays unknown even if the OFF write was ACKed.
++    Rig r;r.left.fail_id=1;r.left.fail_addr=0x18;r.left.fail_inst=2;
++    r.motor.emergencyStop();r.workers();
++    assert(!r.motor.disabled() && r.motor.diagnostics().leg[0].torque_enable[2]==255);
++  }
++  for (auto error:{BusError::EchoMismatch,BusError::ReplyInvalid,BusError::Tx}) {
++    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
++    r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.injected_error=error;
++    ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
++    assert(r.motor.diagnostics().error==MotorError::Bus && r.motor.disabled());
++    assert(r.motor.diagnostics().leg[0].bus_error==error);
++  }
++  { // Missing speed ACK AND missing readback are a bus fault, never an ACK.
++    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
++    r.left.fail_id=1;r.left.fail_addr=0x20; // both instructions fail
++    ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
++    assert(r.motor.diagnostics().error==MotorError::Bus && r.motor.disabled());
++    assert(r.motor.diagnostics().leg[0].failed_instruction==2);
++  }
++  { // Readback recovery cannot extend the original 20 ms batch deadline.
++    Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
++    r.left.fail_id=1;r.left.fail_addr=0x20;r.left.fail_inst=3;r.left.latency=6000;
++    ++seq;MotorApplied a{};r.motor.apply(t,seq,r.now+20000,r.now,a);r.workers();
++    assert(r.motor.diagnostics().error==MotorError::Expired && r.motor.disabled());
+   }
+   { // Lost enable reply must still trigger wheel OFF (enable may have arrived).
+     Rig r;r.home();auto t=r.target();MotorApplied a{};
+@@ -254,7 +333,7 @@
+     r.motor.apply(t,1,r.now+20000,r.now,a);r.workers();
+     assert(r.motor.diagnostics().error==MotorError::Bus);
+     assert(!r.left.enabled[2]); // OFF attempted even though its ACK also lost
+-    assert(!r.motor.disabled());r.left.fail_id=0;r.now+=2000;r.workers();assert(r.motor.disabled());
++    assert(r.motor.disabled()); // OFF readback succeeds despite missing write ACK
+   }
+   { // Stop during a MIT transaction: do not send the next joint, turn off all.
+     Rig r;r.home();auto t=r.target();unsigned seq=1;r.run(t,seq);
+--- before/firmware/esp32/tests/check_hybrid_gateway.py
++++ after/firmware/esp32/tests/check_hybrid_gateway.py
+@@ -79,9 +79,10 @@
+                 deliver(lf.command('RESET',now/1e6))
+                 assert lf.epoch != old_epoch and lf.mode == 'DISARMED'
+                 now += 5000
+-                _, state = telemetry()
+-                assert not state[0] and not state[1]
+-                print('PASS: estop/reset/reconnect remains disarmed')
++                t, state = telemetry()
++                assert not state[0] and not state[1] and state[2] == 4
++                assert t.flags & p.ESTOP and lf.mode == 'FAULT'
++                print('PASS: estop survives LF RESET/new epoch; local clear required')
+             proc.stdin.close()
+             assert proc.wait(timeout=5) == 0
+ 
+--- before/firmware/esp32/tests/hybrid_gateway_tests.cpp
++++ after/firmware/esp32/tests/hybrid_gateway_tests.cpp
+@@ -128,6 +128,34 @@
+     assert(out.valid && std::abs(out.gravity[0]-.5F)<1e-4F && std::abs(out.gyro[1])<1e-5F);
+     out = e.update({NAN,0,0},{0,0,0},502000); assert(!out.valid);
+   }
++  { // Regression: measured stationary bias cannot seed the conservative boot
++    // gate, but an explicitly requested stable calibration can estimate it.
++    GravityEstimator e; ImuObservation out;
++    const std::array<float,3> a{.28105F,.10703F,9.82711F}, w{.00809F,-.22010F,.01451F};
++    for(unsigned i=1;i<=2000;++i) out=e.update(a,w,i*2000);
++    assert(!out.valid);
++    e.calibrateStationary();
++    for(unsigned i=1;i<=499;++i) { out=e.update(a,w,i*2000);assert(!out.valid); }
++    out=e.update(a,w,1000000);assert(out.valid && !e.manualCalibration());
++    for(unsigned j=0;j<3;++j) assert(std::abs(out.gyro[j])<.00001F);
++    assert(std::abs(out.gravity[2]+.99953F)<.0001F);
++    out=e.update(a,w,1100000);assert(!out.valid && !e.manualCalibration());
++    for(unsigned i=1;i<=1000;++i) out=e.update(a,w,1100000+i*2000);
++    assert(!out.valid); // stale acquisition does not silently repeat manual authorization
++    e.calibrateStationary();
++    for(unsigned i=1;i<=1000;++i) out=e.update(a,{0,(i%2?-.22F:-.18F),0},i*2000);
++    assert(!out.valid); // gyro motion/noise
++    e.calibrateStationary();
++    for(unsigned i=1;i<=1000;++i) out=e.update({i%2?.3F:0,0,9.81F},w,i*2000);
++    assert(!out.valid); // tilt/acceleration changes despite near-1g norm
++    e.calibrateStationary();
++    for(unsigned i=1;i<=1000;++i) out=e.update(a,{0,.4F,0},i*2000);
++    assert(!out.valid); // excessive bias or rotation
++    e.calibrateStationary();
++    for(unsigned i=1;i<=500;++i) out=e.update(a,w,i*500);
++    assert(!out.valid); // calls alone do not count as one second
++    out=e.update({NAN,0,0},w,251000);assert(!out.valid && !e.manualCalibration());
++  }
+   { // No motors: honest validity, telemetry still works, no ARM bypass.
+     UnavailableMotors m; GatewayCore c(m);
+     c.receive(hello(), 100000); c.receive(statusFrame(1), 100000); sensors(c, 100000);
+@@ -187,8 +215,11 @@
+     TestMotors m; GatewayCore c(m); const auto ref = arm(c,100000);
+     m.fail_apply = true; c.receive(target(ref),100001); sensors(c,100500);
+     assert(c.diagnostics(100500).fault == LocalFault::Driver);
++    c.receive(hello(8),100501);
++    assert(c.diagnostics(100501).fault == LocalFault::Driver);
+     assert(c.diagnostics(100500).applied_seq == 0);
+-    TestMotors m2; GatewayCore c2(m2); arm(c2,100000);
++    TestMotors m2; GatewayCore c2(m2); const auto ref2=arm(c2,100000);
++    c2.receive(target(ref2),100001); // sensor failure must be tested while armed
+     m2.bad_feedback = true; sensors(c2,100500);
+     assert(c2.diagnostics(100500).fault == LocalFault::Sensors);
+     auto t = decode(c2.telemetry(100500));
+@@ -207,8 +238,8 @@
+   }
+   { // Timestamp rollback and seq wrap across all LF frame types.
+     TestMotors m; GatewayCore c(m); c.receive(hello(7,0xfffffffeU),100000);
+-    auto s = statusFrame(1,0xffffffffU); s.stamp_us = 5000000000ULL; c.receive(s,100000);
+-    sensors(c,100000); auto ref = sentTelemetry(c,100000); c.receive(statusFrame(2,1),100000);
++    auto s = statusFrame(2,0xffffffffU); s.stamp_us = 5000000000ULL; c.receive(s,100000);
++    sensors(c,100000); auto ref = sentTelemetry(c,100000);
+     auto t = target(ref,0); t.stamp_us = 5000000001ULL; c.receive(t,100001); sensors(c,100500);
+     assert(m.applications == 1);
+     t.seq = 1; t.stamp_us = 1; c.receive(t,119999); sensors(c,120001);

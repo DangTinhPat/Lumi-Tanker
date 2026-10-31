@@ -1,0 +1,25 @@
+{
+  "epoch": 2142641467,
+  "mode": "DISARMED",
+  "phase": "Idle",
+  "fault_code": 0,
+  "reason": "",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 0,
+    "telemetry_received": 0,
+    "rejected": 0,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "link": true,
+  "last_telemetry_flags": null,
+  "transport": "serial",
+  "parser_errors": 0,
+  "max_handler_ms": 0.22224999997888517,
+  "max_telemetry_ms": 0.0,
+  "updated_monotonic": 643.996588057
+}

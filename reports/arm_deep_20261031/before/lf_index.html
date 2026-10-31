@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#10151d">
+  <title>RB Hybrid Control</title>
+  <style>
+    :root{color-scheme:dark;--bg:#10151d;--panel:#19212c;--line:#293544;--text:#edf3fa;--muted:#9aaabd;--green:#63d7a0;--amber:#ffc66d;--red:#ff7379;--blue:#79b8ff}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0,#1c2c3c 0,transparent 42%),var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh}
+    main{max-width:980px;margin:auto;padding:28px 18px 48px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.brand{font-weight:750;letter-spacing:.02em;font-size:18px}.brand span{color:var(--blue)}.connection{color:var(--muted);font-size:13px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#697686;margin-right:8px}.dot.on{background:var(--green);box-shadow:0 0 12px #63d7a077}.dot.off{background:var(--red)}
+    h1{font-size:clamp(26px,5vw,38px);line-height:1.1;margin:0 0 8px}.sub{margin:0;color:var(--muted)}.grid{display:grid;grid-template-columns:1.25fr .75fr;gap:14px;margin-top:24px}.card{background:linear-gradient(145deg,#1b2531,#171e28);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 12px 36px #0002}.statusline{display:flex;align-items:center;justify-content:space-between;gap:12px}.mode{font-size:26px;font-weight:720}.pill{border:1px solid var(--line);border-radius:99px;padding:5px 10px;color:var(--muted);font-size:12px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:22px}.stat{padding:13px;background:#101720;border:1px solid #222e3b;border-radius:12px}.label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.value{font-weight:650;font-variant-numeric:tabular-nums}.fault{margin-top:15px;color:var(--amber);min-height:22px}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}.btn{border:1px solid var(--line);border-radius:11px;padding:13px 12px;font-size:15px;font-weight:680;color:var(--text);background:#253242;cursor:pointer;transition:.15s}.btn:hover{filter:brightness(1.15)}.btn:disabled{opacity:.42;cursor:not-allowed}.arm{background:#176943;border-color:#247d54}.stop{background:#8a3039;border-color:#ad414b}.reset{background:#293746}.estop{grid-column:1/-1;background:#571f28;border:1px solid #a33c4a;color:#ffb6ba}.note{font-size:12px;color:var(--muted);margin:14px 0 0}.section-title{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;margin:0 0 14px}.kv{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #26313e}.kv:last-child{border:0}.kv span:first-child{color:var(--muted)}.keybox{display:flex;gap:8px;margin-top:16px}.keybox input{flex:1;min-width:0;background:#101720;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}.keybox button{background:#273648;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:0 14px}.toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:#263444;border:1px solid #3b4d60;border-radius:12px;padding:12px 16px;transition:.2s;max-width:calc(100% - 32px)}.toast.show{opacity:1;transform:translate(-50%,0)}footer{color:#77879a;font-size:12px;margin-top:18px}@media(max-width:700px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.top{align-items:flex-start}}
+  </style>
+</head>
+<body><main>
+  <header class="top"><div class="brand"><span>RB</span> / HYBRID CONTROL</div><div class="connection"><i id="dot" class="dot"></i><span id="connection">Đang kết nối</span></div></header>
+  <h1>Bảng điều khiển</h1><p class="sub">Runtime hybrid trên Luckfox · giám sát và gửi lệnh vận hành</p>
+  <div class="grid">
+    <section class="card">
+      <p class="section-title">Trạng thái runtime</p>
+      <div class="statusline"><div id="mode" class="mode">Đang đọc…</div><div id="transport" class="pill">—</div></div>
+      <div class="stats">
+        <div class="stat"><span class="label">Liên kết MCU</span><span id="link" class="value">—</span></div>
+        <div class="stat"><span class="label">Telemetry nhận</span><span id="telemetry" class="value">—</span></div>
+        <div class="stat"><span class="label">Inference</span><span id="inferences" class="value">—</span></div>
+        <div class="stat"><span class="label">Pha hybrid</span><span id="phase" class="value">—</span></div>
+        <div class="stat"><span class="label">Fault code</span><span id="fault" class="value">—</span></div>
+        <div class="stat"><span class="label">Inference lớn nhất</span><span id="latency" class="value">—</span></div>
+      </div>
+      <div id="reason" class="fault"></div>
+    </section>
+    <section class="card">
+      <p class="section-title">Lệnh vận hành</p>
+      <div class="actions">
+        <button class="btn arm" data-command="ARM">ARM · Bắt đầu</button>
+        <button class="btn stop" data-command="DISARM">DISARM · Dừng</button>
+        <button class="btn reset" data-command="RESET">RESET · Khởi tạo lại</button>
+        <button class="btn estop" data-command="ESTOP">E-STOP · Dừng khẩn cấp</button>
+      </div>
+      <p class="note">ARM chỉ là yêu cầu. LF và ESP32 vẫn kiểm tra liên kết, cảm biến, tư thế home và trạng thái driver. E-STOP qua mạng không thay thế nút dừng cứng.</p>
+      <div class="keybox"><input id="token" type="password" autocomplete="off" placeholder="Access token từ LF"><button id="save">Lưu</button></div>
+      <p class="note">Token lưu trong trình duyệt này. Lấy token bằng SSH từ file cấu hình web trên LF.</p>
+    </section>
+    <section class="card">
+      <p class="section-title">Kết nối và sức khỏe</p>
+      <div class="kv"><span>Runtime</span><b id="runtime">—</b></div>
+      <div class="kv"><span>Epoch</span><b id="epoch">—</b></div>
+      <div class="kv"><span>Policy steps</span><b id="steps">—</b></div>
+      <div class="kv"><span>Miss deadline</span><b id="misses">—</b></div>
+      <div class="kv"><span>Parser errors</span><b id="parser">—</b></div>
+      <div class="kv"><span>Cập nhật trạng thái</span><b id="age">—</b></div>
+    </section>
+  </div>
+  <footer>Trang cập nhật trạng thái mỗi giây. Khi runtime offline, nút lệnh bị khóa.</footer>
+</main><div id="toast" class="toast"></div>
+<script>
+const $=id=>document.getElementById(id), tokenKey='rb-hybrid-token', names={WAIT_LINK:'Chờ liên kết',DISARMED:'Đã disarm',HOME:'Giữ tư thế home',STANDUP:'Đứng dậy',WARMUP:'Khởi động model',MODEL:'Model điều khiển',FAULT:'Lỗi',OFFLINE:'Runtime offline'};
+$('token').value=localStorage.getItem(tokenKey)||'';$('save').onclick=()=>{localStorage.setItem(tokenKey,$('token').value.trim());toast('Đã lưu token trong trình duyệt');refresh()};
+function toast(message){const t=$('toast');t.textContent=message;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
+async function command(command){if(command==='ESTOP'&&!confirm('Gửi yêu cầu E-STOP tới runtime LF?'))return;try{const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+$('token').value.trim()},body:JSON.stringify({command})});const d=await r.json();toast(d.accepted?`${command}: yêu cầu đã nhận (${names[d.mode]||d.mode})`:d.error||d.fault||`${command} bị từ chối`);await refresh()}catch(e){toast('Không gửi được lệnh: '+e.message)}}
+document.querySelectorAll('[data-command]').forEach(b=>b.onclick=()=>command(b.dataset.command));
+async function refresh(){try{const r=await fetch('/api/status',{headers:{'Authorization':'Bearer '+$('token').value.trim()},cache:'no-store'});if(r.status===401){$('connection').textContent='Cần access token';$('dot').className='dot off';document.querySelectorAll('[data-command]').forEach(b=>b.disabled=true);return}const s=await r.json();const live=!!s.runtime_online;$('dot').className='dot '+(live?'on':'off');$('connection').textContent=live?'Đang trực tuyến':'Runtime không hoạt động';$('mode').textContent=names[s.mode]||s.mode||'Offline';$('transport').textContent=s.transport||'—';$('link').textContent=s.mode==='WAIT_LINK'?'Chưa bắt tay':(s.mode==='OFFLINE'?'—':'Đã bắt tay');$('telemetry').textContent=s.counters?.telemetry_received??s.counters?.telemetry??'—';$('inferences').textContent=s.counters?.inferences??'—';$('phase').textContent=s.phase||'—';$('fault').textContent=s.fault_code??'—';$('latency').textContent=(s.inference_max_ms??0).toFixed?.(2)+' ms';$('reason').textContent=s.reason||'';$('runtime').textContent=live?'Online':'Offline';$('epoch').textContent=s.epoch??'—';$('steps').textContent=s.policy_steps??'—';$('misses').textContent=s.consecutive_deadline_misses??'—';$('parser').textContent=s.parser_errors??'—';$('age').textContent=s.status_age_s===undefined?'—':s.status_age_s.toFixed(1)+' s';document.querySelectorAll('[data-command]').forEach(b=>b.disabled=!live)}catch(e){$('connection').textContent='Không kết nối được';$('dot').className='dot off';document.querySelectorAll('[data-command]').forEach(b=>b.disabled=true)}}
+refresh();setInterval(refresh,1000);
+</script></body></html>

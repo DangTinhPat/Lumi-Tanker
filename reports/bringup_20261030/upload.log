@@ -1,0 +1,110 @@
+Processing esp32-s3-hybrid-mcu (platform: platformio/espressif32@7.1.3; board: 4d_systems_esp32s3_gen4_r8n16; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/4d_systems_esp32s3_gen4_r8n16.html
+PLATFORM: Espressif 32 (7.1.3) > 4D Systems GEN4-ESP32 16MB (ESP32S3-R8N16)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 16MB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, esp-bridge, esp-builtin, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - framework-arduinoespressif32 @ 4.20017.260907+sha.dcc1105b 
+ - tool-esptoolpy @ 2.41100.260830 (4.11.0) 
+ - tool-mkfatfs @ 2.0.1 
+ - tool-mklittlefs @ 1.203.210628 (2.3) 
+ - tool-mkspiffs @ 2.230.0 (2.30) 
+ - tool-openocd-esp32 @ 2.1100.20220706 (11.0) 
+ - toolchain-riscv32-esp @ 8.4.0+2021r2-patch5 
+ - toolchain-xtensa-esp32s3 @ 8.4.0+2021r2-patch5
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 33 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- ESPmDNS @ 2.0.0
+|-- WiFi @ 2.0.0
+|-- SPI @ 2.0.0
+Building in release mode
+Retrieving maximum program size .pio/build/esp32-s3-hybrid-mcu/firmware.elf
+Checking size .pio/build/esp32-s3-hybrid-mcu/firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  16.4% (used 53812 bytes from 327680 bytes)
+Flash: [=         ]  11.7% (used 769445 bytes from 6553600 bytes)
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, esp-bridge, esp-builtin, esp-prog, espota, esptool, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa
+CURRENT: upload_protocol = esptool
+Looking for upload port...
+Using manually specified: /dev/ttyUSB0
+Uploading .pio/build/esp32-s3-hybrid-mcu/firmware.bin
+esptool.py v4.11.0
+Serial port /dev/ttyUSB0
+Connecting....
+Chip is ESP32-S3 (QFN56) (revision v0.1)
+Features: WiFi, BLE
+Crystal is 40MHz
+MAC: 70:04:1d:a8:ca:fc
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00003fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Flash will be erased from 0x0000e000 to 0x0000ffff...
+Flash will be erased from 0x00010000 to 0x000cbfff...
+SHA digest in image updated
+Compressed 15104 bytes to 10429...
+Writing at 0x00000000... (100 %)
+Wrote 15104 bytes (10429 compressed) at 0x00000000 in 0.4 seconds (effective 343.8 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 146...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (146 compressed) at 0x00008000 in 0.0 seconds (effective 939.4 kbit/s)...
+Hash of data verified.
+Compressed 8192 bytes to 47...
+Writing at 0x0000e000... (100 %)
+Wrote 8192 bytes (47 compressed) at 0x0000e000 in 0.0 seconds (effective 1354.6 kbit/s)...
+Hash of data verified.
+Compressed 769808 bytes to 514665...
+Writing at 0x00010000... (3 %)
+Writing at 0x0001b880... (6 %)
+Writing at 0x000274cd... (9 %)
+Writing at 0x00030315... (12 %)
+Writing at 0x000359c0... (15 %)
+Writing at 0x0003a94c... (18 %)
+Writing at 0x00040463... (21 %)
+Writing at 0x000459ab... (25 %)
+Writing at 0x0004af92... (28 %)
+Writing at 0x00050023... (31 %)
+Writing at 0x00054e35... (34 %)
+Writing at 0x00059da2... (37 %)
+Writing at 0x0005ec10... (40 %)
+Writing at 0x00063b08... (43 %)
+Writing at 0x00068a66... (46 %)
+Writing at 0x0006de1b... (50 %)
+Writing at 0x00072e59... (53 %)
+Writing at 0x0007877b... (56 %)
+Writing at 0x0007dbf3... (59 %)
+Writing at 0x000829ec... (62 %)
+Writing at 0x00087ae0... (65 %)
+Writing at 0x0008cbe7... (68 %)
+Writing at 0x00091fa3... (71 %)
+Writing at 0x0009744d... (75 %)
+Writing at 0x0009d225... (78 %)
+Writing at 0x000a2657... (81 %)
+Writing at 0x000a7d5a... (84 %)
+Writing at 0x000b09d3... (87 %)
+Writing at 0x000b8f8f... (90 %)
+Writing at 0x000be4f1... (93 %)
+Writing at 0x000c3d69... (96 %)
+Writing at 0x000c98a9... (100 %)
+Wrote 769808 bytes (514665 compressed) at 0x00010000 in 12.6 seconds (effective 489.4 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+========================= [SUCCESS] Took 17.01 seconds =========================
+
+Environment          Status    Duration
+-------------------  --------  ------------
+esp32-s3-hybrid-mcu  SUCCESS   00:00:17.007
+========================= 1 succeeded in 00:00:17.007 =========================

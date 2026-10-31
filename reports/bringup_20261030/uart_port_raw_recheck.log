@@ -1,0 +1,5 @@
+{"tx_bytes": 288, "rx_bytes": 576, "types": {"1": 16}, "crc_errors": 0, "examples": [{"type": 1, "seq": 0, "payload_hex": "00000000c800640048435231"}, {"type": 1, "seq": 0, "payload_hex": "00000000c800640048435231"}, {"type": 1, "seq": 0, "payload_hex": "00000000c800640048435231"}], "baud": 4103, "enabled_targets_sent": 0}
+serinfo:1.0 driver revision:
+1: uart:16550A mmio:0xFF4B0000 irq:36 tx:1289 rx:711 RTS|CTS|DTR
+2: uart:16550A mmio:0xFF4C0000 irq:37 tx:1908 rx:1656 RTS|DTR
+cat: can't open '/sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins': No such file or directory

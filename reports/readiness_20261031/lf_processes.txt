@@ -1,0 +1,150 @@
+{
+  "epoch": 3694660816,
+  "mode": "DISARMED",
+  "phase": "Idle",
+  "fault_code": 0,
+  "reason": "",
+  "policy_steps": 0,
+  "handoff_us": null,
+  "inference_max_ms": 0.0,
+  "consecutive_deadline_misses": 0,
+  "counters": {
+    "telemetry": 96629,
+    "telemetry_received": 96629,
+    "rejected": 0,
+    "inferences": 0,
+    "deadline_misses": 0
+  },
+  "link": true,
+  "last_telemetry_flags": 7,
+  "transport": "serial",
+  "parser_errors": 0,
+  "max_handler_ms": 2.2819999999228457,
+  "max_telemetry_ms": 2.2819999999228457,
+  "updated_monotonic": 1572.218781398
+}
+ PID TTY          TIME CMD
+   1 ?        00:00:00 init
+   2 ?        00:00:00 kthreadd
+   6 ?        00:00:00 mm_percpu_wq
+   7 ?        00:00:01 ksoftirqd/0
+   8 ?        00:00:00 kdevtmpfs
+   9 ?        00:00:00 oom_reaper
+  10 ?        00:00:00 writeback
+  11 ?        00:00:00 kcompactd0
+  12 ?        00:00:00 ksmd
+  39 ?        00:00:00 kblockd
+  40 ?        00:00:00 devfreq_wq
+  41 ?        00:00:00 watchdogd
+  43 ?        00:00:00 rpciod
+  44 ?        00:00:00 kworker/u3:0-hci0
+  45 ?        00:00:00 xprtiod
+  46 ?        00:00:00 irq/24-rockchip
+  47 ?        00:00:00 kswapd0
+  48 ?        00:00:00 nfsiod
+  50 ?        00:00:00 irq/63-rockchip
+  51 ?        00:00:00 irq/64-rockchip
+  52 ?        00:00:00 irq/65-rockchip
+  54 ?        00:00:00 hwrng
+  55 ?        00:00:00 stmmac_wq
+  57 ?        00:00:00 irq/21-RTC alar
+  60 ?        00:00:00 krfcommd
+  62 ?        00:00:00 card0-crtc0
+  63 ?        00:00:00 mmc_complete
+  64 ?        00:00:00 kworker/0:1H-kblockd
+  65 ?        00:00:00 jbd2/mmcblk0p7-
+  66 ?        00:00:00 ext4-rsv-conver
+  84 ?        00:00:00 syslogd
+  88 ?        00:00:00 klogd
+  99 ?        00:00:00 udevd
+ 115 ?        00:00:00 kworker/0:3H-kblockd
+ 141 ?        00:00:00 jbd2/mmcblk0p6-
+ 142 ?        00:00:00 ext4-rsv-conver
+ 149 ?        00:00:00 jbd2/mmcblk0p5-
+ 150 ?        00:00:00 ext4-rsv-conver
+ 170 ?        00:00:00 irq/51-ffa70000
+ 179 ?        00:00:00 bluetoothd
+ 223 ?        00:00:00 ntpd
+ 251 ?        00:00:00 irq/39-rga2
+ 253 ?        00:00:11 queue_work0
+ 254 ?        00:00:00 queue_work1
+ 256 ?        00:00:00 irq/50-ffa60000
+ 257 ?        00:00:54 vcodec_thread_0
+ 259 ?        00:00:00 rknpu_power_off
+ 264 ?        00:00:00 vlog
+ 265 ?        00:00:00 valloc
+ 266 ?        00:00:00 vsys
+ 267 ?        00:00:00 vrga_0
+ 268 ?        00:00:00 vrga_1
+ 269 ?        00:00:00 venc
+ 270 ?        00:00:01 rkisp-vir0
+ 271 ?        00:00:00 vpss
+ 272 ?        00:00:00 vrgn
+ 273 ?        00:00:00 vmcu
+ 275 ?        00:00:00 irq/56-rve
+ 276 ?        00:00:00 sshd
+ 294 ?        00:00:00 telnetd
+ 355 ?        00:00:00 cfg80211
+ 371 ?        00:00:00 kworker/0:0-events
+ 417 ?        00:00:00 adbd
+ 423 ?        00:00:00 aicwf_bustx_thr
+ 424 ?        00:00:00 aicwf_busrx_thr
+ 425 ?        00:00:00 aicwf_pwrctl
+ 426 ?        00:00:00 aicwf_bustx_thr
+ 427 ?        00:00:02 aicwf_busrx_thr
+ 428 ?        00:00:00 cmd_wq
+ 429 ?        00:00:00 apmStaloss_wq
+ 433 ?        00:00:00 irq/66-dwc3
+ 448 ?        00:02:12 rkipc
+ 451 ?        00:00:00 rkwifi_server
+ 537 ?        00:00:00 wpa_supplicant
+ 558 ?        00:00:08 kworker/u2:2-events_unbound
+ 670 ?        00:00:00 hciattach
+ 671 ?        00:00:00 kworker/u3:2-hci0
+ 734 ?        00:00:01 kworker/0:4-events_freezable
+ 986 ?        00:00:01 kworker/0:2-events_freezable_power_
+ 990 ?        00:00:00 sshd
+1068 ?        00:00:00 sh
+1079 ?        00:00:00 ps
+1272 ?        00:00:00 luckfox_switch_
+1298 ?        00:00:00 S99usb0config
+1423 ?        00:00:00 sshd
+1451 ?        00:00:00 udhcpc
+1974 ?        00:00:03 kworker/u2:1-events_unbound
+2669 ?        00:04:00 python3
+2682 ?        00:00:00 hybrid_logic
+2684 ?        00:00:00 kworker/0:3-events_freezable
+2756 ?        00:00:01 kworker/0:5-events_freezable
+2930 ?        00:00:10 kworker/u2:3-events_unbound
+3316 ?        00:00:03 kworker/u2:0-events_unbound
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 251640586, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 245.326241489}
+{"event": "mode", "epoch": 251640586, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.23975000001996705, "max_telemetry_ms": 0.0, "updated_monotonic": 245.331512489}
+{"event": "mode", "epoch": 251640586, "mode": "FAULT", "phase": "Idle", "fault_code": 3, "reason": "driver_fault", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.6037500000104501, "max_telemetry_ms": 0.6037500000104501, "updated_monotonic": 245.338200989}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 178508929, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 307.648869018}
+{"event": "mode", "epoch": 178508929, "mode": "FAULT", "phase": "Idle", "fault_code": 3, "reason": "driver_fault", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.5416249999825595, "max_telemetry_ms": 0.5416249999825595, "updated_monotonic": 307.658157726}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 3509172407, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 356.195368499}
+{"event": "mode", "epoch": 3509172407, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.29954199999338016, "max_telemetry_ms": 0.0, "updated_monotonic": 356.20036854}
+{"event": "mode", "epoch": 3509172407, "mode": "FAULT", "phase": "Idle", "fault_code": 3, "reason": "driver_fault", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.6186250000155269, "max_telemetry_ms": 0.6186250000155269, "updated_monotonic": 356.205262415}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 2344049924, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": false, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 380.392302051}
+{"event": "mode", "epoch": 2344049924, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.22720900000194888, "max_telemetry_ms": 0.0, "updated_monotonic": 380.397578592}
+{"event": "mode", "epoch": 2344049924, "mode": "FAULT", "phase": "Idle", "fault_code": 3, "reason": "driver_fault", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 1, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": 64, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.6349579999778143, "max_telemetry_ms": 0.6349579999778143, "updated_monotonic": 380.403171009}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 3331606416, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": false, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 488.281988435}
+{"event": "mode", "epoch": 3331606416, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.2709589999767559, "max_telemetry_ms": 0.0, "updated_monotonic": 488.287450185}
+{"event": "mode", "epoch": 3331606416, "mode": "FAULT", "phase": "Idle", "fault_code": 2, "reason": "IMU/encoder/calibration validity missing", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 1, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": 2, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.8271670000112863, "max_telemetry_ms": 0.8271670000112863, "updated_monotonic": 488.29256106}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 1385112575, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": false, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 732.654550548}
+{"event": "mode", "epoch": 1385112575, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.2642499999865322, "max_telemetry_ms": 0.0, "updated_monotonic": 732.660116131}
+{"event": "mode", "epoch": 1385112575, "mode": "FAULT", "phase": "Idle", "fault_code": 2, "reason": "IMU/encoder/calibration validity missing", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 2, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": 2, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.7259579999754351, "max_telemetry_ms": 0.7259579999754351, "updated_monotonic": 732.666111923}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 3845354923, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": false, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 930.910777808}
+{"event": "mode", "epoch": 3845354923, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.24179199999707635, "max_telemetry_ms": 0.0, "updated_monotonic": 930.915953141}
+{"event": "mode", "epoch": 3845354923, "mode": "FAULT", "phase": "Idle", "fault_code": 2, "reason": "IMU/encoder/calibration validity missing", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 1, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": 2, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.7373340000640383, "max_telemetry_ms": 0.7373340000640383, "updated_monotonic": 930.921169016}
+{"event": "ready", "backend": "rknn", "transport": "serial", "web": "http://127.0.0.1:8080", "token_file": "/tmp/rb-hybrid-web.token"}
+{"event": "mode", "epoch": 3694660816, "mode": "WAIT_LINK", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": false, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.0, "max_telemetry_ms": 0.0, "updated_monotonic": 1088.794257715}
+{"event": "mode", "epoch": 3694660816, "mode": "DISARMED", "phase": "Idle", "fault_code": 0, "reason": "", "policy_steps": 0, "handoff_us": null, "inference_max_ms": 0.0, "consecutive_deadline_misses": 0, "counters": {"telemetry": 0, "telemetry_received": 0, "rejected": 0, "inferences": 0, "deadline_misses": 0}, "link": true, "last_telemetry_flags": null, "transport": "serial", "parser_errors": 0, "max_handler_ms": 0.24295799994433764, "max_telemetry_ms": 0.0, "updated_monotonic": 1088.79956634}
+

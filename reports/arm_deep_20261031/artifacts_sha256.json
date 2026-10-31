@@ -1,0 +1,8 @@
+{
+  "firmware/esp32/src/EspBlMotor.cpp": "1bb466b43e12e54756449693e232b1c7373984904706f0140d946f2a72439964",
+  "firmware/esp32/src/BlMotor.cpp": "773f741f1da395cff63009cbda265540d112fb8eb3e607f36b18feb93e51734e",
+  "firmware/esp32/src/HybridGatewayApp.cpp": "0ff74bbb9ea8b33ae2e84a9e56bde246d67b83d1219d13f0604947a510428ea7",
+  "firmware/esp32/include/tap_hw/BlMotor.hpp": "217af43b62d65ac72e2d076238a829881e104dce3f19eb9c9871857758e1b268",
+  "firmware/esp32/include/tap_hw/EspBlMotor.hpp": "c59a034fa8eadc5f257ffca93333b49c5eafd7e8439d093595704c2ce409db05",
+  ".pio/build/esp32-s3-hybrid-mcu/firmware.bin": "ebb2a40386f07e49e16a56b4b4e4e7a1ce40bff5fc208d5307d4261b7ab73d85"
+}

@@ -1,0 +1,2 @@
+before: boot_speed_writes=1 estop_survives_hello=0 calibrated_imu_valid=0
+after: boot_speed_writes=0 estop_survives_hello=1 calibrated_imu_valid=1

@@ -1,0 +1,5 @@
+PASS: GatewayCore -> async two-bus backend -> applied ACK; nominal first ACK 10400 us
+PASS: golden codec, calibrated side/sign/units, crank FF, quantized applied targets, startup, both-bus ACK, unwrap/freshness, range, expiry, cancellation, write/enable loss, reset, gain/status/CRC faults
+PASS: real LF Core + MCU core, 2700 telemetry exchanges, HOME/STANDUP/WARMUP/MODEL and applied ACK
+PASS: estop survives LF RESET/new epoch; local clear required
+PASS: LF Core + actual BL motor backend/codec, two mock driver buses, 2700 cycles

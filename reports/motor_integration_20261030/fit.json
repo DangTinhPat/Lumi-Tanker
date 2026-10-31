@@ -1,0 +1,86 @@
+{
+  "gui": {
+    "LEGS": [
+      [
+        "Chân 1",
+        "UART1 · GPIO17"
+      ],
+      [
+        "Chân 2",
+        "UART2 · GPIO15"
+      ]
+    ],
+    "JOINTS": [
+      [
+        "Bánh xe",
+        1,
+        true
+      ],
+      [
+        "Gối",
+        3,
+        false
+      ],
+      [
+        "Đùi",
+        2,
+        false
+      ]
+    ],
+    "WHEEL_MAX_RPM": 950,
+    "DEFAULT_JOINT_KP": 10.0,
+    "DEFAULT_JOINT_KD": 0.7
+  },
+  "gui_invert": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": false,
+    "4": false,
+    "5": false
+  },
+  "mapping_authority": "User final correction: UART2 LEFT, UART1 RIGHT",
+  "left": {
+    "uart": 2,
+    "gpio": 15,
+    "hip": {
+      "id": 2,
+      "sign": 1
+    },
+    "crank": {
+      "id": 3,
+      "sign": -1
+    },
+    "wheel": {
+      "id": 1,
+      "sign": 1
+    }
+  },
+  "right": {
+    "uart": 1,
+    "gpio": 17,
+    "hip": {
+      "id": 2,
+      "sign": -1
+    },
+    "crank": {
+      "id": 3,
+      "sign": 1
+    },
+    "wheel": {
+      "id": 1,
+      "sign": -1
+    }
+  },
+  "software_boundary_fit": true,
+  "physical_model_coordinate_verified_this_run": false,
+  "servo_response_equivalent_to_simulation": false,
+  "gain_choice": "Explicit GUI-requested 10/.7 in separate HOME/RECOVERY/POLICY config; fault if driver max is lower",
+  "board_flashed": false,
+  "physical_uart_or_motor_tested": false,
+  "sources_sha256": {
+    "/home/dvt/BL4012e/3in1/gui.py": "228ff2a3888bbb1c24abbb368f075ed9ebab095a34f42d4e9333f7182c16ff19",
+    "/home/dvt/BL4012e/3in1/src/main.c": "40f22b2f687ac4035bb67af8f9d1298aec157bc4765a2c0cc627b8bf5da61d67",
+    "/home/dvt/.config/3in1_gui.json": "f3028d78152a6ff40bb6cef083201a89f0bc0315d0bc456ff82553b3b2171f31"
+  }
+}
